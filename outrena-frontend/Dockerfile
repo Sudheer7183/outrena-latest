@@ -4,7 +4,7 @@
 # Stage 2: runtime — nginx:alpine serves the SPA + proxies /api to backend
 
 # ── Stage 1: builder ──────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:25-alpine AS builder
 
 WORKDIR /build
 
