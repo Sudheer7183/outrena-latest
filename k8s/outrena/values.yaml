@@ -1,0 +1,399 @@
+# values.yaml — OUTRENA Helm chart defaults.
+#
+# Default values target a STAGING-LIKE cluster (1-2 replicas, moderate
+# resources). Override per environment via:
+#   helm install outrena ./k8s/outrena -f k8s/outrena/values-prod.yaml
+#
+# Cross-references:
+#   - §13.1 of the migration doc defines the canonical env-var list
+#   - §14 Risk #17 (tenant isolation) drives the networkPolicy defaults
+#   - §16.3 (blue/green cutover) — values-prod.yaml uses 3+ replicas for
+#     zero-downtime rolling updates
+
+# ── Global ────────────────────────────────────────────────────────────────────
+global:
+  # environment is propagated to every Deployment via ENVIRONMENT env var.
+  # Must be one of: development | staging | production.
+  environment: staging
+  # imageTag is the docker tag for outrena/* images. Set per-env in CI.
+  imageTag: "1.0.0"
+  # imagePullPolicy: IfNotPresent in prod, Always in dev (override there).
+  imagePullPolicy: IfNotPresent
+  # imagePullSecrets — populated by the cluster operator via:
+  #   kubectl create secret docker-registry regcred \
+  #     --docker-server=ghcr.io \
+  #     --docker-username=... --docker-password=...
+  imagePullSecrets: []
+    # - name: regcred
+  # baseDomain drives KEYCLOAK_BASE_URL, ALLOWED_ORIGINS, ingress hosts.
+  baseDomain: outrena.com
+  # storageProvider selects the S3-compatible backend for CSV/collateral.
+  # s3 (AWS), azure-blob (Azure), local (single-node dev only).
+  storageProvider: s3
+
+# ── Backend (FastAPI / uvicorn) ───────────────────────────────────────────────
+backend:
+  name: backend
+  image:
+    repository: ghcr.io/outrena/backend
+    # tag defaults to global.imageTag; override here for canary splits.
+    tag: ""
+    pullPolicy: ""
+  replicas: 2
+  # autoscaling overrides replicas as a floor (minReplicas).
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 65
+    # targetMemoryUtilizationPercentage: 80  # optional
+  # PodDisruptionBudget — keep at least 1 backend pod during node drains.
+  pdb:
+    enabled: true
+    minAvailable: 1
+  # resources — sized for FastAPI + asyncpg + uvicorn. Bump on heavy LLM use.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  # env — appended to the configmap-derived env. Use for per-deploy overrides.
+  env: {}
+  # secrets — names of existing Kubernetes Secrets to mount as env.
+  # The chart does NOT create these (operators provision via external-secrets /
+  # sealed-secrets / kubectl). Required keys:
+  #   DATABASE_URL, REDIS_AUTH_TOKEN, KEYCLOAK_ADMIN_PASSWORD, MAILBRIDGE_DEFAULT_URL
+  existingSecret: outrena-backend-secret
+  # envFrom — additional ConfigMaps/Secrets to load via envFrom.
+  envFrom:
+    configMapRef: outrena-config
+    secretRef: outrena-backend-secret
+  # probes — /health returns 200 if DB + Redis + Keycloak reachable.
+  probes:
+    readiness:
+      httpGet:
+        path: /health
+        port: 8000
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    liveness:
+      httpGet:
+        path: /health
+        port: 8000
+      initialDelaySeconds: 60
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+  # service — ClusterIP only (ingress fronts it).
+  service:
+    type: ClusterIP
+    port: 8000
+    targetPort: 8000
+  # migration — init container runs `alembic upgrade head` before the app
+  # container starts. Disabled by default to avoid race in HPA scale events;
+  # enable for first-install / explicit schema upgrades (see NOTES.txt).
+  migration:
+    enabled: false
+    # command override — defaults to alembic upgrade head
+    command: ["alembic", "upgrade", "head"]
+  # extraVolumeMounts / extraVolumes — for tmp scratch (CSV processing).
+  extraVolumes:
+    - name: tmp
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: tmp
+      mountPath: /tmp
+
+# ── Frontend (Vite build served by nginx) ─────────────────────────────────────
+frontend:
+  name: frontend
+  image:
+    repository: ghcr.io/outrena/frontend
+    tag: ""
+    pullPolicy: ""
+  replicas: 2
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    enabled: true
+    minAvailable: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  env:
+    NGINX_WORKER_PROCESSES: "auto"
+    NGINX_CLIENT_MAX_BODY_SIZE: "50m"   # CSV uploads
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 80
+
+# ── Worker (Celery) ───────────────────────────────────────────────────────────
+worker:
+  name: worker
+  # Same image as backend (shared codebase); different command.
+  image:
+    repository: ghcr.io/outrena/backend
+    tag: ""
+    pullPolicy: ""
+  replicas: 2
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 75
+  # No PDB for workers — Celery tasks are idempotent + retried.
+  # Enable only if you have long-running non-idempotent tasks.
+  pdb:
+    enabled: false
+    minAvailable: 1
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  env:
+    CELERY_WORKER_MODE: "true"
+    SCHEDULER_ENABLED: "false"
+  existingSecret: outrena-backend-secret   # share backend's DB/Redis secrets
+  envFrom:
+    configMapRef: outrena-config
+    secretRef: outrena-backend-secret
+  command:
+    - celery
+    - -A
+    - app.worker.celery_app
+    - worker
+    - --loglevel=info
+    - --concurrency=4
+    - --max-tasks-per-child=100
+    - -Q:celery,celery
+    - -Q:scheduler,scheduler
+    - -Q:mailbridge,mailbridge
+
+# ── Keycloak 24 ──────────────────────────────────────────────────────────────
+keycloak:
+  name: keycloak
+  image:
+    repository: quay.io/keycloak/keycloak
+    tag: "24.0"
+    pullPolicy: ""
+  replicas: 1
+  # Keycloak needs >= 1GB heap; 1 replica is the default for cost.
+  # Bump to 2+ in prod with a shared DB (already configured).
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+  env:
+    KC_PROXY: edge
+    KC_HTTP_ENABLED: "true"
+    KC_HOSTNAME_STRICT: "false"
+    KC_HOSTNAME_STRICT_HTTPS: "false"
+    KC_DB: postgres
+    KEYCLOAK_ADMIN: admin
+    KC_LOG_LEVEL: INFO
+  # existingSecret holds KEYCLOAK_ADMIN_PASSWORD, KC_DB_USERNAME, KC_DB_PASSWORD.
+  existingSecret: outrena-keycloak-secret
+  service:
+    type: ClusterIP
+    port: 8080
+    targetPort: 8080
+  # initContainer waits for postgres to be reachable on port 5432 before
+  # Keycloak starts (avoids the 30-60s boot loop on cold DB).
+  initContainer:
+    enabled: true
+    image: postgres:16-alpine
+    # postgresHost is templated in the command — set to the external PG host.
+    postgresHost: postgres.outrena.svc.cluster.local
+    postgresPort: 5432
+
+# ── Postgres (DISABLED by default — use external) ────────────────────────────
+# Operators run Postgres outside the cluster (CloudSQL / RDS / Aurora / PG-Flexible).
+# This block is a placeholder for the bitnami/postgresql subchart, used in DEV only.
+postgres:
+  enabled: false
+  # When enabled=true, the bitnami chart is invoked with these values.
+  # Otherwise, the chart expects an existing secret with key DATABASE_URL.
+  existingSecret: outrena-postgres-secret
+  existingSecretKey: DATABASE_URL
+  # bitnami/postgresql subchart values (only used if enabled=true):
+  image:
+    registry: docker.io
+    repository: bitnami/postgresql
+    tag: "16"
+  auth:
+    postgresPassword: ""           # set in dev
+    username: outrena
+    password: ""                   # set in dev
+    database: outrena
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
+
+# ── Redis (DISABLED by default — use external) ───────────────────────────────
+redis:
+  enabled: false
+  # When enabled=true, the bitnami/redis subchart is invoked.
+  # Otherwise, REDIS_URL / REDIS_AUTH_TOKEN come from the backend existingSecret.
+  existingSecret: outrena-redis-secret
+  existingSecretKey: REDIS_AUTH_TOKEN
+  image:
+    registry: docker.io
+    repository: bitnami/redis
+    tag: "7.2"
+  auth:
+    enabled: true
+    password: ""                   # set in dev
+  master:
+    persistence:
+      enabled: true
+      size: 8Gi
+
+# ── Ingress ──────────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"        # CSV uploads
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"     # LLM call 30s + headroom
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+  # hosts — typically one host per environment (app.outrena.com).
+  # TLS via cert-manager + letsencrypt-prod ClusterIssuer (prereq).
+  hosts:
+    - host: app.outrena.com
+      paths:
+        # Order matters — longest prefix first to avoid /api being shadowed by /.
+        - path: /api(/|$)(.*)
+          pathType: Prefix
+          serviceName: backend
+          servicePort: 8000
+        - path: /auth(/|$)(.*)
+          pathType: Prefix
+          serviceName: keycloak
+          servicePort: 8080
+        - path: /
+          pathType: Prefix
+          serviceName: frontend
+          servicePort: 80
+  tls:
+    - secretName: outrena-tls
+      hosts:
+        - app.outrena.com
+
+# ── Network Policy (§14 Risk #17 — tenant isolation) ─────────────────────────
+networkPolicy:
+  enabled: true
+  # ingress-nginx runs in ingress-nginx namespace by default.
+  ingressNamespace: ingress-nginx
+  # egress to postgres/redis — restricted by namespaceSelector + podSelector.
+  postgresNamespace: database
+  postgresPodLabels:
+    app.kubernetes.io/name: postgresql
+  redisNamespace: database
+  redisPodLabels:
+    app.kubernetes.io/name: redis
+
+# ── Pod Security Context (defaults applied to all Deployments) ───────────────
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+# ── Container Security Context (defaults applied to all containers) ──────────
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  privileged: false
+  capabilities:
+    drop:
+      - ALL
+
+# ── Node Scheduling ──────────────────────────────────────────────────────────
+nodeSelector: {}
+  # kubernetes.io/arch: amd64
+  # kubernetes.io/os: linux
+
+tolerations: []
+  # - key: spot
+  #   operator: Equal
+  #   value: "true"
+  #   effect: NoSchedule
+
+affinity: {}
+  # nodeAffinity for spot/on-demand split — see values-prod.yaml.
+  # podAntiAffinity for HA — see values-prod.yaml.
+
+# ── Secret Store CSI (AWS Secrets Manager / Azure Key Vault) ─────────────────
+secretProvider:
+  enabled: false
+  # When enabled=true, a SecretProviderClass is created that mounts secrets as
+  # files from AWS Secrets Manager (or Azure Key Vault) via the Secrets Store
+  # CSI driver. The chart syncs them to a Kubernetes Secret consumed by envFrom.
+  # See templates/secret-provider.yaml for the full placeholder.
+  provider: aws                    # aws | azure
+  aws:
+    region: us-east-1
+    # secrets are mounted at /mnt/secrets-store/<key>
+    objects: |
+      - objectName: "outrena/prod/database-url"
+        objectAlias: "DATABASE_URL"
+      - objectName: "outrena/prod/redis-auth-token"
+        objectAlias: "REDIS_AUTH_TOKEN"
+      - objectName: "outrena/prod/keycloak-admin-password"
+        objectAlias: "KEYCLOAK_ADMIN_PASSWORD"
+  azure:
+    keyVaultName: outrena-prod-kv
+    tenantId: "00000000-0000-0000-0000-000000000000"
+    usePodIdentity: false
+    useVMManagedIdentity: false
+    objects: |
+      array:
+        - |
+          objectName: database-url
+          objectType: secret
+        - |
+          objectName: redis-auth-token
+          objectType: secret
+        - |
+          objectName: keycloak-admin-password
+          objectType: secret
+
+# ── Observability hooks (consumed by separate monitoring stack) ─────────────
+# This chart does NOT install Prometheus/Grafana/Loki — those live in
+# /migration/monitoring/. These annotations/labels make scraping + log
+# discovery work without further config.
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8000"
+  prometheus.io/path: /metrics
+podLabels:
+  app.kubernetes.io/part-of: outrena
+  outrena.com/phase: "6"

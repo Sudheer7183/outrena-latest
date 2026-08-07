@@ -1,0 +1,25 @@
+{{/*
+backend-pdb.yaml — PodDisruptionBudget for backend.
+Keeps ≥1 backend pod alive during voluntary disruptions (node drains, cluster
+autoscaler). Required for §16.3 zero-downtime cutover.
+*/}}
+{{- if .Values.backend.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "outrena.fullname" . }}-{{ include "outrena.backend.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "outrena.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ include "outrena.backend.name" . }}
+spec:
+  {{- if .Values.backend.pdb.minAvailable }}
+  minAvailable: {{ .Values.backend.pdb.minAvailable }}
+  {{- else }}
+  maxUnavailable: {{ .Values.backend.pdb.maxUnavailable | default 1 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "outrena.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: {{ include "outrena.backend.name" . }}
+{{- end }}

@@ -1,0 +1,10 @@
+# requirements.txt — locust load-test dependencies (spec §15.4).
+#
+# Install with:
+#     pip install -r tests/load/requirements.txt
+#
+# Pinned to the exact version validated against the OUTRENA load profile.
+# locust 2.32.x is the last 2.x line with the stable LoadTestShape API
+# used by MultiTenantLoadShape.
+
+locust==2.32.4

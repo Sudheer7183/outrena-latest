@@ -1,0 +1,22 @@
+{{/*
+keycloak-service.yaml — ClusterIP Service for Keycloak.
+Internal-only; ingress fronts it for /auth/* paths.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "outrena.fullname" . }}-{{ include "outrena.keycloak.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "outrena.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ include "outrena.keycloak.name" . }}
+spec:
+  type: {{ .Values.keycloak.service.type }}
+  ports:
+    - port: {{ .Values.keycloak.service.port }}
+      targetPort: {{ .Values.keycloak.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "outrena.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ include "outrena.keycloak.name" . }}

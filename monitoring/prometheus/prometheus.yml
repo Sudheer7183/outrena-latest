@@ -1,0 +1,76 @@
+# prometheus.yml — OUTRENA Prometheus scrape configuration.
+#
+# Used by:
+#   - docker-compose.yml (dev) — Prometheus service mounts this file.
+#   - docker-compose.prod.yml (prod) — Same file, mounted read-only.
+#
+# Three scrape targets:
+#   1. outrena-backend     — the FastAPI /metrics endpoint (the primary
+#                             target; exposes outrena_http_requests_total,
+#                             outrena_llm_calls_total, etc.).
+#   2. otel-collector      — the OTel Collector's internal /metrics on :8888
+#                             (collector health + throughput).
+#   3. prometheus          — Prometheus itself on :9090 (self-monitoring).
+#
+# The backend's /metrics endpoint is NOT auth-protected (Prometheus scrapes
+# without credentials). In production, restrict access at the network layer
+# (security groups / VPC) — Prometheus should only be reachable from the
+# monitoring subnet.
+#
+# This file fixes the SURVEY-OBS gap: docker-compose.yml + docker-compose.prod.yml
+# referenced monitoring/prometheus/prometheus.yml but the file did not exist.
+
+global:
+  scrape_interval: 15s          # default scrape interval for every job
+  evaluation_interval: 15s      # how often Prometheus evaluates alert rules
+  external_labels:
+    cluster: outrena
+    environment: dev            # overridden in prod via envsubst or sed
+
+# ── Alert rules (optional — uncomment when alertmanager is wired) ──────────
+# rule_files:
+#   - /etc/prometheus/rules/*.yml
+
+# ── Scrape configs ─────────────────────────────────────────────────────────
+scrape_configs:
+  # 1. OUTRENA backend — primary metrics source.
+  - job_name: 'outrena-backend'
+    metrics_path: /metrics
+    scheme: http
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ['backend:8000']   # docker-compose service name : container port
+        labels:
+          service: outrena-backend
+          # environment is a label so dashboards can filter dev vs prod
+          # when both clusters forward to a central Prometheus.
+          environment: dev
+
+  # 2. OTel Collector — internal metrics (collector health, processor
+  #    throughput, exporter queue depth). Critical for diagnosing trace
+  #    pipeline outages.
+  - job_name: 'otel-collector'
+    metrics_path: /metrics
+    scheme: http
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['otel-collector:8888']
+        labels:
+          service: otel-collector
+
+  # 3. Prometheus self-monitoring — useful for capacity planning
+  #    (ingestion rate, TSDB head compaction, WAL size).
+  - job_name: 'prometheus'
+    scheme: http
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: prometheus
+
+# ── Remote write (optional — forward to Cortex / Mimir / Thanos) ──────────
+# Uncomment in HA / multi-cluster setups where a central Prometheus
+# aggregates regional Prometheus instances.
+# remote_write:
+#   - url: https://cortex.outrena.com/api/v1/push
+#     bearer_token: ${CORTEX_TOKEN}

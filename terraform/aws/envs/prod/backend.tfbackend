@@ -1,0 +1,10 @@
+# envs/prod/backend.tfbackend — S3 remote state config for prod.
+#
+# PROD state bucket is versioned + has MFA-delete enabled at the bucket
+# level (configured manually — not in Terraform to avoid chicken-and-egg).
+
+bucket       = "outrena-tfstate-prod"
+key          = "aws/prod/terraform.tfstate"
+region       = "us-east-1"
+encrypt      = true
+use_lockfile = true

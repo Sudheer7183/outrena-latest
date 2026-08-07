@@ -1,0 +1,357 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "OUTRENA — LLM usage per provider / model / tenant. Backed by Prometheus (outrena_llm_calls_total, outrena_llm_tokens_total, outrena_llm_cost_cents_total, outrena_llm_duration_seconds).",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "row",
+      "title": "LLM Calls per Provider",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM Calls per Provider (calls/min)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 1, "w": 12, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (provider) (rate(outrena_llm_calls_total[5m])) * 60",
+          "legendFormat": "{{provider}}",
+          "interval": "",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10}
+        },
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "sum"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM Errors per Provider (errors/min)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 1, "w": 12, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (provider, error_type) (rate(outrena_llm_errors_total[5m])) * 60",
+          "legendFormat": "{{provider}}: {{error_type}}",
+          "interval": "",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {"mode": "palette-classic"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}
+        },
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "type": "row",
+      "title": "Tokens per Model",
+      "gridPos": {"x": 0, "y": 9, "w": 24, "h": 1},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Input Tokens per Model (tokens/min)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 10, "w": 12, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (model) (rate(outrena_llm_tokens_total{type=\"input\"}[5m])) * 60",
+          "legendFormat": "{{model}}",
+          "interval": "",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "sum"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Output Tokens per Model (tokens/min)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 10, "w": 12, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (model) (rate(outrena_llm_tokens_total{type=\"output\"}[5m])) * 60",
+          "legendFormat": "{{model}}",
+          "interval": "",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "sum"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "type": "row",
+      "title": "LLM Cost per Tenant + Avg Latency per Provider",
+      "gridPos": {"x": 0, "y": 18, "w": 24, "h": 1},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM Cost per Tenant (cents/min)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 19, "w": 12, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (tenant) (rate(outrena_llm_cost_cents_total[5m])) * 60",
+          "legendFormat": "{{tenant}}",
+          "interval": "",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "cent", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "sum"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Avg LLM Latency per Provider (seconds, p50 / p95 / p99)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 19, "w": 12, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.50, sum by (provider, le) (rate(outrena_llm_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{provider}}",
+          "interval": "",
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.95, sum by (provider, le) (rate(outrena_llm_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{provider}}",
+          "interval": "",
+          "format": "time_series"
+        },
+        {
+          "refId": "C",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.99, sum by (provider, le) (rate(outrena_llm_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{provider}}",
+          "interval": "",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {"mode": "palette-classic"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "red", "value": 30}]}
+        },
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "type": "row",
+      "title": "Top-N Stats",
+      "gridPos": {"x": 0, "y": 27, "w": 24, "h": 1},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "bargauge",
+      "title": "Top 10 Models by Token Volume (last 1h)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 28, "w": 12, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "topk(10, sum by (model) (increase(outrena_llm_tokens_total[1h])))",
+          "legendFormat": "{{model}}",
+          "interval": "",
+          "format": "time_series",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short", "color": {"mode": "gradient"}},
+        "overrides": []
+      },
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true}
+    },
+    {
+      "type": "bargauge",
+      "title": "Top 10 Tenants by LLM Cost (last 24h, USD)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 28, "w": 12, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "topk(10, sum by (tenant) (increase(outrena_llm_cost_cents_total[24h])) / 100)",
+          "legendFormat": "{{tenant}}",
+          "interval": "",
+          "format": "time_series",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "currencyUSD", "color": {"mode": "gradient"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 50}, {"color": "red", "value": 200}]}},
+        "overrides": []
+      },
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true}
+    },
+    {
+      "type": "stat",
+      "title": "Total LLM Cost Today (USD)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 36, "w": 6, "h": 4},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum(increase(outrena_llm_cost_cents_total[24h])) / 100",
+          "interval": "",
+          "format": "time_series",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "currencyUSD", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 100}, {"color": "red", "value": 500}]}},
+        "overrides": []
+      },
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "type": "stat",
+      "title": "Total LLM Calls Today",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 6, "y": 36, "w": 6, "h": 4},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum(increase(outrena_llm_calls_total[24h]))",
+          "interval": "",
+          "format": "time_series",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}},
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "type": "stat",
+      "title": "Total Tokens Today",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 36, "w": 6, "h": 4},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum(increase(outrena_llm_tokens_total[24h]))",
+          "interval": "",
+          "format": "time_series",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "purple", "value": null}]}},
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "type": "stat",
+      "title": "Error Rate Today (%)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 18, "y": 36, "w": 6, "h": 4},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum(increase(outrena_llm_errors_total[24h])) / clamp_min(sum(increase(outrena_llm_calls_total[24h])), 1) * 100",
+          "interval": "",
+          "format": "time_series",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "percent", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]}},
+        "overrides": []
+      },
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["outrena", "llm", "usage"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {"text": "Prometheus", "value": "prometheus"},
+        "hide": 0,
+        "label": "Prometheus datasource"
+      }
+    ]
+  },
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {"refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "1h"]},
+  "timezone": "browser",
+  "title": "OUTRENA — LLM Usage",
+  "uid": "outrena-llm-usage",
+  "version": 1,
+  "weekStart": ""
+}

@@ -1,0 +1,296 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "logAnalyticsWorkspaceResourceId": {
+      "type": "string",
+      "metadata": { "description": "Full ARM id of the Log Analytics workspace (data source for log-search alert rules)" }
+    },
+    "actionGroupResourceId": {
+      "type": "string",
+      "metadata": { "description": "Full ARM id of the action group to receive notifications (Terraform: azurerm_monitor_action_group.email.id)" }
+    },
+    "backendContainerAppName": {
+      "type": "string",
+      "defaultValue": "outrena-backend"
+    },
+    "workerContainerAppName": {
+      "type": "string",
+      "defaultValue": "outrena-worker"
+    },
+    "keycloakContainerAppName": {
+      "type": "string",
+      "defaultValue": "keycloak"
+    },
+    "appGatewayName": {
+      "type": "string",
+      "defaultValue": "outrena-appgw"
+    },
+    "postgresServerName": {
+      "type": "string",
+      "defaultValue": "outrena-pg"
+    },
+    "redisCacheName": {
+      "type": "string",
+      "defaultValue": "outrena-redis"
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    }
+  },
+  "variables": {
+    "alertPrefix": "outrena",
+    "metricAlerts": [
+      {
+        "name": "backend-cpu-high",
+        "description": "Backend Container App CPU > 80% for 5 min (matches monitoring.tf azurerm_monitor_metric_alert backend_cpu)",
+        "severity": 2,
+        "enabled": true,
+        "scopes": [ "[resourceId('Microsoft.App/managedEnvironments', 'outrena-cae-main')]" ],
+        "criteria": {
+          "namespace": "Microsoft.App/managedEnvironments",
+          "metricName": "CpuUsage",
+          "aggregation": "Average",
+          "operator": "GreaterThan",
+          "threshold": 80,
+          "timeAggregation": "Average"
+        },
+        "windowSize": "PT5M",
+        "evaluationFrequency": "PT1M"
+      },
+      {
+        "name": "rds-cpu-high",
+        "description": "Postgres Flexible Server cpu_percent > 80% for 5 min (severity 1)",
+        "severity": 1,
+        "enabled": true,
+        "scopes": [ "[resourceId('Microsoft.DBforPostgreSQL/flexibleServers', parameters('postgresServerName'))]" ],
+        "criteria": {
+          "namespace": "Microsoft.DBforPostgreSQL/flexibleServers",
+          "metricName": "cpu_percent",
+          "aggregation": "Average",
+          "operator": "GreaterThan",
+          "threshold": 80,
+          "timeAggregation": "Average"
+        },
+        "windowSize": "PT5M",
+        "evaluationFrequency": "PT1M"
+      },
+      {
+        "name": "rds-storage-low",
+        "description": "Postgres storage_percent > 80% (storage remaining < 20%) for 5 min, severity 1 — mitigates §14 Risk #14 (PG disk-fill)",
+        "severity": 1,
+        "enabled": true,
+        "scopes": [ "[resourceId('Microsoft.DBforPostgreSQL/flexibleServers', parameters('postgresServerName'))]" ],
+        "criteria": {
+          "namespace": "Microsoft.DBforPostgreSQL/flexibleServers",
+          "metricName": "storage_percent",
+          "aggregation": "Average",
+          "operator": "GreaterThan",
+          "threshold": 80,
+          "timeAggregation": "Average"
+        },
+        "windowSize": "PT5M",
+        "evaluationFrequency": "PT5M"
+      },
+      {
+        "name": "redis-evictions-high",
+        "description": "Redis serverLoad > 90% for 5 min (matches monitoring.tf azurerm_monitor_metric_alert redis_load)",
+        "severity": 2,
+        "enabled": true,
+        "scopes": [ "[resourceId('Microsoft.Cache/redis', parameters('redisCacheName'))]" ],
+        "criteria": {
+          "namespace": "Microsoft.Cache/redis",
+          "metricName": "percentProcessorTime",
+          "aggregation": "Average",
+          "operator": "GreaterThan",
+          "threshold": 90,
+          "timeAggregation": "Average"
+        },
+        "windowSize": "PT5M",
+        "evaluationFrequency": "PT1M"
+      },
+      {
+        "name": "appgw-unhealthy-hosts",
+        "description": "App Gateway unhealthy host count > 0 for 5 min, severity 1 (matches monitoring.tf)",
+        "severity": 1,
+        "enabled": true,
+        "scopes": [ "[resourceId('Microsoft.Network/applicationGateways', parameters('appGatewayName'))]" ],
+        "criteria": {
+          "namespace": "Microsoft.ApplicationGateway/ApplicationGateway",
+          "metricName": "UnhealthyHostCount",
+          "aggregation": "Average",
+          "operator": "GreaterThan",
+          "threshold": 0,
+          "timeAggregation": "Average"
+        },
+        "windowSize": "PT5M",
+        "evaluationFrequency": "PT1M"
+      },
+      {
+        "name": "appgw-failed-requests",
+        "description": "App Gateway FailedRequests > 100 per 1 min (matches monitoring.tf)",
+        "severity": 2,
+        "enabled": true,
+        "scopes": [ "[resourceId('Microsoft.Network/applicationGateways', parameters('appGatewayName'))]" ],
+        "criteria": {
+          "namespace": "Microsoft.ApplicationGateway/ApplicationGateway",
+          "metricName": "FailedRequests",
+          "aggregation": "Total",
+          "operator": "GreaterThan",
+          "threshold": 100,
+          "timeAggregation": "Total"
+        },
+        "windowSize": "PT1M",
+        "evaluationFrequency": "PT1M"
+      }
+    ],
+    "logAlerts": [
+      {
+        "name": "backend-errors-high",
+        "description": "Backend ERROR logs > 10 in 5 min (matches log_alerts.tf backend_errors)",
+        "severity": 1,
+        "enabled": true,
+        "query": "ContainerAppConsoleLogs\n| where ContainerAppName =~ \"outrena-backend\"\n| where Level == \"ERROR\" or LogEntry has \"ERROR\"\n| summarize errorCount = count() by bin(TimeGenerated, 5m)\n| where errorCount > 10",
+        "frequency": "PT5M",
+        "timePeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0
+      },
+      {
+        "name": "mailbridge-send-failed",
+        "description": "mailbridge.send_failed events > 10 in 5 min (matches log_alerts.tf — mitigates §14 Risk #15 MailBridge deliverability)",
+        "severity": 1,
+        "enabled": true,
+        "query": "ContainerAppConsoleLogs\n| where ContainerAppName in (\"outrena-backend\", \"outrena-worker\")\n| where LogEntry has \"mailbridge.send_failed\"\n| summarize failedCount = count() by bin(TimeGenerated, 5m)\n| where failedCount > 10",
+        "frequency": "PT5M",
+        "timePeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0
+      },
+      {
+        "name": "scheduler-tick-slow",
+        "description": "Scheduler tick duration > 120s sustained — mitigates §14 Risk #4 (scheduler partial-cap)",
+        "severity": 2,
+        "enabled": true,
+        "query": "ContainerAppConsoleLogs\n| where ContainerAppName =~ \"outrena-scheduler\"\n| where LogEntry has \"tick summary\"\n| extend tick_duration_ms = extract(\"tick_duration_ms=([0-9]+)\", 1, LogEntry, typeof(long))\n| where isnotnull(tick_duration_ms) and tick_duration_ms > 120000\n| summarize count() by bin(TimeGenerated, 5m)",
+        "frequency": "PT5M",
+        "timePeriod": "PT10M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0
+      },
+      {
+        "name": "tenant-isolation-violation",
+        "description": "Cross-tenant 403 spike — mitigates §14 Risk #17 (tenant schema drift) and tenant-isolation regression",
+        "severity": 1,
+        "enabled": true,
+        "query": "AppRequests\n| where TimeGenerated > ago(5m)\n| where ResultCode == \"403\"\n| summarize count_403 = count() by bin(TimeGenerated, 5m)\n| where count_403 > 50",
+        "frequency": "PT5M",
+        "timePeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0
+      },
+      {
+        "name": "jwks-rotation-failed",
+        "description": "Keycloak JWKS rotation failure detected in backend logs (§14 Risk #2 Keycloak JWKS rotation failure)",
+        "severity": 1,
+        "enabled": true,
+        "query": "ContainerAppConsoleLogs\n| where ContainerAppName =~ \"outrena-backend\"\n| where LogEntry has \"jwks\" and (LogEntry has \"fail\" or LogEntry has \"error\")\n| summarize count() by bin(TimeGenerated, 5m)",
+        "frequency": "PT5M",
+        "timePeriod": "PT10M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0
+      },
+      {
+        "name": "keycloak-auth-failures",
+        "description": "Keycloak LOGIN_ERROR > 20 in 5 min (brute-force detection — matches log_alerts.tf bonus)",
+        "severity": 2,
+        "enabled": true,
+        "query": "ContainerAppConsoleLogs\n| where ContainerAppName =~ \"keycloak\"\n| where LogEntry has \"LOGIN_ERROR\"\n| summarize failCount = count() by bin(TimeGenerated, 5m)\n| where failCount > 20",
+        "frequency": "PT5M",
+        "timePeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0
+      }
+    ]
+  },
+  "resources": [
+    {
+      "copy": {
+        "name": "metricAlertsCopy",
+        "count": "[length(variables('metricAlerts'))]"
+      },
+      "type": "Microsoft.Insights/metricAlerts",
+      "apiVersion": "2018-03-01",
+      "name": "[concat(variables('alertPrefix'), '-', variables('metricAlerts')[copyIndex()].name)]",
+      "location": "global",
+      "properties": {
+        "description": "[variables('metricAlerts')[copyIndex()].description]",
+        "severity": "[variables('metricAlerts')[copyIndex()].severity]",
+        "enabled": "[variables('metricAlerts')[copyIndex()].enabled]",
+        "scopes": "[variables('metricAlerts')[copyIndex()].scopes]",
+        "evaluationFrequency": "[variables('metricAlerts')[copyIndex()].evaluationFrequency]",
+        "windowSize": "[variables('metricAlerts')[copyIndex()].windowSize]",
+        "criteria": {
+          "allOf": [
+            {
+              "criterionType": "StaticThresholdCriterion",
+              "name": "Metric1",
+              "metricName": "[variables('metricAlerts')[copyIndex()].criteria.metricName]",
+              "metricNamespace": "[variables('metricAlerts')[copyIndex()].criteria.namespace]",
+              "operator": "[variables('metricAlerts')[copyIndex()].criteria.operator]",
+              "threshold": "[variables('metricAlerts')[copyIndex()].criteria.threshold]",
+              "timeAggregation": "[variables('metricAlerts')[copyIndex()].criteria.timeAggregation]",
+              "dimensions": []
+            }
+          ]
+        },
+        "actions": [
+          {
+            "actionGroupId": "[parameters('actionGroupResourceId')]"
+          }
+        ]
+      }
+    },
+    {
+      "copy": {
+        "name": "logAlertsCopy",
+        "count": "[length(variables('logAlerts'))]"
+      },
+      "type": "Microsoft.Insights/scheduledQueryRules",
+      "apiVersion": "2023-03-15-preview",
+      "name": "[concat(variables('alertPrefix'), '-', variables('logAlerts')[copyIndex()].name)]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "description": "[variables('logAlerts')[copyIndex()].description]",
+        "severity": "[variables('logAlerts')[copyIndex()].severity]",
+        "enabled": "[variables('logAlerts')[copyIndex()].enabled]",
+        "scopes": [ "[parameters('logAnalyticsWorkspaceResourceId')]" ],
+        "evaluationFrequency": "[variables('logAlerts')[copyIndex()].frequency]",
+        "windowSize": "[variables('logAlerts')[copyIndex()].timePeriod]",
+        "criteria": {
+          "allOf": [
+            {
+              "query": "[variables('logAlerts')[copyIndex()].query]",
+              "timeAggregation": "Count",
+              "operator": "[variables('logAlerts')[copyIndex()].triggerOperator]",
+              "threshold": "[variables('logAlerts')[copyIndex()].triggerThreshold]",
+              "failingPeriods": {
+                "minFailingPeriodsToAlert": 1,
+                "numberOfEvaluationPeriods": 1
+              }
+            }
+          ]
+        },
+        "actions": {
+          "actionGroups": [ "[parameters('actionGroupResourceId')]" ]
+        },
+        "autoMitigationEnabled": true
+      }
+    }
+  ],
+  "outputs": {
+    "metricAlertCount": { "type": "int", "value": "[length(variables('metricAlerts'))]" },
+    "logAlertCount": { "type": "int", "value": "[length(variables('logAlerts'))]" }
+  }
+}

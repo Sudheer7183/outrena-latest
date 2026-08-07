@@ -1,0 +1,118 @@
+{
+  "dashboardName": "OUTRENA-Tenant",
+  "description": "OUTRENA Phase 6 — per-tenant telemetry dashboard template. Widgets slice the OTel/EMF-emitted custom metrics by the `tenant_slug` dimension. Use the dashboard variable `${tenant}` to focus on a single tenant, or remove the filter to compare across tenants. Supports §14 Risk #17 (tenant schema drift) and §15.1 multi-tenant acceptance testing.",
+  "start": "-PT6H",
+  "periodOverride": "PT5M",
+  "variables": [
+    {
+      "name": "tenant",
+      "type": "pattern",
+      "value": "acme-corp",
+      "input": {
+        "label": "Tenant slug",
+        "type": "text",
+        "description": "Lowercase tenant slug used as the tenant_slug metric dimension (e.g. acme-corp, globex)"
+      },
+      "default": "*"
+    }
+  ],
+  "widgets": [
+    {
+      "type": "metric",
+      "x": 0, "y": 0, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "API Calls per Tenant — ${tenant}",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/Backend", "http.server.request.count", "tenant_slug", "${tenant}", { "label": "requests", "stat": "Sum", "period": 300 } ],
+          [ ".", "http.server.request.count", "tenant_slug", "*", { "label": "all tenants (total)", "stat": "Sum", "period": 300, "color": "#7f7f7f" } ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 0, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "5xx Errors per Tenant — ${tenant}",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/Backend", "http.server.response.count", "tenant_slug", "${tenant}", "http.status_code", "5xx", { "label": "5xx count", "stat": "Sum", "period": 300, "color": "#d13212" } ]
+        ],
+        "annotations": { "horizontal": [ { "label": "SLO: <0.5% of req", "value": 5, "color": "#d62728" } ] }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 6, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "Autopilot Runs per Tenant — ${tenant}",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/Autopilot", "run.started", "tenant_slug", "${tenant}", { "label": "started", "stat": "Sum", "period": 300, "color": "#2ca02c" } ],
+          [ ".", "run.completed", "tenant_slug", "${tenant}", { "label": "completed", "stat": "Sum", "period": 300, "color": "#1f77b4" } ],
+          [ ".", "run.failed", "tenant_slug", "${tenant}", { "label": "failed", "stat": "Sum", "period": 300, "color": "#d13212" } ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 6, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "Sequences Sent per Tenant — ${tenant}",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/Sequences", "sent", "tenant_slug", "${tenant}", { "label": "sent", "stat": "Sum", "period": 300, "color": "#17becf" } ],
+          [ ".", "opened", "tenant_slug", "${tenant}", { "label": "opened", "stat": "Sum", "period": 300, "color": "#2ca02c" } ],
+          [ ".", "replied", "tenant_slug", "${tenant}", { "label": "replied", "stat": "Sum", "period": 300, "color": "#ff7f0e" } ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 12, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "LLM Tokens Consumed per Tenant — ${tenant}",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/LLM", "tokens.prompt", "tenant_slug", "${tenant}", { "label": "prompt tokens", "stat": "Sum", "period": 300, "color": "#1f77b4" } ],
+          [ ".", "tokens.completion", "tenant_slug", "${tenant}", { "label": "completion tokens", "stat": "Sum", "period": 300, "color": "#ff7f0e" } ],
+          [ ".", "cost.usd", "tenant_slug", "${tenant}", { "label": "cost USD", "stat": "Sum", "period": 300, "color": "#d62728", "yAxis": "right" } ]
+        ]
+      }
+    },
+    {
+      "type": "log",
+      "x": 12, "y": 12, "width": 12, "height": 6,
+      "properties": {
+        "view": "table",
+        "title": "Recent Tenant Activity Log — ${tenant}",
+        "region": "us-east-1",
+        "stacked": false,
+        "query": "fields @timestamp, tenant_slug, request_id, http.route, http.status_code, @message\n| filter tenant_slug == \"${tenant}\"\n| sort @timestamp desc\n| limit 100"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 18, "width": 24, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": true,
+        "title": "All-Tenant Comparison — 5xx Rate (group by tenant_slug)",
+        "region": "us-east-1",
+        "metrics": [
+          [ { "expression": "SEARCH('{OUTRENA/Backend,tenant_slug} http.server.response.count (5xx)', 'Sum', 300)", "label": "5xx per tenant", "color": "#d13212" } ]
+        ]
+      }
+    }
+  ]
+}

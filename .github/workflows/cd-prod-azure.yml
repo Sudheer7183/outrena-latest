@@ -1,0 +1,435 @@
+name: CD · Prod (Azure)
+
+# Phase 6 — Manual promote to Azure prod. Workflow_dispatch with image_tag input
+# (default: latest staging SHA). Re-tags staging image as prod-latest + prod-<tag>,
+# applies terraform at 5% Traffic Manager canary, validates health, then steps
+# through manual gates at 25% → 50% → 100% per migration doc §16.3 (exit criteria
+# 5→25→50→100). Each gate uses a distinct environment for GitHub branch protection.
+# Auto-triggers rollback workflow on 5% canary failure. Azure Traffic Manager
+# uses weighted routing (mirrors AWS Route 53 weighted policy).
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "ACR image tag to promote (default: latest staging SHA from secrets.LAST_STAGING_SHA)"
+        required: true
+        default: "latest-staging"
+        type: string
+      reason:
+        description: "Reason for promote (audit log)"
+        required: false
+        default: "scheduled cutover"
+        type: string
+
+concurrency:
+  group: cd-prod-azure-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TERRAFORM_VERSION: "1.9.8"
+  PYTHON_VERSION: "3.11"
+
+permissions:
+  contents: read
+  id-token: write
+  actions: write
+  issues: write
+
+jobs:
+  # ── Manual approval gate (production-azure environment) ─────────────────────
+  approve:
+    name: Gate · production-azure approval
+    runs-on: ubuntu-latest
+    environment: production-azure
+    steps:
+      - name: Approved
+        run: |
+          echo "Azure production promote approved."
+          echo "Image tag: ${{ inputs.image_tag }}"
+          echo "Reason: ${{ inputs.reason }}"
+          echo "Actor: ${{ github.actor }}"
+
+  # ── Re-tag staging image as prod-latest + prod-<tag> in ACR ─────────────────
+  promote-images:
+    name: Promote · staging → prod tags
+    runs-on: ubuntu-latest
+    needs: approve
+    outputs:
+      prod-tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # OWASP A05 gate (Tech Doc §10.7) — verify prod env settings before deploy
+      - name: Pre-deploy environment audit
+        env:
+          ENVIRONMENT: production
+          SKIP_JWT_VERIFICATION: ${{ vars.SKIP_JWT_VERIFICATION }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          SECRET_BACKEND: ${{ vars.SECRET_BACKEND }}
+          CORS_ALLOWED_ORIGINS: ${{ vars.CORS_ALLOWED_ORIGINS }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          POSTHOG_KEY: ${{ secrets.POSTHOG_KEY }}
+        run: python3 outrena-backend/scripts/audit_env.py
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ACR login
+        run: az acr login --name ${{ secrets.AZURE_ACR_NAME }}
+
+      - name: Resolve concrete image tag
+        id: resolve
+        env:
+          ACR: ${{ secrets.AZURE_ACR_LOGIN_SERVER }}
+          INPUT_TAG: ${{ inputs.image_tag }}
+          FALLBACK_SHA: ${{ secrets.LAST_STAGING_SHA }}
+        run: |
+          if [ "${INPUT_TAG}" = "latest-staging" ]; then
+            if [ -z "${FALLBACK_SHA}" ]; then
+              echo "Input was 'latest-staging' but secrets.LAST_STAGING_SHA is empty."
+              echo "Pass an explicit image_tag (the staging SHA) instead."
+              exit 1
+            fi
+            TAG="${FALLBACK_SHA}"
+          else
+            TAG="${INPUT_TAG}"
+          fi
+          echo "Resolved prod tag: ${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Promote backend image (staging → prod tags)
+        env:
+          ACR: ${{ secrets.AZURE_ACR_LOGIN_SERVER }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          SRC="${ACR}/outrena-backend:${TAG}"
+          docker pull "${SRC}"
+          for T in "prod-${TAG}" "prod-latest"; do
+            docker tag "${SRC}" "${ACR}/outrena-backend:${T}"
+            docker push "${ACR}/outrena-backend:${T}"
+          done
+
+      - name: Promote frontend image (staging → prod tags)
+        env:
+          ACR: ${{ secrets.AZURE_ACR_LOGIN_SERVER }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          SRC="${ACR}/outrena-frontend:${TAG}"
+          docker pull "${SRC}"
+          for T in "prod-${TAG}" "prod-latest"; do
+            docker tag "${SRC}" "${ACR}/outrena-frontend:${T}"
+            docker push "${ACR}/outrena-frontend:${T}"
+          done
+
+  # ── Terraform apply at 5% Traffic Manager weight ───────────────────────────
+  terraform-apply-5pct:
+    name: Terraform · apply 5% canary
+    runs-on: ubuntu-latest
+    needs: promote-images
+    environment: production-azure
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        working-directory: terraform/azure
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: terraform init -backend-config=envs/prod/backend.tfbackend -input=false
+
+      - name: terraform apply (5% weight)
+        working-directory: terraform/azure
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TAG: ${{ needs.promote-images.outputs.prod-tag }}
+        run: |
+          terraform apply \
+            -var-file=envs/prod/prod.tfvars \
+            -var="acr_backend_tag=${TAG}" \
+            -var="acr_frontend_tag=${TAG}" \
+            -var="blue_green_weight_new=5" \
+            -var="blue_green_weight_old=95" \
+            -input=false -auto-approve
+
+  # ── Validate 5% canary (5 min soak, health checks; trigger rollback on fail) ─
+  validate-5pct:
+    name: Validate · 5% canary (5 min soak)
+    runs-on: ubuntu-latest
+    needs: terraform-apply-5pct
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install httpx
+        run: pip install "httpx==0.28.1"
+
+      - name: 5-minute soak wait
+        run: |
+          echo "Soaking at 5% Traffic Manager canary for 5 minutes..."
+          sleep 300
+
+      - name: Health check (prod Azure stack)
+        env:
+          PROD_API_BASE: https://api.azure.outrena.com
+          PROD_AUTH_BASE: https://auth.azure.outrena.com
+          TENANT_HOST: https://acme.azure.outrena.com
+        run: |
+          python - <<'PY'
+          import os, sys, httpx
+          targets = [
+              ("prod azure backend health", f"{os.environ['PROD_API_BASE']}/health"),
+              ("prod azure keycloak well-known", f"{os.environ['PROD_AUTH_BASE']}/auth/realms/outrena/.well-known/openid-configuration"),
+              ("prod azure tenant api", f"{os.environ['TENANT_HOST']}/api/v1/health"),
+          ]
+          failures = []
+          with httpx.Client(timeout=30.0, follow_redirects=True) as c:
+              for name, url in targets:
+                  try:
+                      r = c.get(url)
+                      print(f"[{r.status_code}] {name}: {url}")
+                      if r.status_code >= 400:
+                          failures.append((name, url, r.status_code))
+                  except Exception as e:
+                      print(f"[ERR] {name}: {url} → {e}")
+                      failures.append((name, url, str(e)))
+          if failures:
+              print("FAIL — 5% canary unhealthy:")
+              for f in failures:
+                  print("  -", f)
+              sys.exit(1)
+          print("OK — 5% canary healthy")
+          PY
+
+  # ── Trigger rollback on validation failure ──────────────────────────────────
+  rollback-on-fail:
+    name: Rollback · on 5% canary failure
+    runs-on: ubuntu-latest
+    needs: validate-5pct
+    if: failure()
+    steps:
+      - name: Invoke rollback workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GHA_PAT_ROLLBACK_DISPATCH }}
+          script: |
+            const res = await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'rollback.yml',
+              ref: context.ref,
+              inputs: {
+                cloud: 'azure',
+                environment: 'production',
+                to_weight_new: '0',
+                reason: `Auto-rollback from cd-prod-azure 5% canary (run ${context.runId})`,
+              },
+            });
+            core.info(`Rollback dispatched: ${res.status}`);
+
+  # ── Manual gate → 25% ────────────────────────────────────────────────────────
+  manual-gate-25:
+    name: Gate · production-azure-cutover-25 (manual)
+    runs-on: ubuntu-latest
+    needs: validate-5pct
+    environment: production-azure-cutover-25
+    steps:
+      - name: Approved for 25%
+        run: echo "Approved to bump Azure canary from 5% to 25%"
+
+  bump-to-25:
+    name: Terraform · apply 25%
+    runs-on: ubuntu-latest
+    needs: manual-gate-25
+    environment: production-azure
+    steps:
+      - uses: actions/checkout@v4
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - name: terraform init
+        working-directory: terraform/azure
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: terraform init -backend-config=envs/prod/backend.tfbackend -input=false
+      - name: terraform apply (25% weight)
+        working-directory: terraform/azure
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TAG: ${{ needs.promote-images.outputs.prod-tag }}
+        run: |
+          terraform apply \
+            -var-file=envs/prod/prod.tfvars \
+            -var="acr_backend_tag=${TAG}" \
+            -var="acr_frontend_tag=${TAG}" \
+            -var="blue_green_weight_new=25" \
+            -var="blue_green_weight_old=75" \
+            -input=false -auto-approve
+
+  # ── Manual gate → 50% ────────────────────────────────────────────────────────
+  manual-gate-50:
+    name: Gate · production-azure-cutover-50 (manual)
+    runs-on: ubuntu-latest
+    needs: bump-to-25
+    environment: production-azure-cutover-50
+    steps:
+      - name: Approved for 50%
+        run: echo "Approved to bump Azure canary from 25% to 50%"
+
+  bump-to-50:
+    name: Terraform · apply 50%
+    runs-on: ubuntu-latest
+    needs: manual-gate-50
+    environment: production-azure
+    steps:
+      - uses: actions/checkout@v4
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - name: terraform init
+        working-directory: terraform/azure
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: terraform init -backend-config=envs/prod/backend.tfbackend -input=false
+      - name: terraform apply (50% weight)
+        working-directory: terraform/azure
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TAG: ${{ needs.promote-images.outputs.prod-tag }}
+        run: |
+          terraform apply \
+            -var-file=envs/prod/prod.tfvars \
+            -var="acr_backend_tag=${TAG}" \
+            -var="acr_frontend_tag=${TAG}" \
+            -var="blue_green_weight_new=50" \
+            -var="blue_green_weight_old=50" \
+            -input=false -auto-approve
+
+  # ── Manual gate → 100% ───────────────────────────────────────────────────────
+  manual-gate-100:
+    name: Gate · production-azure-cutover-100 (manual, final)
+    runs-on: ubuntu-latest
+    needs: bump-to-50
+    environment: production-azure-cutover-100
+    steps:
+      - name: Approved for 100% cutover
+        run: echo "Approved to complete Azure cutover to 100%"
+
+  bump-to-100:
+    name: Terraform · apply 100% (complete cutover)
+    runs-on: ubuntu-latest
+    needs: manual-gate-100
+    environment: production-azure
+    steps:
+      - uses: actions/checkout@v4
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - name: terraform init
+        working-directory: terraform/azure
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: terraform init -backend-config=envs/prod/backend.tfbackend -input=false
+      - name: terraform apply (100% weight — cutover complete)
+        working-directory: terraform/azure
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TAG: ${{ needs.promote-images.outputs.prod-tag }}
+        run: |
+          terraform apply \
+            -var-file=envs/prod/prod.tfvars \
+            -var="acr_backend_tag=${TAG}" \
+            -var="acr_frontend_tag=${TAG}" \
+            -var="blue_green_weight_new=100" \
+            -var="blue_green_weight_old=0" \
+            -input=false -auto-approve
+
+  # ── Slack notification (always) ──────────────────────────────────────────────
+  notify-slack:
+    name: Notify · Slack
+    runs-on: ubuntu-latest
+    needs: [promote-images, validate-5pct, bump-to-25, bump-to-50, bump-to-100]
+    if: always()
+    steps:
+      - name: Post to Slack
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          slack-message: |
+            *Azure Prod promote · tag=${{ inputs.image_tag }} · actor=${{ github.actor }}*
+            Promote:    ${{ needs.promote-images.result }}
+            5% canary:  ${{ needs.validate-5pct.result }}
+            25% bump:   ${{ needs.bump-to-25.result }}
+            50% bump:   ${{ needs.bump-to-50.result }}
+            100% bump:  ${{ needs.bump-to-100.result }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

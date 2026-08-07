@@ -1,0 +1,94 @@
+{
+  "_comment": "OUTRENA worker (Celery) ECS task definition (portable JSON form of terraform/aws/ecs_worker.tf).",
+  "_usage": "aws ecs register-task-definition --cli-input-json file://worker.json --region us-east-1",
+  "_notes": [
+    "Replace PLACEHOLDER_ARN values with real ARNs from your AWS account.",
+    "Worker has NO portMappings — it's headless (no inbound HTTP).",
+    "Worker uses the SAME image as the backend (shared codebase) with a command override.",
+    "No healthCheck — ECS relies on the celery process (PID 1) staying alive.",
+    "Source of truth is terraform/aws/ecs_worker.tf — this JSON is for AWS Console / CLI users without Terraform."
+  ],
+  "family": "outrena-prod-worker",
+  "cpu": "1024",
+  "memory": "2048",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "executionRoleArn": "PLACEHOLDER_ECS_TASK_EXECUTION_ROLE_ARN",
+  "taskRoleArn": "PLACEHOLDER_WORKER_TASK_ROLE_ARN",
+  "tags": [
+    { "key": "Project", "value": "OUTRENA" },
+    { "key": "Phase", "value": "Phase6" },
+    { "key": "Component", "value": "worker" },
+    { "key": "Environment", "value": "production" }
+  ],
+  "containerDefinitions": [
+    {
+      "name": "worker",
+      "image": "PLACEHOLDER_ECR_REPO_URL/backend:1.0.0",
+      "essential": true,
+      "entryPoint": ["python", "-m"],
+      "command": [
+        "celery",
+        "-A",
+        "app.worker.celery_app",
+        "worker",
+        "--loglevel=info",
+        "--concurrency=4",
+        "--max-tasks-per-child=100",
+        "-Q:celery,celery",
+        "-Q:scheduler,scheduler",
+        "-Q:mailbridge,mailbridge"
+      ],
+      "portMappings": [],
+      "environment": [
+        { "name": "ENVIRONMENT", "value": "production" },
+        { "name": "BASE_DOMAIN", "value": "outrena.com" },
+        { "name": "KEYCLOAK_BASE_URL", "value": "https://auth.outrena.com" },
+        { "name": "KEYCLOAK_REALM", "value": "outrena" },
+        { "name": "SKIP_JWT_VERIFICATION", "value": "false" },
+        { "name": "VERIFY_JWT_ISSUER", "value": "true" },
+        { "name": "ALLOWED_ORIGINS", "value": "[\"https://app.outrena.com\",\"https://auth.outrena.com\"]" },
+        { "name": "SCHEDULER_TICK_SECONDS", "value": "300" },
+        { "name": "SCHEDULER_PARTIAL_CAP", "value": "10" },
+        { "name": "LLM_API_URL", "value": "https://api.anthropic.com" },
+        { "name": "LOG_LEVEL", "value": "INFO" },
+        { "name": "STORAGE_PROVIDER", "value": "s3" },
+        { "name": "S3_BUCKET", "value": "outrena-prod-csv" },
+        { "name": "S3_REGION", "value": "us-east-1" },
+        { "name": "S3_PUBLIC_URL", "value": "https://outrena-prod-csv.s3.us-east-1.amazonaws.com" },
+        { "name": "MAILBRIDGE_DEFAULT_URL", "value": "" },
+        { "name": "REDIS_HOST", "value": "PLACEHOLDER_ELASTICACHE_PRIMARY_ENDPOINT" },
+        { "name": "REDIS_PORT", "value": "6379" },
+        { "name": "REDIS_DB", "value": "0" },
+        { "name": "CELERY_BROKER_DB", "value": "1" },
+        { "name": "CELERY_WORKER_MODE", "value": "true" },
+        { "name": "SCHEDULER_ENABLED", "value": "false" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "PLACEHOLDER_DATABASE_URL_SECRET_ARN:DATABASE_URL::" },
+        { "name": "REDIS_AUTH_TOKEN", "valueFrom": "PLACEHOLDER_REDIS_AUTH_SECRET_ARN:REDIS_AUTH_TOKEN::" },
+        { "name": "MAILBRIDGE_DEFAULT_URL", "valueFrom": "PLACEHOLDER_MAILBRIDGE_URL_SECRET_ARN:MAILBRIDGE_DEFAULT_URL::" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/outrena-prod/worker",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "mountPoints": [],
+      "volumesFrom": [],
+      "ulimits": [
+        {
+          "name": "nofile",
+          "softLimit": 65535,
+          "hardLimit": 65535
+        }
+      ],
+      "linuxParameters": {
+        "initProcessEnabled": true
+      }
+    }
+  ]
+}

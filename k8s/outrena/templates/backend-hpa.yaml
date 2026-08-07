@@ -1,0 +1,55 @@
+{{/*
+backend-hpa.yaml — HorizontalPodAutoscaler for backend.
+Only created when .Values.backend.autoscaling.enabled is true.
+*/}}
+{{- if .Values.backend.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "outrena.fullname" . }}-{{ include "outrena.backend.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "outrena.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ include "outrena.backend.name" . }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "outrena.fullname" . }}-{{ include "outrena.backend.name" . }}
+  minReplicas: {{ .Values.backend.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.backend.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.backend.autoscaling.targetCPUUtilizationPercentage }}
+    {{- if .Values.backend.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.backend.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+  behavior:
+    # Scale-up fast (traffic spike), scale-down slow (avoid flap).
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100                    # double pods in one step
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300   # 5min cooldown
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 120
+      selectPolicy: Min
+{{- end }}

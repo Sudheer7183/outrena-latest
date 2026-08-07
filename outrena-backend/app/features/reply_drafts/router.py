@@ -1,0 +1,141 @@
+"""
+reply_drafts.py — Phase 3 /api/v1/reply-drafts router.
+
+Endpoints:
+  GET    /reply-drafts                       list (filter by prospectId / status)
+  POST   /reply-drafts                       create
+  GET    /reply-drafts/auto-pilot            list eligible drafts (auto-pilot rule)
+  GET    /reply-drafts/{id}                  fetch one
+  PUT    /reply-drafts/{id}                  update (status, draftBody, confidence)
+  DELETE /reply-drafts/{id}                  delete
+  POST   /reply-drafts/{id}/reply-categorize LLM-categorize the reply
+  POST   /reply-drafts/{id}/auto-reply       fire via MailBridge
+"""
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_db
+from app.api.security import require_role
+from app.schemas.auth import Role
+from app.schemas.reply_drafts import (
+    AutoPilotEligibleResponse,
+    AutoReplyRequest,
+    AutoReplyResponse,
+    ReplyCategorizeRequest,
+    ReplyCategorizeResponse,
+    ReplyDraftCreate,
+    ReplyDraftResponse,
+    ReplyDraftUpdate,
+)
+from app.features.reply_drafts.service import ReplyDraftService
+
+router = APIRouter(prefix="/reply-drafts", tags=["Reply Drafts"])
+_service = ReplyDraftService()
+
+
+@router.get("/auto-pilot", response_model=AutoPilotEligibleResponse)
+async def list_autopilot_eligible(
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(require_role(Role.MANAGER)),
+) -> AutoPilotEligibleResponse:
+    """
+    List all reply drafts eligible for auto-pilot send.
+
+    Eligibility rule (Phase 3 deliverable):
+        positive category + confidence >= 0.8 + status == 'approved'
+    """
+    return await _service.list_autopilot_eligible(db)
+
+
+@router.get("", response_model=list[ReplyDraftResponse])
+async def list_reply_drafts(
+    prospect_id: str | None = Query(default=None),
+    draft_status: str | None = Query(default=None, alias="status"),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(require_role(Role.REP)),
+) -> list[ReplyDraftResponse]:
+    items = await _service.list_drafts(
+        db, prospect_id=prospect_id, status=draft_status,
+        limit=limit, offset=offset,
+    )
+    return [ReplyDraftResponse.model_validate(d) for d in items]
+
+
+@router.post("", response_model=ReplyDraftResponse, status_code=201)
+async def create_reply_draft(
+    body: ReplyDraftCreate,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(require_role(Role.REP)),
+) -> ReplyDraftResponse:
+    item = await _service.create(db, body)
+    return ReplyDraftResponse.model_validate(item)
+
+
+@router.get("/{draft_id}", response_model=ReplyDraftResponse)
+async def get_reply_draft(
+    draft_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(require_role(Role.REP)),
+) -> ReplyDraftResponse:
+    item = await _service.get(db, draft_id)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Reply draft not found.")
+    return ReplyDraftResponse.model_validate(item)
+
+
+@router.put("/{draft_id}", response_model=ReplyDraftResponse)
+async def update_reply_draft(
+    draft_id: str,
+    body: ReplyDraftUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(require_role(Role.REP)),
+) -> ReplyDraftResponse:
+    item = await _service.update(db, draft_id, body)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Reply draft not found.")
+    return ReplyDraftResponse.model_validate(item)
+
+
+@router.delete("/{draft_id}", response_model=None, response_class=Response, status_code=204)
+async def delete_reply_draft(
+    draft_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(require_role(Role.MANAGER)),
+) -> Response:
+    ok = await _service.delete(db, draft_id)
+    if not ok:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Reply draft not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{draft_id}/reply-categorize", response_model=ReplyCategorizeResponse)
+async def categorize_reply(
+    draft_id: str,
+    body: ReplyCategorizeRequest,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(require_role(Role.REP)),
+) -> ReplyCategorizeResponse:
+    result = await _service.categorize(db, draft_id, body.originalReply)
+    if result is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Reply draft not found.")
+    return result
+
+
+@router.post("/{draft_id}/auto-reply", response_model=AutoReplyResponse)
+async def auto_reply(
+    draft_id: str,
+    body: AutoReplyRequest,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(require_role(Role.MANAGER)),
+) -> AutoReplyResponse:
+    result = await _service.auto_reply(db, draft_id, body.dryRun)
+    return AutoReplyResponse(
+        ok=bool(result.get("ok", False)),
+        message=str(result.get("message", "")),
+        draftId=result.get("draftId"),
+        messageId=result.get("messageId"),
+    )

@@ -1,0 +1,314 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "OUTRENA Phase 6 — backend/application overview. Pulls from CloudWatch (AWS metrics) + Loki (structured logs from Promtail). Mirrors the CloudWatch OUTRENA-Overview dashboard.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "API Request Rate (req/s)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "AWS/ApplicationELB",
+          "metricName": "RequestCount",
+          "dimensions": { "LoadBalancer": "app/outrena-alb/MAIN" },
+          "stat": "Sum",
+          "period": "300",
+          "matchExact": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "color": { "mode": "palette-classic" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Error Rate (5xx %)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "AWS/ApplicationELB",
+          "metricName": "HTTPCode_Target_5XX_Count",
+          "dimensions": { "LoadBalancer": "app/outrena-alb/MAIN" },
+          "stat": "Sum",
+          "period": "300"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "AWS/ApplicationELB",
+          "metricName": "RequestCount",
+          "dimensions": { "LoadBalancer": "app/outrena-alb/MAIN" },
+          "stat": "Sum",
+          "period": "300"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "calculateField",
+          "options": {
+            "mode": "reduceRow",
+            "reduce": { "reducer": "sum" },
+            "alias": "5xx%"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.5 } ] } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "p99 Latency (ms)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Backend",
+          "metricName": "http.server.duration",
+          "dimensions": { "service.name": "outrena-backend" },
+          "stat": "p99",
+          "period": "60"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 500 }, { "color": "red", "value": 1000 } ] } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "RDS Connections",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 0, "y": 8, "w": 8, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "AWS/RDS",
+          "metricName": "DatabaseConnections",
+          "dimensions": { "DBInstanceIdentifier": "outrena-pg" },
+          "stat": "Average",
+          "period": "300"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 80 }, { "color": "red", "value": 100 } ] } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Redis Ops/sec",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 8, "y": 8, "w": 8, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "AWS/ElastiCache",
+          "metricName": "CacheHits",
+          "dimensions": { "CacheClusterId": "outrena-redis" },
+          "stat": "Sum",
+          "period": "300"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "AWS/ElastiCache",
+          "metricName": "CacheMisses",
+          "dimensions": { "CacheClusterId": "outrena-redis" },
+          "stat": "Sum",
+          "period": "300"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "ECS Task Count",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 16, "y": 8, "w": 8, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "AWS/ECS",
+          "metricName": "RunningTaskCount",
+          "dimensions": { "ClusterName": "outrena-cluster", "ServiceName": "outrena-backend" },
+          "stat": "Average",
+          "period": "300"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "AWS/ECS",
+          "metricName": "RunningTaskCount",
+          "dimensions": { "ClusterName": "outrena-cluster", "ServiceName": "outrena-worker" },
+          "stat": "Average",
+          "period": "300"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Scheduler Tick Duration p50/p95/p99 (ms)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Scheduler",
+          "metricName": "tick.duration",
+          "dimensions": { "service.name": "outrena-scheduler" },
+          "stat": "p99",
+          "period": "60"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Scheduler",
+          "metricName": "tick.duration",
+          "dimensions": { "service.name": "outrena-scheduler" },
+          "stat": "p95",
+          "period": "60"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Scheduler",
+          "metricName": "tick.duration",
+          "dimensions": { "service.name": "outrena-scheduler" },
+          "stat": "p50",
+          "period": "60"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 120000 } ] } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM Call Rate + Cost (USD/min)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/LLM",
+          "metricName": "llm.call.count",
+          "dimensions": { "service.name": "outrena-backend" },
+          "stat": "Sum",
+          "period": "60"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/LLM",
+          "metricName": "cost.usd",
+          "dimensions": { "service.name": "outrena-backend" },
+          "stat": "Sum",
+          "period": "60"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [ { "matcher": { "id": "byName", "options": "cost.usd" }, "properties": [ { "id": "unit", "value": "currencyUSD" } ] } ] }
+    },
+    {
+      "type": "logs",
+      "title": "Backend ERROR logs (Loki)",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 10 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{service=\"outrena-backend\"} |= \"ERROR\" | json | line_format \"{{.level}} [{{.tenant_slug}}] {{.request_id}} {{.message}}\""
+        }
+      ],
+      "options": { "showTime": true, "showLabels": false, "showCommonLabels": false, "wrapLogMessage": true, "prettifyLogMessage": false, "enableLogDetails": true, "dedupStrategy": "none", "sortOrder": "Descending" }
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["outrena", "phase6", "overview"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "cloudwatch",
+        "current": { "text": "CloudWatch", "value": "cloudwatch" },
+        "hide": 0,
+        "label": "CloudWatch datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": { "refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "1h"] },
+  "timezone": "browser",
+  "title": "OUTRENA Overview",
+  "uid": "outrena-overview",
+  "version": 1,
+  "weekStart": ""
+}

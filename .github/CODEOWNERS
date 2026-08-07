@@ -1,0 +1,75 @@
+# CODEOWNERS — GitHub code-owner review enforcement (SAAS-INFRA).
+#
+# Per GitHub docs: each line is `<path-pattern> <owner1> <owner2> ...`. The
+# LAST matching pattern wins (same semantics as .gitignore). Owners must be
+# GitHub team handles prefixed with `@` (we use the `@outrena/<team>` org
+# scope — replace with real team slugs if your org differs).
+#
+# Real team mapping (documented in runbooks/00-README.md):
+#   @outrena/platform-team  — overall infra + CI + cross-cutting concerns
+#   @outrena/backend-team   — Python backend (app/, tests/)
+#   @outrena/frontend-team  — TypeScript frontend (src/)
+#   @outrena/devops-team    — Terraform + GitHub workflows + Helm chart
+#   @outrena/security-team  — SOC2 + secrets + security.yml
+#   @outrena/sre-team       — runbooks + on-call + monitoring
+#
+# Branch protection (configured in GitHub repo settings — see runbook 10):
+#   - main + develop require CODEOWNERS review on PR.
+#   - The `/.github/` paths require BOTH @security-team + @devops-team approval.
+
+# ── Default owner (fallback for anything not matched below) ──────────────────
+*                                         @outrena/platform-team
+
+# ── Backend (Python) ─────────────────────────────────────────────────────────
+/outrena-backend/                        @outrena/backend-team
+/outrena-backend/app/                    @outrena/backend-team
+/outrena-backend/tests/                  @outrena/backend-team
+/outrena-backend/alembic/                @outrena/backend-team
+/outrena-backend/pyproject.toml          @outrena/backend-team
+/outrena-backend/.env.example            @outrena/backend-team @outrena/security-team
+
+# ── Frontend (TypeScript) ────────────────────────────────────────────────────
+/outrena-frontend/                       @outrena/frontend-team
+/outrena-frontend/src/                   @outrena/frontend-team
+/outrena-frontend/package.json           @outrena/frontend-team
+/outrena-frontend/package-lock.json      @outrena/frontend-team
+
+# ── Infrastructure (Terraform) ───────────────────────────────────────────────
+/terraform/                              @outrena/devops-team
+/terraform/aws/                          @outrena/devops-team
+/terraform/azure/                        @outrena/devops-team
+
+# ── Kubernetes (Helm chart) ──────────────────────────────────────────────────
+/k8s/                                    @outrena/devops-team
+/k8s/outrena/values.yaml                 @outrena/devops-team @outrena/security-team
+/k8s/outrena/values-prod.yaml            @outrena/devops-team @outrena/security-team
+/k8s/outrena/templates/networkpolicy.yaml @outrena/devops-team @outrena/security-team
+/k8s/outrena/templates/secret-provider.yaml @outrena/devops-team @outrena/security-team
+
+# ── GitHub workflows + Dependabot + CODEOWNERS (security-sensitive) ─────────
+/.github/                                @outrena/security-team @outrena/devops-team
+/.github/workflows/                      @outrena/security-team @outrena/devops-team
+/.github/workflows/security.yml          @outrena/security-team
+/.github/workflows/ci.yml                @outrena/devops-team @outrena/backend-team
+/.github/workflows/cd-prod-aws.yml       @outrena/security-team @outrena/devops-team
+/.github/workflows/cd-prod-azure.yml     @outrena/security-team @outrena/devops-team
+/.github/dependabot.yml                  @outrena/security-team @outrena/devops-team
+/.github/CODEOWNERS                      @outrena/security-team @outrena/devops-team
+
+# ── Runbooks + monitoring ────────────────────────────────────────────────────
+/runbooks/                               @outrena/sre-team
+/runbooks/05-incident-response.md        @outrena/sre-team @outrena/security-team
+/runbooks/08-disaster-recovery.md        @outrena/sre-team @outrena/security-team
+/runbooks/09-secrets-management.md       @outrena/sre-team @outrena/security-team
+/runbooks/10-soc2-compliance.md          @outrena/security-team @outrena/sre-team
+/runbooks/11-secrets-management.md       @outrena/security-team @outrena/sre-team
+/monitoring/                             @outrena/sre-team
+
+# ── Scripts (cross-cutting) ─────────────────────────────────────────────────
+/scripts/                                @outrena/devops-team @outrena/sre-team
+/scripts/rotate-secrets.sh               @outrena/security-team @outrena/sre-team
+/scripts/generate-sbom.sh                @outrena/security-team @outrena/devops-team
+/scripts/audit_env.py                    @outrena/security-team
+
+# ── ECS task definitions (security-sensitive) ───────────────────────────────
+/ecs-task-definitions/                   @outrena/devops-team @outrena/security-team

@@ -1,0 +1,21 @@
+{{/*
+frontend-service.yaml — ClusterIP Service for frontend.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "outrena.fullname" . }}-{{ include "outrena.frontend.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "outrena.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ include "outrena.frontend.name" . }}
+spec:
+  type: {{ .Values.frontend.service.type }}
+  ports:
+    - port: {{ .Values.frontend.service.port }}
+      targetPort: {{ .Values.frontend.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "outrena.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ include "outrena.frontend.name" . }}

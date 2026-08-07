@@ -1,0 +1,14 @@
+# requirements.txt — E2E test dependencies for OUTRENA (spec §15.2).
+#
+# Install with:
+#     pip install -r tests/e2e/requirements.txt
+#     playwright install chromium
+#
+# Pinned to the exact versions validated against the migration spec. Do NOT
+# bump without re-running the full E2E suite — Playwright browser protocol
+# changes can break selectors between minor versions.
+
+playwright==1.49.1
+pytest-playwright==0.5.2
+pytest==8.3.4
+pytest-asyncio==0.25.0

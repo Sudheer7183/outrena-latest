@@ -1,0 +1,313 @@
+# posthog-values.yaml — Helm values for the posthog/posthog chart (PH-INFRA).
+#
+# Targets the official PostHog Helm chart:
+#   https://github.com/PostHog/charts/tree/main/charts/posthog
+#   docs: https://posthog.com/docs/self-host/deploy/kubernetes
+#
+# Usage:
+#   helm repo add posthog https://posthog.github.io/posthog-helm-charts
+#   helm repo update
+#   helm install posthog posthog/posthog \
+#     --namespace posthog --create-namespace \
+#     --version ~3.0 \
+#     --values k8s/posthog-values.yaml
+#
+# This file deliberately mirrors the structure of k8s/outrena/values.yaml so
+# operators can apply the same patterns (resources / HPA / env / probes) and
+# the SRE on-call has ONE mental model for both stacks.
+#
+# Cloud notes:
+#   - cloud: aws | azure | gcp | local — picks the right storage class + LB
+#     annotations + the right external endpoint defaults (RDS / Azure PG / etc).
+#   - Set externalClickhouse / externalPostgresql / externalRedis / externalKafka
+#     to true in prod so the chart skips the in-cluster versions and uses the
+#     cloud-managed equivalents (MSK + RDS Aurora + ElastiCache + S3 on AWS,
+#     Event Hubs + PG Flexible + Azure Cache + Azure Blob on Azure). The
+#     terraform (terraform/<cloud>/posthog.tf) provisions those externals.
+#
+# Cross-references:
+#   - runbooks/15-exception-logging-self-healing.md — full ops guide
+#   - docs/posthog-self-driving-setup.md §"Step 7" — prod deploy procedure
+#   - terraform/aws/posthog.tf — AWS-managed externals
+#   - terraform/azure/posthog.tf — Azure-managed externals
+
+# ── Global ────────────────────────────────────────────────────────────────────
+image:
+  # Pin to a specific PostHog release. Bump only after a planned upgrade
+  # window (see runbook 15 §"Maintenance — Upgrading PostHog").
+  posthog:
+    repository: posthog/posthog
+    tag: release-latest
+    pullPolicy: IfNotPresent
+
+# Cloud picker — posthog chart uses this to set storage class + LB annotations.
+# Override per-cluster via --set cloud=aws or --set cloud=azure.
+cloud: aws
+
+# ── Ingress (TLS-terminated at the LB / nginx-ingress controller) ────────────
+ingress:
+  enabled: true
+  hostname: posthog.outrena.ai
+  path: /
+  pathType: Prefix
+  tls: true
+  # cert-manager issuer — must exist in-cluster (see k8s/outrena/templates/
+  # for the ClusterIssuer definition we reuse).
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      # Don't capture the /ingest/* path — those need raw POST throughput.
+      proxy_buffering off;
+
+# ── External managed services (PROD) ─────────────────────────────────────────
+# When true the chart does NOT deploy the in-cluster version; instead the
+# PostHog web/worker containers connect to the cloud-managed equivalent via
+# the *HOST env vars below. Set these via --set or externalSecrets.
+externalClickhouse:
+  enabled: false  # set true in prod + provide CLICKHOUSE_HOST
+  host: ""
+  port: "9000"
+  database: posthog
+  user: clickhouse
+  password: ""
+  secure: false
+
+externalPostgresql:
+  enabled: false  # set true in prod + provide PG_HOST (RDS / Azure PG)
+  host: ""
+  port: "5432"
+  database: posthog
+  user: posthog
+  password: ""
+
+externalRedis:
+  enabled: false  # set true in prod + provide REDIS_HOST (ElastiCache / Azure Cache)
+  host: ""
+  port: "6379"
+  password: ""
+
+externalKafka:
+  enabled: false  # set true in prod (MSK / Event Hubs)
+  brokers: []
+  # - "broker1:9092"
+  # - "broker2:9092"
+
+# ── In-cluster versions (DEV / STAGING) ──────────────────────────────────────
+# When the external.* flags are false, these are used. Defaults follow the
+# posthog/posthog chart conventions.
+clickhouse:
+  enabled: true
+  # Single-node OK for dev/staging. Prod uses externalClickhouse=true +
+  # Altinity.Cloud or a self-managed CH cluster on ECS/Container Apps.
+  persistence:
+    enabled: true
+    storageClass: ""    # cluster default
+    size: 50Gi
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 4000m
+      memory: 4Gi
+
+postgresql:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: bitnami/postgresql
+    tag: "14"
+  auth:
+    username: posthog
+    database: posthog
+    password: ""    # set via --set or externalSecret
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+redis:
+  enabled: true
+  auth:
+    enabled: true
+    password: ""    # set via --set or externalSecret
+  master:
+    persistence:
+      enabled: true
+      size: 8Gi
+      storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+kafka:
+  enabled: true
+  # Bitnami Kafka sub-chart. Single broker in dev/staging.
+  replicaCount: 1
+  defaultReplicationFactor: 1
+  offsetsTopicReplicationFactor: 1
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1500m
+      memory: 2Gi
+
+# MinIO is the chart's default object storage in dev. Prod uses external S3 /
+# Azure Blob via the OBJECT_STORAGE_* env vars in extraEnv.
+minio:
+  enabled: true
+  mode: standalone
+  persistence:
+    enabled: true
+    size: 50Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+# ── PostHog services ──────────────────────────────────────────────────────────
+web:
+  enabled: true
+  replicas: 2
+  env:
+    - name: SELF_HOSTED
+      value: "true"
+    - name: USE_TZ
+      value: "true"
+    - name: DISABLE_SECURE_SSL_REDIRECT
+      value: "true"   # TLS terminates at the LB
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 65
+  pdb:
+    enabled: true
+    minAvailable: 1
+  probes:
+    readiness:
+      httpGet:
+        path: /_health/
+        port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+    liveness:
+      httpGet:
+        path: /_health/
+        port: 8000
+      initialDelaySeconds: 90
+      periodSeconds: 30
+
+worker:
+  enabled: true
+  replicas: 2
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+pluginServer:
+  enabled: true
+  replicas: 2
+  env:
+    - name: NODE_OPTIONS
+      value: "--max_old_space_size=2048"
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+
+# async-migrations runs as a Job after install/upgrade — the chart handles it.
+
+# ── OUTRENA-specific env vars applied to all PostHog services ────────────────
+extraEnv:
+  - name: SITE_URL
+    value: "https://app.outrena.ai"
+  - name: SERVER_URL
+    value: "https://posthog.outrena.ai"
+  - name: EMAIL_HOST
+    value: ""
+  - name: EMAIL_PORT
+    value: "587"
+  - name: EMAIL_USE_TLS
+    value: "true"
+  - name: SLACK_TOKEN
+    value: ""
+  - name: SELF_DRIVING_REPO
+    value: "outrena/migration"
+  - name: SELF_DRIVING_GUARDRAILS_PATH
+    value: ".posthog-guardrails.yml"
+  - name: POSTHOG_SECRET_KEY
+    valueFrom:
+      secretKeyRef:
+        name: posthog-secret
+        key: secret-key
+
+# ── Persistence defaults (override per cloud) ────────────────────────────────
+persistence:
+  storageClass: ""        # cluster default; set to gp3 (aws) / premium-ssd (azure)
+  size: 50Gi
+
+# ── Monitoring ───────────────────────────────────────────────────────────────
+# PostHog exposes /metrics (Prometheus) when enabled. We scrape from the
+# existing prometheus in k8s/outrena/templates/ via an additional ServiceMonitor.
+monitoring:
+  enabled: true
+  prometheus:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      namespace: posthog
+      interval: 30s
+      scrapeTimeout: 10s

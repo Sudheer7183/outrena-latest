@@ -1,0 +1,117 @@
+# OUTRENA Phase 6 — Grafana datasources provisioning
+#
+# Drop into /etc/grafana/provisioning/datasources/datasources.yml inside the Grafana
+# container (the docker-compose-loki.yml binds this file there).
+#
+# Three datasources:
+#   - CloudWatch (AWS metrics + logs)         auth: workspace IAM role (ECS task role / EKS IRSA)
+#   - Loki (structured logs from Promtail)    auth: none in dev, basic_auth in prod
+#   - Azure Monitor (Azure metrics + logs)    auth: app id + secret (client_credentials)
+#
+# The Azure datasource plugin must be installed; the docker-compose-loki.yml
+# pre-installs it via GF_INSTALL_PLUGINS=grafana-azure-monitor-datasource.
+
+apiVersion: 1
+
+datasources:
+
+  # --------------------------------------------------------------------------
+  # CloudWatch — for AWS dashboards (outrena-overview, tenant-isolation, cutover)
+  # --------------------------------------------------------------------------
+  - name: CloudWatch
+    uid: cloudwatch
+    type: cloudwatch
+    access: proxy
+    isDefault: true
+    editable: false
+    jsonData:
+      authType: credentials  # 'credentials' = use the Grafana host's IAM role
+                             # On ECS Fargate: Grafana task role must have
+                             #   cloudwatch:GetMetricData, cloudwatch:GetMetricStatistics,
+                             #   cloudwatch:ListMetrics, logs:StartQuery, logs:GetQueryResults
+      defaultRegion: us-east-1
+      # Custom metrics namespaces — pre-populates the namespace dropdown in Explore
+      customMetricsNamespaces: "OUTRENA/Backend,OUTRENA/Scheduler,OUTRENA/LLM,OUTRENA/Celery,OUTRENA/Tenants,OUTRENA/Sequences,OUTRENA/Autopilot,OUTRENA/MailBridge,OUTRENA/Cutover,OUTRENA/Cache,OUTRENA/TenantSchema"
+    # For AWS SDK auth via IAM role on the host (no access_key needed), keep
+    # `jsonData.authType=credentials`. For local dev with a profile, set:
+    #   jsonData.authType: keys
+    #   secureJsonData.accessKey: <aws-access-key-id>
+    #   secureJsonData.secretKey: <aws-secret-access-key>
+
+  # --------------------------------------------------------------------------
+  # Loki — for log panels (outrena-overview backend errors, tenant-isolation
+  # 403 tail, cutover events)
+  # --------------------------------------------------------------------------
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100  # docker-compose internal hostname
+                            # prod: https://loki.internal.outrena.com
+    isDefault: false
+    editable: false
+    jsonData:
+      maxLines: 5000
+      # Link logs to traces (Tempo) — clickable in log panel
+      derivedFields:
+        - datasourceUid: tempo
+          matcherRegex: "trace_id=(\\w+)"
+          name: TraceID
+          url: "$${__value.raw}"
+    # basic_auth:  # prod only
+    #   username: outrena
+    #   password: ${LOKI_PASSWORD}
+
+  # --------------------------------------------------------------------------
+  # Azure Monitor — for Azure dashboards (parallel to CloudWatch on AWS side)
+  # --------------------------------------------------------------------------
+  - name: Azure Monitor
+    uid: azure-monitor
+    type: grafana-azure-monitor-datasource
+    access: proxy
+    isDefault: false
+    editable: false
+    jsonData:
+      cloudName: azuremonitor-publiccloud
+      tenantId: ${AZURE_TENANT_ID}
+      clientId: ${AZURE_CLIENT_ID}
+      subscriptionId: ${AZURE_SUBSCRIPTION_ID}
+      resourceGroup: ${AZURE_RESOURCE_GROUP}
+      # Log Analytics workspace ID (customer id) for KQL queries
+      logAnalyticsDefaultWorkspace: ${AZURE_LA_WORKSPACE_CUSTOMER_ID}
+      # The below uses the same clientId/tenantId but the client secret is
+      # marked `secureJsonData`. Required for client_credentials OAuth flow.
+    secureJsonData:
+      clientSecret: ${AZURE_CLIENT_SECRET}
+
+  # --------------------------------------------------------------------------
+  # Tempo — optional, linked from Loki derivedFields above
+  # --------------------------------------------------------------------------
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200  # docker-compose internal; prod: https://tempo.internal.outrena.com
+    isDefault: false
+    editable: false
+    jsonData:
+      tracesToLogs:
+        datasourceUid: loki
+        filterByTraceID: true
+        tags: ["tenant_slug", "service.name", "http.route"]
+      serviceMap:
+        datasourceUid: prometheus
+
+  # --------------------------------------------------------------------------
+  # Prometheus — for OTel collector metrics + backend app metrics
+  # --------------------------------------------------------------------------
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: false
+    editable: false
+    jsonData:
+      timeInterval: "15s"
+      httpMethod: POST

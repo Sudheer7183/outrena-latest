@@ -1,0 +1,396 @@
+name: PostHog self-driving · HITL PR gate
+
+# PH-INFRA — Runs when PostHog self-driving opens a PR.
+#
+# PostHog self-driving (https://posthog.com/docs/self-driving) is the
+# auto-investigation/auto-fix loop: it watches Error Tracking + session
+# recordings, drafts a fix, and opens a PR. This workflow enforces the
+# Human-In-The-Loop (HITL) gate required by GDPR Article 25 (data protection
+# by design) + OUTRENA's SOC2 change-management controls — no auto-merge.
+#
+# Trigger conditions (OR):
+#   - The PR carries the `posthog-self-driving` label, OR
+#   - The PR author is the `posthog-bot` GitHub account (the account
+#     PostHog self-driving uses to open PRs).
+#
+# The workflow runs 5 jobs in sequence:
+#   1. validate-metadata   — title/description/changed-files against .posthog-guardrails.yml
+#   2. ci                  — backend lint+test, frontend lint+build, terraform validate
+#   3. label-needs-review  — adds the `posthog-needs-review` label
+#   4. comment-context     — posts a PR comment with the signal + error report link
+#   5. enforce-no-auto-merge — fails the workflow if the PR has auto-merge enabled
+#
+# Branch protection (configured separately in GitHub settings — see
+# docs/posthog-self-driving-setup.md §"Step 5") MUST require this workflow
+# to pass before merge, AND require 1 human review. This workflow alone
+# does not block the merge — it produces a required check that branch
+# protection enforces.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, develop]
+
+# Cancel superseded runs on the same PR (force-push during review).
+concurrency:
+  group: posthog-self-driving-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+  TERRAFORM_VERSION: "1.9.8"
+  POSTHOG_BOT_LOGIN: posthog-bot
+  GUARDRAILS_FILE: .posthog-guardrails.yml
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+  actions: read
+
+jobs:
+  # ── Guard: only run on PostHog-bot PRs OR PRs with the self-driving label ─
+  gate:
+    name: Gate · PostHog self-driving?
+    runs-on: ubuntu-latest
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'posthog-self-driving') || github.event.pull_request.user.login == 'posthog-bot' }}
+    outputs:
+      is_self_driving: ${{ steps.check.outputs.is_self_driving }}
+    steps:
+      - name: Confirm self-driving trigger
+        id: check
+        run: |
+          if [ "${{ contains(github.event.pull_request.labels.*.name, 'posthog-self-driving') }}" = "true" ] || \
+             [ "${{ github.event.pull_request.user.login }}" = "posthog-bot" ]; then
+            echo "is_self_driving=true" >> "$GITHUB_OUTPUT"
+            echo "✅ PostHog self-driving PR detected"
+          else
+            echo "is_self_driving=false" >> "$GITHUB_OUTPUT"
+            echo "ℹ️ Not a PostHog self-driving PR — skipping"
+          fi
+
+  # ── Validate PR metadata against .posthog-guardrails.yml ────────────────────
+  validate-metadata:
+    name: Validate · PR metadata + guardrails
+    runs-on: ubuntu-latest
+    needs: gate
+    if: needs.gate.outputs.is_self_driving == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0 # full history for `git diff` against base
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install PyYAML
+        run: pip install "pyyaml==6.0.2"
+
+      - name: Validate PR metadata against guardrails
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, re, sys, subprocess, yaml
+
+          # ── Load guardrails ──────────────────────────────────────────────────
+          path = os.environ["GUARDRAILS_FILE"]
+          if not os.path.exists(path):
+              print(f"❌ Guardrails file not found at {path}")
+              sys.exit(1)
+          with open(path) as f:
+              g = yaml.safe_load(f)
+
+          allowed = g.get("allowed_paths", [])
+          forbidden = g.get("forbidden_paths", [])
+          max_files = g.get("max_files_per_pr", 5)
+
+          # ── 1. Title ──────────────────────────────────────────────────────────
+          title = os.environ["PR_TITLE"]
+          if not re.match(r"^\[(fix|test|docs)\]", title, re.I):
+              print(f"❌ PR title must start with [fix]/[test]/[docs] — got: {title!r}")
+              sys.exit(1)
+          print(f"✅ Title OK: {title}")
+
+          # ── 2. Body must reference the PostHog error report ──────────────────
+          body = os.environ.get("PR_BODY", "") or ""
+          if "posthog.outrena.ai" not in body and "Error Tracking" not in body:
+              print("❌ PR body must link to the PostHog error report (posthog.outrena.ai/...)")
+              sys.exit(1)
+          print("✅ Body references PostHog error report")
+
+          # ── 3. Changed files list ────────────────────────────────────────────
+          base = os.environ["BASE_SHA"]
+          head = os.environ["HEAD_SHA"]
+          out = subprocess.check_output(
+              ["git", "diff", "--name-only", f"{base}...{head}"],
+              text=True,
+          )
+          files = [f for f in out.splitlines() if f.strip()]
+          if len(files) > max_files:
+              print(f"❌ PR changes {len(files)} files; guardrails allow max {max_files}")
+              for f in files:
+                  print(f"   - {f}")
+              sys.exit(1)
+          print(f"✅ File count OK ({len(files)}/{max_files})")
+
+          # ── 4. Path allow/deny check ─────────────────────────────────────────
+          import fnmatch
+          violations = []
+          for f in files:
+              # forbidden takes precedence
+              for pattern in forbidden:
+                  if fnmatch.fnmatch(f, pattern):
+                      violations.append((f, f"forbidden: {pattern}"))
+                      break
+              else:
+                  if not any(fnmatch.fnmatch(f, p) for p in allowed):
+                      violations.append((f, "not in allowed_paths"))
+          if violations:
+              print("❌ Path guardrail violations:")
+              for f, why in violations:
+                  print(f"   - {f}  ({why})")
+              sys.exit(1)
+          print("✅ All changed files are within allowed_paths")
+
+          # ── 5. Forbidden patterns (secrets, env files) ───────────────────────
+          for f in files:
+              if f.endswith((".env", ".env.local", ".env.production")) or ".env." in f:
+                  print(f"❌ PR touches env file: {f} — secrets need manual review")
+                  sys.exit(1)
+          print("✅ No env files touched")
+
+          print("\n🎉 All guardrails passed.")
+          PY
+
+  # ── Reuse the existing CI pipeline ──────────────────────────────────────────
+  # We re-run the same checks the regular CI does (ci.yml) — backend lint + test,
+  # frontend lint + build, terraform validate — so a self-driving PR can't bypass
+  # any check that a human PR would have to pass.
+  ci-backend-lint:
+    name: CI · Backend ruff lint
+    runs-on: ubuntu-latest
+    needs: validate-metadata
+    defaults:
+      run:
+        working-directory: outrena-backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: outrena-backend/pyproject.toml
+      - run: pip install ruff==0.8.4
+      - run: ruff check app tests
+      - run: ruff format --check app tests
+
+  ci-backend-test:
+    name: CI · Backend pytest (unit)
+    runs-on: ubuntu-latest
+    needs: validate-metadata
+    defaults:
+      run:
+        working-directory: outrena-backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: outrena-backend/pyproject.toml
+      - name: Install backend deps
+        run: |
+          pip install --upgrade pip
+          pip install \
+            "pytest==8.3.4" \
+            "pytest-asyncio==0.25.2" \
+            "pytest-cov==6.0.0" \
+            "fastapi==0.115.6" \
+            "uvicorn[standard]==0.34.0" \
+            "httpx==0.28.1" \
+            "pydantic==2.10.4" \
+            "pydantic-settings==2.7.1" \
+            "sqlalchemy[asyncio]==2.0.36" \
+            "asyncpg==0.30.0" \
+            "redis==5.2.1" \
+            "python-jose[cryptography]==3.3.0" \
+            "structlog==24.4.0" \
+            "email-validator==2.2.0" \
+            "python-multipart==0.0.20"
+      - name: Pytest
+        env:
+          ENVIRONMENT: test
+          SKIP_JWT_VERIFICATION: "true"
+          DATABASE_URL: "postgresql+asyncpg://test:test@localhost:5432/test"
+          REDIS_URL: "redis://localhost:6379/15"
+          BASE_DOMAIN: localhost
+        run: pytest -v --no-cov
+
+  ci-frontend:
+    name: CI · Frontend lint + build
+    runs-on: ubuntu-latest
+    needs: validate-metadata
+    defaults:
+      run:
+        working-directory: outrena-frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: outrena-frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+
+  ci-terraform:
+    name: CI · Terraform validate
+    runs-on: ubuntu-latest
+    needs: validate-metadata
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive terraform/
+      - working-directory: terraform/aws
+        run: terraform init -backend=false -input=false
+      - working-directory: terraform/aws
+        run: terraform validate
+      - working-directory: terraform/azure
+        run: terraform init -backend=false -input=false
+      - working-directory: terraform/azure
+        run: terraform validate
+
+  # ── Apply posthog-needs-review label ────────────────────────────────────────
+  label-needs-review:
+    name: Label · posthog-needs-review
+    runs-on: ubuntu-latest
+    needs: [ci-backend-lint, ci-backend-test, ci-frontend, ci-terraform]
+    steps:
+      - name: Add posthog-needs-review label
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              labels: ['posthog-needs-review'],
+            });
+            core.info("Added 'posthog-needs-review' label");
+
+  # ── Post a context comment so the reviewer knows what they're looking at ────
+  comment-context:
+    name: Comment · reviewer context
+    runs-on: ubuntu-latest
+    needs: [label-needs-review]
+    steps:
+      - name: Post reviewer-context comment
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const body = [
+              `## 🤖 PostHog self-driving PR — HITL review required`,
+              ``,
+              `This PR was **auto-generated** by PostHog self-driving in response to a`,
+              `production error signal. Per OUTRENA policy + GDPR Article 25 + SOC2`,
+              `change-management, **a human must review and approve before merge**.`,
+              ``,
+              `| Field | Value |`,
+              `|-------|-------|`,
+              `| PR | #${process.env.PR_NUMBER} — ${process.env.PR_TITLE} |`,
+              `| Author | @${process.env.PR_AUTHOR} (PostHog bot) |`,
+              `| CI run | ${process.env.RUN_URL} |`,
+              `| Guardrails | \`.posthog-guardrails.yml\` at repo root |`,
+              ``,
+              `### Reviewer checklist`,
+              ``,
+              `- [ ] The fix actually addresses the linked PostHog error report`,
+              `- [ ] No secrets / env files touched (guardrail enforced)`,
+              `- [ ] No \`terraform/**\` or \`.github/**\` changes (guardrail enforced)`,
+              `- [ ] No migrations under \`outrena-backend/alembic/versions/\` (guardrail enforced)`,
+              `- [ ] CI is green (backend lint+test, frontend lint+build, terraform validate)`,
+              `- [ ] The change is minimal — no scope creep beyond the error fix`,
+              `- [ ] After merge, watch the PostHog verify-fix workflow for the`,
+              `      verification result (1-hour observation window)`,
+              ``,
+              `### PostHog error report`,
+              ``,
+              `The error report link is in the PR description (look for the`,
+              `\`posthog.outrena.ai/.../error_tracking/...\` URL).`,
+              ``,
+              `### Disabling self-driving`,
+              ``,
+              `If this PR is wrong / annoying / during an incident, pause self-driving`,
+              `from PostHog UI → Settings → Self-driving → toggle OFF, OR by adding the`,
+              `\`posthog-paused\` label to this PR. See runbook 15 §"Disabling self-driving".`,
+              ``,
+              `_This comment was posted by \`.github/workflows/posthog-self-driving.yml\`._`,
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body,
+            });
+            core.info("Posted reviewer-context comment");
+
+  # ── Enforce no auto-merge (belt + braces — branch protection is the real gate) ─
+  enforce-no-auto-merge:
+    name: Enforce · no auto-merge
+    runs-on: ubuntu-latest
+    needs: [comment-context]
+    steps:
+      - name: Fail if auto-merge is enabled
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+            });
+            // The `auto_merge` field is non-null when auto-merge is enabled.
+            if (pr.auto_merge !== null) {
+              core.setFailed(
+                "Auto-merge is ENABLED on this PostHog self-driving PR. " +
+                "Per OUTRENA HITL policy, self-driving PRs MUST NOT be auto-merged. " +
+                "Disable auto-merge on the PR and require a human approval before merge."
+              );
+            } else {
+              core.info("✅ Auto-merge is disabled — HITL gate enforced.");
+            }

@@ -1,0 +1,188 @@
+# docker-compose.yml — OUTRENA local development stack
+#
+# Services: postgres, redis, keycloak, backend, frontend.
+# Additional observability services: prometheus, grafana.
+#
+# Usage:
+#   cp outrena-backend/.env.example outrena-backend/.env
+#   docker compose up -d
+#   curl http://localhost:8000/health | jq
+#   open http://localhost:3080        # frontend
+#   open http://localhost:8080        # Keycloak admin (admin/admin)
+#   open http://localhost:9090        # Prometheus
+#   open http://localhost:3000        # Grafana (admin/admin)
+#
+# Teardown (keep data):   docker compose down
+# Teardown (wipe data):   docker compose down -v
+
+services:
+  # ── PostgreSQL 16 ───────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: outrena-postgres
+    environment:
+      POSTGRES_USER: outrena
+      POSTGRES_PASSWORD: outrena_dev
+      POSTGRES_DB: outrena
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U outrena"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Redis 7 ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: outrena-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Keycloak 24 (with Postgres persistence) ─────────────────────────────────
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: outrena-keycloak
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/outrena
+      KC_DB_USERNAME: outrena
+      KC_DB_PASSWORD: outrena_dev
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: "8080"            # ISSUE-1 FIX: explicit port binding
+      KC_HOSTNAME: localhost           # ISSUE-1 FIX: required for redirect URI validation in dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./outrena-backend/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy  # ISSUE-1 FIX: wait for healthy postgres, not just started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/outrena/.well-known/openid-configuration || wget -qO- http://localhost:8080/realms/outrena/.well-known/openid-configuration || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 120s
+    restart: unless-stopped
+
+  # ── Backend (FastAPI) ───────────────────────────────────────────────────────
+  backend:
+    build: ./outrena-backend
+    container_name: outrena-backend
+    working_dir: /app
+    volumes:
+      - ./outrena-backend:/app
+    command: >
+      sh -c "python -m alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --workers 1"
+    environment:
+      ENVIRONMENT: development
+      BASE_DOMAIN: localhost
+      DATABASE_URL: postgresql+asyncpg://outrena:outrena_dev@postgres:5432/outrena
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      KEYCLOAK_BASE_URL: http://keycloak:8080
+      KEYCLOAK_REALM: outrena
+      KEYCLOAK_ADMIN_USERNAME: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      SKIP_JWT_VERIFICATION: "true"   # ISSUE-2: dev-bypass. Set to "false" + set VITE_DEV_BYPASS_AUTH=false for real Keycloak login
+      VERIFY_JWT_ISSUER: "false"
+      ALLOWED_ORIGINS: '["http://localhost:3080","http://localhost:5173","http://localhost"]'
+      LOG_LEVEL: INFO
+      OTEL_SERVICE_NAME: outrena-backend
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=development,service.namespace=outrena"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    restart: unless-stopped
+
+  # ── Frontend (nginx serving built SPA) ──────────────────────────────────────
+  frontend:
+    build:
+      context: ./outrena-frontend
+      args:
+        VITE_DEV_BYPASS_AUTH: "true"        # ISSUE-2: set to "false" for real Keycloak login
+        VITE_API_BASE_URL: "http://localhost:8000"
+        VITE_KEYCLOAK_URL: "http://localhost:8080"
+        VITE_KEYCLOAK_REALM: "outrena"
+        VITE_KEYCLOAK_CLIENT_ID: "frontend"
+    container_name: outrena-frontend
+    ports:
+      - "3080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Prometheus ───────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: outrena-prometheus-dev
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-dev-data:/prometheus
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # ── Grafana ──────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: outrena-grafana-dev
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./monitoring/grafana/provisioning-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-dev-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  prometheus-dev-data:
+  grafana-dev-data:

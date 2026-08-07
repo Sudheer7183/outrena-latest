@@ -1,0 +1,86 @@
+{
+  "_comment": "OUTRENA Keycloak ECS task definition (portable JSON form of terraform/aws/ecs_keycloak.tf).",
+  "_usage": "aws ecs register-task-definition --cli-input-json file://keycloak.json --region us-east-1",
+  "_notes": [
+    "Replace PLACEHOLDER_ARN values with real ARNs from your AWS account.",
+    "Keycloak needs its OWN database + role inside the RDS instance — provision manually before this service starts (see ecs_keycloak.tf comments).",
+    "executionRoleArn: needs ecs-tasks:AssumeRole + secretsmanager:GetSecretValue (for KC_DB_PASSWORD etc.).",
+    "taskRoleArn: typically empty — Keycloak has no AWS resource access beyond Secrets Manager (handled by executionRole).",
+    "KC_HOSTNAME must match the browser-facing URL (auth.outrena.com) — pitfall #2: iss mismatch breaks JWT validation.",
+    "Source of truth is terraform/aws/ecs_keycloak.tf — this JSON is for AWS Console / CLI users without Terraform."
+  ],
+  "family": "outrena-prod-keycloak",
+  "cpu": "1024",
+  "memory": "2048",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "executionRoleArn": "PLACEHOLDER_ECS_TASK_EXECUTION_ROLE_ARN",
+  "taskRoleArn": "PLACEHOLDER_KEYCLOAK_TASK_ROLE_ARN",
+  "tags": [
+    { "key": "Project", "value": "OUTRENA" },
+    { "key": "Phase", "value": "Phase6" },
+    { "key": "Component", "value": "keycloak" },
+    { "key": "Environment", "value": "production" }
+  ],
+  "containerDefinitions": [
+    {
+      "name": "keycloak",
+      "image": "quay.io/keycloak/keycloak:24.0",
+      "essential": true,
+      "entryPoint": ["/opt/keycloak/bin/kc.sh"],
+      "command": ["start", "--optimized"],
+      "portMappings": [
+        {
+          "name": "keycloak-http",
+          "containerPort": 8080,
+          "hostPort": 8080,
+          "protocol": "tcp",
+          "appProtocol": "http"
+        }
+      ],
+      "environment": [
+        { "name": "KC_PROXY", "value": "edge" },
+        { "name": "KC_HTTP_ENABLED", "value": "true" },
+        { "name": "KC_HOSTNAME", "value": "auth.outrena.com" },
+        { "name": "KC_HOSTNAME_STRICT", "value": "false" },
+        { "name": "KC_HOSTNAME_STRICT_HTTPS", "value": "false" },
+        { "name": "KC_DB", "value": "postgres" },
+        { "name": "KC_DB_URL", "value": "jdbc:postgresql://PLACEHOLDER_RDS_ENDPOINT:5432/keycloak" },
+        { "name": "KEYCLOAK_ADMIN", "value": "admin" },
+        { "name": "KC_LOG_LEVEL", "value": "INFO" }
+      ],
+      "secrets": [
+        { "name": "KEYCLOAK_ADMIN_PASSWORD", "valueFrom": "PLACEHOLDER_KEYCLOAK_ADMIN_SECRET_ARN:KEYCLOAK_ADMIN_PASSWORD::" },
+        { "name": "KC_DB_USERNAME", "valueFrom": "PLACEHOLDER_KEYCLOAK_DB_SECRET_ARN:KC_DB_USERNAME::" },
+        { "name": "KC_DB_PASSWORD", "valueFrom": "PLACEHOLDER_KEYCLOAK_DB_SECRET_ARN:KC_DB_PASSWORD::" }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -fsS http://localhost:8080/auth/realms/master >/dev/null || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 10,
+        "startPeriod": 90
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/outrena-prod/keycloak",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "mountPoints": [],
+      "volumesFrom": [],
+      "ulimits": [
+        {
+          "name": "nofile",
+          "softLimit": 65535,
+          "hardLimit": 65535
+        }
+      ],
+      "linuxParameters": {
+        "initProcessEnabled": true
+      }
+    }
+  ]
+}

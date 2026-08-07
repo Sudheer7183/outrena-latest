@@ -1,0 +1,165 @@
+{{/*
+backend-deployment.yaml — FastAPI uvicorn Deployment.
+
+- 2 replicas by default (HPA floors at this number)
+- envFrom: configmap (non-secret) + existingSecret (DATABASE_URL etc.)
+- env overrides for ENVIRONMENT / BASE_DOMAIN / REDIS_URL / KEYCLOAK_BASE_URL
+- Optional init container for `alembic upgrade head` (disabled by default)
+- readOnlyRootFilesystem + runAsNonRoot for §14 supply-chain hardening
+- livenessProbe/readinessProbe hit /health (returns 200 iff DB+Redis+Keycloak up)
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "outrena.fullname" . }}-{{ include "outrena.backend.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "outrena.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ include "outrena.backend.name" . }}
+spec:
+  {{- if not .Values.backend.autoscaling.enabled }}
+  replicas: {{ .Values.backend.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "outrena.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: {{ include "outrena.backend.name" . }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0          # zero-downtime — required for §16.3 cutover
+  template:
+    metadata:
+      labels:
+        {{- include "outrena.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: {{ include "outrena.backend.name" . }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Force rollout on configmap/secret change (otherwise envFrom updates
+        # silently miss running pods).
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "outrena.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: default
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.backend.migration.enabled }}
+      initContainers:
+        - name: migrate
+          image: {{ include "outrena.image" (list . .Values.backend.image) }}
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy | default .Values.global.imagePullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command: {{ toJson .Values.backend.migration.command }}
+          envFrom:
+            - configMapRef:
+                name: {{ .Values.backend.envFrom.configMapRef }}
+            - secretRef:
+                name: {{ .Values.backend.existingSecret }}
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      {{- end }}
+      containers:
+        - name: {{ include "outrena.backend.name" . }}
+          image: {{ include "outrena.image" (list . .Values.backend.image) }}
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy | default .Values.global.imagePullPolicy }}
+          {{- if .Values.backend.command }}
+          command: {{ toJson .Values.backend.command }}
+          {{- end }}
+          args:
+            - app.main:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --workers
+            - "1"
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ .Values.backend.envFrom.configMapRef }}
+            - secretRef:
+                name: {{ .Values.backend.existingSecret }}
+          env:
+            # Per-deploy overrides (explicit env wins over envFrom).
+            - name: ENVIRONMENT
+              value: {{ .Values.global.environment | quote }}
+            - name: BASE_DOMAIN
+              value: {{ .Values.global.baseDomain | quote }}
+            - name: KEYCLOAK_BASE_URL
+              # Internal ClusterIP — avoids hairpin via ingress.
+              value: {{ printf "http://%s-keycloak:%v" (include "outrena.fullname" .) .Values.keycloak.service.port | quote }}
+            - name: KEYCLOAK_REALM
+              value: "outrena"
+            # REDIS_URL is constructed at runtime from REDIS_HOST/PORT + the
+            # REDIS_AUTH_TOKEN secret — see app.core.config for the logic.
+            - name: REDIS_HOST
+              value: {{ printf "%s-redis" (include "outrena.fullname" .) | quote }}
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_DB
+              value: "0"
+            - name: CELERY_BROKER_DB
+              value: "1"
+            - name: CELERY_RESULT_BACKEND_DB
+              value: "2"
+            - name: SCHEDULER_ENABLED
+              value: "true"
+            - name: STORAGE_PROVIDER
+              value: {{ .Values.global.storageProvider | quote }}
+            {{- range $k, $v := .Values.backend.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- with .Values.backend.probes.readiness }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.backend.probes.liveness }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          {{- with .Values.backend.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.backend.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

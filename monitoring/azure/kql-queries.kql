@@ -1,0 +1,165 @@
+// OUTRENA Phase 6 — KQL query library for Azure Log Analytics
+// Mirrors the operational KQL runbook referenced from the Azure Terraform
+// monitoring.tf + log_alerts.tf outputs (log_analytics_workspace_id).
+// Each query has a title comment. Use the Azure Portal > Logs blade, or the
+// `az monitor log-analytics query -w <workspace-id> --analytics-query "<query>"` CLI.
+
+// ============================================================================
+// 1. Top 10 slowest API calls (last 1h)
+//    Drives: backend p99 latency triage, scheduler-tick-slow alert
+// ============================================================================
+AppRequests
+| where TimeGenerated > ago(1h)
+| where AppRoleName =~ "outrena-backend"
+| top-n 10 of DurationMs by DurationMs desc
+| project TimeGenerated, AppRoleName, Url, HttpMethod, DurationMs, ResultCode, tenant_slug=customDimensions.tenant_slug, request_id=customDimensions.request_id
+| order by DurationMs desc
+
+// ----------------------------------------------------------------------------
+// 2. Error breakdown by tenant (last 24h)
+//    Drives: tenant-isolation-violation alert, 5xx triage per tenant
+// ----------------------------------------------------------------------------
+ContainerAppConsoleLogs
+| where TimeGenerated > ago(24h)
+| where ContainerAppName =~ "outrena-backend"
+| where Level == "ERROR" or LogEntry has "ERROR"
+| extend tenant_slug = extract("tenant_slug=([a-z0-9-]+)", 1, LogEntry)
+| summarize errorCount = count() by tenant_slug, bin(TimeGenerated, 1h)
+| order by errorCount desc nulls last
+| render timechart
+
+// ----------------------------------------------------------------------------
+// 3. Scheduler tick anomalies (last 6h)
+//    Detects: tick_duration > SCHEDULER_TICK_SECONDS, ticks skipped, PARTIAL cap hits
+//    Mitigates: §14 Risk #4 (scheduler partial-cap)
+// ----------------------------------------------------------------------------
+ContainerAppConsoleLogs
+| where TimeGenerated > ago(6h)
+| where ContainerAppName =~ "outrena-scheduler"
+| where LogEntry has "tick summary"
+| extend
+    tick_duration_ms   = tolong(extract("tick_duration_ms=([0-9]+)", 1, LogEntry)),
+    queue_depth        = tolong(extract("queue_depth=([0-9]+)", 1, LogEntry)),
+    processed          = tolong(extract("processed=([0-9]+)", 1, LogEntry)),
+    succeeded          = tolong(extract("succeeded=([0-9]+)", 1, LogEntry)),
+    failed             = tolong(extract("failed=([0-9]+)", 1, LogEntry)),
+    partial_cap_hits   = tolong(extract("partial_cap_hits=([0-9]+)", 1, LogEntry))
+| project TimeGenerated, tick_duration_ms, queue_depth, processed, succeeded, failed, partial_cap_hits
+| extend tick_anomaly = iff(tick_duration_ms > 300000 or partial_cap_hits > 0 or succeeded < failed, true, false)
+| where tick_anomaly == true
+| order by TimeGenerated desc
+
+// ----------------------------------------------------------------------------
+// 4. LLM cost per tenant (last 24h)
+//    Drives: cost dashboards, billing disputes, abnormal-usage detection
+// ----------------------------------------------------------------------------
+ContainerAppConsoleLogs
+| where TimeGenerated > ago(24h)
+| where ContainerAppName in ("outrena-backend", "outrena-worker")
+| where LogEntry has "llm.call.complete"
+| extend
+    tenant_slug         = extract("tenant_slug=([a-z0-9-]+)", 1, LogEntry),
+    prompt_tokens       = tolong(extract("prompt_tokens=([0-9]+)", 1, LogEntry)),
+    completion_tokens   = tolong(extract("completion_tokens=([0-9]+)", 1, LogEntry)),
+    cost_usd            = toreal(extract("cost_usd=([0-9.]+)", 1, LogEntry))
+| where isnotempty(tenant_slug)
+| summarize
+    totalPromptTokens   = sum(prompt_tokens),
+    totalComplTokens    = sum(completion_tokens),
+    totalCostUSD        = sum(cost_usd),
+    callCount           = count()
+  by tenant_slug
+| extend costPerCall = totalCostUSD / callCount
+| order by totalCostUSD desc
+
+// ----------------------------------------------------------------------------
+// 5. Active users per tenant (last 24h)
+//    "Active" = emitted at least 1 API request with a valid JWT.
+// ----------------------------------------------------------------------------
+AppRequests
+| where TimeGenerated > ago(24h)
+| where AppRoleName =~ "outrena-backend"
+| where ResultCode startswith "2"
+| extend tenant_slug = tostring(customDimensions.tenant_slug)
+| extend user_id     = tostring(customDimensions.user_id)
+| where isnotempty(tenant_slug) and isnotempty(user_id)
+| summarize activeUsers = dcount(user_id), requestCount = count() by tenant_slug
+| order by activeUsers desc
+
+// ----------------------------------------------------------------------------
+// 6. Cross-tenant access attempts (403s) — last 1h
+//    Drives: tenant-isolation-violation alert, §14 Risk #17 tenant schema drift
+// ----------------------------------------------------------------------------
+AppRequests
+| where TimeGenerated > ago(1h)
+| where ResultCode == "403"
+| extend
+    tenant_slug  = tostring(customDimensions.tenant_slug),
+    requested_resource = tostring(customDimensions.http_route),
+    user_id      = tostring(customDimensions.user_id)
+| summarize attempts = count() by tenant_slug, requested_resource, user_id, bin(TimeGenerated, 5m)
+| where attempts > 5
+| order by attempts desc
+
+// ----------------------------------------------------------------------------
+// 7. MailBridge send failures (last 1h)
+//    Mitigates: §14 Risk #15 (MailBridge deliverability)
+// ----------------------------------------------------------------------------
+ContainerAppConsoleLogs
+| where TimeGenerated > ago(1h)
+| where ContainerAppName in ("outrena-backend", "outrena-worker")
+| where LogEntry has "mailbridge.send_failed"
+| extend
+    tenant_slug = extract("tenant_slug=([a-z0-9-]+)", 1, LogEntry),
+    recipient   = extract("recipient=([^,\\s]+)", 1, LogEntry),
+    error_code  = extract("error_code=([a-z_]+)", 1, LogEntry)
+| summarize failedSends = count() by tenant_slug, error_code, bin(TimeGenerated, 5m)
+| order by failedSends desc
+
+// ----------------------------------------------------------------------------
+// 8. Keycloak admin / brute-force attempts (last 1h)
+//    Drives: keycloak-auth-failures alert
+// ----------------------------------------------------------------------------
+ContainerAppConsoleLogs
+| where TimeGenerated > ago(1h)
+| where ContainerAppName =~ "keycloak"
+| where LogEntry has "LOGIN_ERROR"
+| extend
+    ip_address = extract("ip=([0-9.]+)", 1, LogEntry),
+    username   = extract("user=([^,\\s]+)", 1, LogEntry)
+| summarize failedAttempts = count() by ip_address, username, bin(TimeGenerated, 5m)
+| where failedAttempts > 5
+| order by failedAttempts desc
+
+// ----------------------------------------------------------------------------
+// 9. JWKS rotation status (last 7d)
+//    Mitigates: §14 Risk #2 (Keycloak JWKS rotation failure)
+// ----------------------------------------------------------------------------
+ContainerAppConsoleLogs
+| where TimeGenerated > ago(7d)
+| where ContainerAppName =~ "outrena-backend"
+| where LogEntry has "jwks"
+| extend
+    rotation_status = extract("status=([a-z_]+)", 1, LogEntry),
+    key_count       = toint(extract("key_count=([0-9]+)", 1, LogEntry))
+| summarize rotations = count(), failures = countif(rotation_status =~ "failed") by bin(TimeGenerated, 1d)
+| render columnchart
+
+// ----------------------------------------------------------------------------
+// 10. Container App revision rollout health (last 30m)
+//     Drives: blue/green cutover §16.3 verification
+// ----------------------------------------------------------------------------
+ContainerAppConsoleLogs
+| where TimeGenerated > ago(30m)
+| where ContainerAppName =~ "outrena-backend"
+| summarize
+    totalLogs   = count(),
+    errorLogs   = countif(Level == "ERROR" or LogEntry has "ERROR"),
+    warnLogs    = countif(Level == "WARN"  or LogEntry has "WARN")
+  by RevisionName, bin(TimeGenerated, 5m)
+| extend errorRate = errorLogs * 100.0 / totalLogs
+| order by TimeGenerated desc
+
+// ============================================================================
+// End of KQL library
+// ============================================================================

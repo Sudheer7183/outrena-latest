@@ -1,0 +1,182 @@
+{{/*
+keycloak-deployment.yaml — Keycloak 24 (production mode).
+
+- command: `kc.sh start --optimized` (image already has the optimized dist baked)
+- KC_PROXY=edge — TLS terminated at ingress-nginx, Keycloak speaks plain HTTP
+- KC_HOSTNAME=auth.<baseDomain> — MUST match browser URL (pitfall #2: iss mismatch)
+- KC_DB=postgres — dedicated `keycloak` database inside the Postgres instance
+- initContainer waits for Postgres to be reachable on port 5432 before the
+  Keycloak container starts (avoids boot loop on cold DB)
+
+The Keycloak admin password + KC_DB_USERNAME / KC_DB_PASSWORD are loaded from
+the existingSecret via envFrom (template references keys explicitly).
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "outrena.fullname" . }}-{{ include "outrena.keycloak.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "outrena.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ include "outrena.keycloak.name" . }}
+spec:
+  replicas: {{ .Values.keycloak.replicas }}
+  selector:
+    matchLabels:
+      {{- include "outrena.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: {{ include "outrena.keycloak.name" . }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "outrena.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: {{ include "outrena.keycloak.name" . }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "outrena.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: default
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.keycloak.initContainer.enabled }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ .Values.keycloak.initContainer.image }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for postgres at {{ .Values.keycloak.initContainer.postgresHost }}:{{ .Values.keycloak.initContainer.postgresPort }}"
+              until pg_isready \
+                -h {{ .Values.keycloak.initContainer.postgresHost }} \
+                -p {{ .Values.keycloak.initContainer.postgresPort | quote }} \
+                -U outrena; do
+                echo "postgres not ready, retrying in 3s..."
+                sleep 3
+              done
+              echo "postgres is reachable, starting Keycloak"
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      {{- end }}
+      containers:
+        - name: {{ include "outrena.keycloak.name" . }}
+          image: {{ include "outrena.image" (list . .Values.keycloak.image) }}
+          imagePullPolicy: {{ .Values.keycloak.image.pullPolicy | default .Values.global.imagePullPolicy }}
+          command:
+            - /opt/keycloak/bin/kc.sh
+          args:
+            - start
+            - --optimized
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: {{ .Values.keycloak.existingSecret }}
+          env:
+            # Per-deploy overrides — explicit env wins over envFrom.
+            - name: KC_PROXY
+              value: {{ .Values.keycloak.env.KC_PROXY | quote }}
+            - name: KC_HTTP_ENABLED
+              value: {{ .Values.keycloak.env.KC_HTTP_ENABLED | quote }}
+            - name: KC_HOSTNAME
+              value: {{ printf "auth.%s" .Values.global.baseDomain | quote }}
+            - name: KC_HOSTNAME_STRICT
+              value: {{ .Values.keycloak.env.KC_HOSTNAME_STRICT | quote }}
+            - name: KC_HOSTNAME_STRICT_HTTPS
+              value: {{ .Values.keycloak.env.KC_HOSTNAME_STRICT_HTTPS | quote }}
+            - name: KC_DB
+              value: {{ .Values.keycloak.env.KC_DB | quote }}
+            - name: KC_DB_URL
+              # External PG URL — operators set postgresHost on keycloak.initContainer
+              # AND ensure the JDBC URL is correct. Override via values if needed.
+              value: {{ printf "jdbc:postgresql://%s:%v/keycloak" .Values.keycloak.initContainer.postgresHost .Values.keycloak.initContainer.postgresPort | quote }}
+            - name: KEYCLOAK_ADMIN
+              value: {{ .Values.keycloak.env.KEYCLOAK_ADMIN | quote }}
+            - name: KC_LOG_LEVEL
+              value: {{ .Values.keycloak.env.KC_LOG_LEVEL | quote }}
+          # Keycloak takes 30-60s to boot (DB schema init). Use a generous
+          # startup probe (k8s 1.20+) so liveness doesn't kill it early.
+          startupProbe:
+            httpGet:
+              path: /auth/realms/master
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /auth/realms/outrena/.well-known/openid-configuration
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /auth/realms/master
+              port: 8080
+            initialDelaySeconds: 120   # post-startupProbe success
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.keycloak.resources | nindent 12 }}
+          # Keycloak needs writable /tmp + /opt/keycloak/data for H2 dev mode
+          # (production uses Postgres, but the directories still get touched).
+          volumeMounts:
+            - name: keycloak-data
+              mountPath: /opt/keycloak/data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: keycloak-data
+          {{- if .Values.keycloak.persistence }}
+          {{- if .Values.keycloak.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "outrena.fullname" . }}-keycloak-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}

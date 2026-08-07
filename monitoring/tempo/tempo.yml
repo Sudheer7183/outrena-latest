@@ -1,0 +1,48 @@
+# tempo.yml — OUTRENA Tempo configuration (Phase 8 — SAAS2-OBS-BE).
+#
+# Minimal single-node config for dev / staging / small prod. For HA / large
+# prod, switch the storage backend to S3 / GCS / Azure Blob (see Tempo docs
+# — https://grafana.com/docs/tempo/latest/configuration/).
+#
+# Tempo receives traces from the otel-collector via OTLP/gRPC on :4317 (and
+# HTTP on :4318). Grafana queries the :3200 HTTP API via the provisioned
+# Tempo datasource (see monitoring/grafana/provisioning-datasources.yml).
+
+server:
+  http_listen_port: 3200
+  log_level: info
+
+# Trace ingestion — the OTel collector forwards here.
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+# Ingestion → chunk encoding → storage pipeline.
+ingester:
+  max_block_duration: 5m
+
+# Local storage — sufficient for dev / staging. Prod should switch to S3.
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal
+
+# Query API — Grafana hits /api/traces/<trace_id> + /api/search.
+querier:
+  max_concurrent_queries: 4
+
+# Retention — 7 days for dev, 30 for prod (override via envsubst).
+limits:
+  retention_period: 168h  # 7 days
+
+# Metrics endpoint — Prometheus can scrape this if desired (optional;
+# we already scrape the otel-collector, which emits equivalent metrics).
+metrics_generator_enabled: false

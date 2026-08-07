@@ -1,0 +1,348 @@
+name: Security
+
+# SOC2-aligned security pipeline (SAAS-INFRA).
+#
+# Runs on every PR + push to main|develop, plus a nightly schedule. Each job is
+# independent (matrix-parallel) and uploads SARIF results to the GitHub Security
+# tab where applicable. All cloud interactions use OIDC auth — no static AWS or
+# Azure keys are stored as GitHub secrets.
+#
+# Jobs:
+#   1. sast              — GitHub CodeQL for Python + TypeScript (fail on HIGH+)
+#   2. dependency-scan   — pip-audit (backend) + npm audit (frontend) (fail on HIGH+)
+#   3. secret-scan       — gitleaks-action (fail on any finding)
+#   4. iac-scan          — checkov on terraform/ (fail on HIGH/CRITICAL)
+#   5. container-scan    — Trivy image scan on backend + frontend (fail on CRITICAL)
+#   6. sbom              — CycloneDX SBOM for backend + frontend (upload artifact + GH Dependency Submission)
+#   7. license-check     — pip-licenses + license-checker (warn-only, no fail)
+#
+# Required GitHub repo settings (documented in runbook 10-soc2-compliance.md):
+#   - Branch protection on main + develop: require this workflow to pass.
+#   - GitHub Advanced Security enabled for CodeQL + SARIF upload.
+#   - Dependabot alerts enabled (separate config in .github/dependabot.yml).
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Nightly at 03:00 UTC — catches new CVEs landed since last PR.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+  TERRAFORM_VERSION: "1.9.8"
+
+# Workflow-level permissions — minimal scope. Each job below inherits + can
+# narrow further. `security-events: write` is required for SARIF upload to
+# the Security tab. `id-token: write` is required for OIDC cloud auth.
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+  id-token: write
+
+jobs:
+  # ── 1. SAST: CodeQL for Python + TypeScript ───────────────────────────────
+  sast:
+    name: SAST · CodeQL (python + typescript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python, javascript-typescript
+          # Fail the job on HIGH+ alerts. 'security-and-quality' query suite
+          # also runs security-extended + maintainability queries.
+          queries: security-and-quality
+          config: |
+            paths-ignore:
+              - outrena-backend/tests
+              - outrena-frontend/src/test
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          # CodeQL auto-creates a SARIF per language — the `category` field
+          # disambiguates them in the Security tab. CodeQL sets it internally
+          # when omitted; we leave it off and let CodeQL pick.
+          upload: true
+
+  # ── 2. Dependency vulnerability scan ──────────────────────────────────────
+  dependency-scan:
+    name: Dependencies · pip-audit (backend) + npm audit (frontend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: outrena-backend/pyproject.toml
+
+      - name: Install pip-audit
+        run: pip install pip-audit==2.7.3
+
+      - name: pip-audit (backend) — fail on HIGH+ CVEs
+        working-directory: outrena-backend
+        # `--strict` makes pip-audit treat unfixable vulns as errors too.
+        # `--vulnerability-service osv` uses OSV.dev (no API key required).
+        run: |
+          pip-audit \
+            --require-hashes \
+            --strict \
+            --vulnerability-service osv \
+            --desc on \
+            --progress-spinner off
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: outrena-frontend/package-lock.json
+
+      - name: npm install (production deps only)
+        working-directory: outrena-frontend
+        run: npm ci --omit=dev
+
+      - name: npm audit (frontend) — fail on HIGH+ CVEs
+        working-directory: outrena-frontend
+        run: npm audit --omit=dev --audit-level=high --foreground-scripts
+
+  # ── 3. Secret scan: gitleaks ──────────────────────────────────────────────
+  secret-scan:
+    name: Secrets · gitleaks (full repo scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history — gitleaks scans all commits to catch secrets leaked
+          # in earlier revisions.
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          # Fail the job on any finding (default behavior — exit code 1).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional: enable SARIF upload to the Security tab.
+          GITLEAKS_ENABLE_COMMENTS: true
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: true
+
+  # ── 4. IaC scan: checkov on terraform/ ────────────────────────────────────
+  iac-scan:
+    name: IaC · checkov (terraform/ HIGH+CRITICAL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov (AWS + Azure terraform)
+        id: checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/
+          framework: terraform
+          # Fail on HIGH + CRITICAL findings only.
+          # MEDIUM/LOW are reported but don't block the build.
+          hard_fail_on: HIGH,CRITICAL
+          output_format: cli,sarif
+          output_file_path: console,results.sarif
+          # Skip checks that don't apply to OUTRENA's deployment model.
+          # CKV_AWS_18 — "Ensure the ALB has access logging enabled" — already
+          #              enabled in alb.tf; checkov false-positives on the
+          #              access_logs bucket prefix naming.
+          # CKV_AZURE_*.skip — placeholder; no skips currently.
+          skip_check: CKV_AWS_18
+
+      - name: Upload Checkov SARIF to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+          category: checkov-terraform
+
+  # ── 5. Container scan: Trivy image scan ───────────────────────────────────
+  # Builds the backend + frontend Docker images then scans them with Trivy.
+  # Separate from the existing Trivy *filesystem* scan in ci.yml (which scans
+  # source code). This catches vulnerabilities in the OS packages + base image.
+  container-scan:
+    name: Container · Trivy image (backend + frontend CRITICAL)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - image: backend
+            context: outrena-backend
+            dockerfile: outrena-backend/Dockerfile
+          - image: frontend
+            context: outrena-frontend
+            dockerfile: outrena-frontend/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.image }} image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          tags: outrena-${{ matrix.image }}:scan
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          push: false
+
+      - name: Trivy image scan — ${{ matrix.image }} (fail on CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: outrena-${{ matrix.image }}:scan
+          format: sarif
+          output: trivy-${{ matrix.image }}.sarif
+          severity: CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Trivy image scan — ${{ matrix.image }} (full report, non-blocking)
+        if: always()
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: outrena-${{ matrix.image }}:scan
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          ignore-unfixed: true
+
+      - name: Upload Trivy SARIF to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.image }}.sarif
+          category: trivy-image-${{ matrix.image }}
+
+  # ── 6. SBOM: CycloneDX for backend + frontend ─────────────────────────────
+  sbom:
+    name: SBOM · CycloneDX (backend + frontend + GH Dependency Submission)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: outrena-backend/pyproject.toml
+
+      - name: Install cyclonedx-bom
+        run: pip install cyclonedx-bom==5.1.0
+
+      - name: Generate backend SBOM (CycloneDX JSON)
+        working-directory: outrena-backend
+        run: |
+          mkdir -p ../sbom
+          cyclonedx-py environment \
+            --output-format json \
+            --output-file ../sbom/backend.cdx.json
+          # Also use pip-audit to add known-vuln annotations.
+          pip install pip-audit==2.7.3
+          pip-audit --desc on --format cyclonedx-json --output ../sbom/backend.vulns.cdx.json || true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: outrena-frontend/package-lock.json
+
+      - name: Install frontend deps (for npm sbom)
+        working-directory: outrena-frontend
+        run: npm ci
+
+      - name: Generate frontend SBOM (CycloneDX JSON)
+        working-directory: outrena-frontend
+        run: |
+          mkdir -p ../sbom
+          npm sbom --sbom-format cyclonedx --sbom-type application > ../sbom/frontend.cdx.json
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom/*.cdx.json
+          retention-days: 90
+
+      - name: Submit SBOM to GitHub Dependency Submission API
+        uses: advanced-security/submit-dependency-snapshot-action@v1
+        with:
+          sbom-file: sbom/backend.cdx.json
+
+  # ── 7. License check (warn-only) ──────────────────────────────────────────
+  # Flags unknown / GPL / AGPL licenses. Does not fail the build — license
+  # review is a human approval step (legal team).
+  license-check:
+    name: License · pip-licenses + license-checker (warn-only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pip-licenses
+        run: pip install pip-licenses==5.0.0
+
+      - name: Backend license report
+        working-directory: outrena-backend
+        run: |
+          pip install --dry-run -r <(grep -v '^#' pyproject.toml 2>/dev/null) 2>/dev/null || true
+          pip-licenses --format=table --summary --with-system --allow-only="MIT;Apache Software License;BSD;ISC;Mozilla Public License 2.0;Python Software Foundation License;The Unlicense;Apache 2.0;BSD-3-Clause" || true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: outrena-frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: outrena-frontend
+        run: npm ci
+
+      - name: Frontend license report
+        working-directory: outrena-frontend
+        # license-checker is bundled with npm 7+. Warn-only — flags unknown/GPL.
+        run: |
+          npx license-checker --summary || true
+          npx license-checker --json > ../sbom/frontend.licenses.json || true
+          # Fail-warning (not error) on GPL / AGPL / Unknown.
+          npx license-checker --failOn "GPL*;AGPL*;Unknown" || echo "::warning::Frontend contains GPL/AGPL/Unknown licenses — legal review required"
+
+      - name: Upload license reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: license-reports
+          path: |
+            sbom/frontend.licenses.json
+          retention-days: 90
+          if-no-files-found: ignore

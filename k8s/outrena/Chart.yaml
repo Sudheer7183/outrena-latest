@@ -1,0 +1,28 @@
+apiVersion: v2
+name: outrena
+description: |
+  OUTRENA platform — Kubernetes Helm chart for backend (FastAPI), frontend (Vite + nginx),
+  Celery worker, Keycloak (24) with ingress-nginx + cert-manager TLS. External Postgres +
+  Redis by default; optional in-cluster subchart placeholders for dev.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - outrena
+  - fastapi
+  - celery
+  - keycloak
+  - vite
+  - multi-tenant
+  - sales-engagement
+home: https://github.com/outrena/outrena
+sources:
+  - https://github.com/outrena/outrena
+maintainers:
+  - name: OUTRENA Platform Team
+    email: platform@outrena.com
+    url: https://outrena.com
+icon: https://outrena.com/favicon.svg
+annotations:
+  outrena.com/phase: "6"
+  outrena.com/migration-doc-section: "§10 (CI/CD pipeline) + §13.1 (env vars) + §16.3 (blue/green)"

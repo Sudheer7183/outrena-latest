@@ -1,0 +1,263 @@
+name: Rollback
+
+# Phase 6 — Emergency rollback. Flips blue/green weight on Route 53 / Traffic
+# Manager back to the OLD (Next.js) stack. Triggers via workflow_dispatch (manual
+# "break glass") or workflow_call (invoked from cd-prod-* / blue-green-cutover
+# when monitoring trips). Pages on-call + opens a GitHub incident issue if
+# environment=production.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cloud:
+        description: "Target cloud"
+        required: true
+        type: choice
+        options: [aws, azure]
+        default: aws
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [staging, production]
+        default: production
+      to_weight_new:
+        description: "New weight for the new stack (0 = full rollback to old Next.js)"
+        required: true
+        type: string
+        default: "0"
+      reason:
+        description: "Reason for rollback"
+        required: false
+        type: string
+        default: "manual rollback"
+  workflow_call:
+    inputs:
+      cloud:
+        type: string
+        required: true
+      environment:
+        type: string
+        required: true
+      to_weight_new:
+        type: string
+        required: false
+        default: "0"
+      reason:
+        type: string
+        required: false
+        default: "auto-rollback from caller workflow"
+
+concurrency:
+  group: rollback-${{ inputs.cloud }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  TERRAFORM_VERSION: "1.9.8"
+  PYTHON_VERSION: "3.11"
+  AWS_REGION: us-east-1
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+  actions: read
+
+jobs:
+  # ── Flip weight immediately (no approval gate — emergency) ──────────────────
+  shift-weight:
+    name: Shift weight · rollback
+    runs-on: ubuntu-latest
+    outputs:
+      old-weight: ${{ steps.calc.outputs.old_weight }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute old weight
+        id: calc
+        run: |
+          NEW_W="${{ inputs.to_weight_new }}"
+          OLD_W=$((100 - NEW_W))
+          echo "Rolling back: new=${NEW_W}% old=${OLD_W}%"
+          echo "old_weight=${OLD_W}" >> "$GITHUB_OUTPUT"
+
+      # ── AWS branch ──────────────────────────────────────────────────────────
+      - name: Configure AWS credentials (OIDC)
+        if: inputs.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: AWS · install Terraform
+        if: inputs.cloud == 'aws'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: AWS · terraform init
+        if: inputs.cloud == 'aws'
+        working-directory: terraform/aws
+        run: |
+          ENV="${{ inputs.environment }}"
+          terraform init \
+            -backend-config=envs/${ENV}/backend.tfbackend \
+            -input=false
+
+      - name: AWS · terraform apply (rollback weight)
+        if: inputs.cloud == 'aws'
+        working-directory: terraform/aws
+        env:
+          NEW_W: ${{ inputs.to_weight_new }}
+          OLD_W: ${{ steps.calc.outputs.old_weight }}
+        run: |
+          ENV="${{ inputs.environment }}"
+          terraform apply \
+            -var-file=envs/${ENV}/${ENV}.tfvars \
+            -var="blue_green_weight_new=${NEW_W}" \
+            -var="blue_green_weight_old=${OLD_W}" \
+            -input=false \
+            -auto-approve
+
+      # ── Azure branch ────────────────────────────────────────────────────────
+      - name: Azure login (OIDC)
+        if: inputs.cloud == 'azure'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Azure · install Terraform
+        if: inputs.cloud == 'azure'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Azure · terraform init
+        if: inputs.cloud == 'azure'
+        working-directory: terraform/azure
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          ENV="${{ inputs.environment }}"
+          terraform init \
+            -backend-config=envs/${ENV}/backend.tfbackend \
+            -input=false
+
+      - name: Azure · terraform apply (rollback weight)
+        if: inputs.cloud == 'azure'
+        working-directory: terraform/azure
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          NEW_W: ${{ inputs.to_weight_new }}
+          OLD_W: ${{ steps.calc.outputs.old_weight }}
+        run: |
+          ENV="${{ inputs.environment }}"
+          terraform apply \
+            -var-file=envs/${ENV}/${ENV}.tfvars \
+            -var="blue_green_weight_new=${NEW_W}" \
+            -var="blue_green_weight_old=${OLD_W}" \
+            -input=false \
+            -auto-approve
+
+  # ── Page on-call if production ──────────────────────────────────────────────
+  page-oncall:
+    name: Page · on-call
+    runs-on: ubuntu-latest
+    needs: shift-weight
+    if: inputs.environment == 'production'
+    steps:
+      - name: Trigger PagerDuty incident
+        uses: githubocto/pagerduty-notification-action@v1.2.0
+        with:
+          service-id: ${{ secrets.PAGERDUTY_SERVICE_ID }}
+          api-key: ${{ secrets.PAGERDUTY_API_KEY }}
+          urgency: high
+          title: |
+            [ROLLBACK] ${{ inputs.cloud }} ${{ inputs.environment }} → new=${{ inputs.to_weight_new }}%
+          summary: |
+            OUTRENA production rollback triggered.
+            Cloud: ${{ inputs.cloud }}
+            Environment: ${{ inputs.environment }}
+            New weight: ${{ inputs.to_weight_new }}%
+            Reason: ${{ inputs.reason }}
+            Triggered by: ${{ github.actor }} (workflow: ${{ github.workflow }})
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  # ── Create incident GitHub issue ────────────────────────────────────────────
+  create-incident:
+    name: Create · incident issue
+    runs-on: ubuntu-latest
+    needs: shift-weight
+    if: inputs.environment == 'production'
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Create issue
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const ts = new Date().toISOString();
+            const body = [
+              `## Incident · Production Rollback`,
+              ``,
+              `- **Cloud:** ${{ inputs.cloud }}`,
+              `- **Environment:** ${{ inputs.environment }}`,
+              `- **Rolled back to:** new stack at ${{ inputs.to_weight_new }}% (old Next.js stack at ${{ needs.shift-weight.outputs.old-weight }}%)`,
+              `- **Reason:** ${{ inputs.reason }}`,
+              `- **Triggered by:** ${{ github.actor }}`,
+              `- **Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`,
+              `- **Timestamp (UTC):** ${ts}`,
+              ``,
+              `### Incident response checklist`,
+              ``,
+              `- [ ] Acknowledge PagerDuty page`,
+              `- [ ] Confirm traffic has shifted (curl api.outrena.com/health from at least 2 regions)`,
+              `- [ ] Pull CloudWatch / Azure Monitor screenshots for the 30-min window around the trigger`,
+              `- [ ] Identify root cause (deploy SHA, tfvars diff, log anomaly)`,
+              `- [ ] File postmortem within 5 business days (template: .github/ISSUE_TEMPLATE/incident-postmortem.md)`,
+              `- [ ] Schedule blameless review`,
+              ``,
+              `/label incident,sev:1,cloud:${{ inputs.cloud }},env:${{ inputs.environment }}`,
+            ].join('\n');
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[INCIDENT] ${ts} · ${{ inputs.cloud }} ${{ inputs.environment }} rollback (new=${{ inputs.to_weight_new }}%)`,
+              body,
+            });
+            core.info(`Incident issue #${issue.data.number} created: ${issue.data.html_url}`);
+
+  # ── Slack notification (always) ──────────────────────────────────────────────
+  notify-slack:
+    name: Notify · Slack
+    runs-on: ubuntu-latest
+    needs: [shift-weight, page-oncall, create-incident]
+    if: always()
+    steps:
+      - name: Post to Slack
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          slack-message: |
+            :rotating_light: *ROLLBACK · ${{ inputs.cloud }} ${{ inputs.environment }}* :rotating_light:
+            New weight: ${{ inputs.to_weight_new }}% (old stack at ${{ needs.shift-weight.outputs.old-weight }}%)
+            Reason: ${{ inputs.reason }}
+            Actor: ${{ github.actor }}
+            Shift:       ${{ needs.shift-weight.result }}
+            Page oncall: ${{ needs.page-oncall.result }}
+            Incident:    ${{ needs.create-incident.result }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_INCIDENT_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

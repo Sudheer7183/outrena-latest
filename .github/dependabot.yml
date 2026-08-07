@@ -1,0 +1,182 @@
+# Dependabot configuration (SAAS-INFRA).
+#
+# Weekly dependency update PRs for: pip (backend), npm (frontend),
+# GitHub Actions, Terraform. Minor updates are grouped to reduce PR noise.
+# Security-only updates get the `security` label and bypass grouping so they
+# are reviewed + merged faster.
+#
+# Reviewers are auto-assigned via the GitHub team handles documented in
+# .github/CODEOWNERS. The teams map to real GitHub teams:
+#   @platform-team — overall infra + CI
+#   @backend-team  — Python backend
+#   @frontend-team — TypeScript frontend
+#   @devops-team   — Terraform + workflows
+#   @security-team — security-relevant updates (CVE patches)
+#   @sre-team      — runbooks + ops
+
+version: 2
+
+updates:
+  # ── pip (backend) ──────────────────────────────────────────────────────────
+  - package-ecosystem: "pip"
+    directory: "/outrena-backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    reviewers:
+      - "outrena/backend-team"
+    assignees:
+      - "outrena/backend-team"
+    groups:
+      # Group minor + patch updates so we get one PR per week per ecosystem.
+      # Major version bumps (e.g. fastapi 0.x → 1.x) still get their own PR.
+      python-minor:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "deps(backend)"
+      include: "scope"
+    # Rebase + auto-merge is opt-in per PR (branch protection requires review).
+    rebase-strategy: "auto"
+
+  # ── npm (frontend) ─────────────────────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/outrena-frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "javascript"
+    reviewers:
+      - "outrena/frontend-team"
+    assignees:
+      - "outrena/frontend-team"
+    groups:
+      npm-minor:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "deps(frontend)"
+      include: "scope"
+    rebase-strategy: "auto"
+
+  # ── GitHub Actions ─────────────────────────────────────────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    reviewers:
+      - "outrena/devops-team"
+      - "outrena/security-team"
+    assignees:
+      - "outrena/devops-team"
+    groups:
+      actions-minor:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "deps(ci)"
+      include: "scope"
+    rebase-strategy: "auto"
+
+  # ── Terraform (AWS + Azure) ────────────────────────────────────────────────
+  - package-ecosystem: "terraform"
+    directory: "/terraform/aws"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "terraform"
+      - "aws"
+    reviewers:
+      - "outrena/devops-team"
+    assignees:
+      - "outrena/devops-team"
+    commit-message:
+      prefix: "deps(terraform-aws)"
+      include: "scope"
+    rebase-strategy: "auto"
+
+  - package-ecosystem: "terraform"
+    directory: "/terraform/azure"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "terraform"
+      - "azure"
+    reviewers:
+      - "outrena/devops-team"
+    assignees:
+      - "outrena/devops-team"
+    commit-message:
+      prefix: "deps(terraform-azure)"
+      include: "scope"
+    rebase-strategy: "auto"
+
+  # ── Docker (backend + frontend base images) ────────────────────────────────
+  - package-ecosystem: "docker"
+    directory: "/outrena-backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "docker"
+    reviewers:
+      - "outrena/devops-team"
+      - "outrena/security-team"
+    assignees:
+      - "outrena/devops-team"
+    commit-message:
+      prefix: "deps(docker-backend)"
+      include: "scope"
+
+  - package-ecosystem: "docker"
+    directory: "/outrena-frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "docker"
+    reviewers:
+      - "outrena/devops-team"
+      - "outrena/security-team"
+    assignees:
+      - "outrena/devops-team"
+    commit-message:
+      prefix: "deps(docker-frontend)"
+      include: "scope"

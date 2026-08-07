@@ -1,0 +1,147 @@
+{
+  "dashboardName": "OUTRENA-Overview",
+  "description": "OUTRENA Phase 6 — backend/application overview on AWS (ECS Fargate + ALB + RDS + ElastiCache). Covers the top-line SLO signals called out in migration doc §14 Risks #1-#5 and §15.1 (testing observability). Refresh: 1 min. Time range: 1h default.",
+  "start": "-PT1H",
+  "periodOverride": "PT5M",
+  "widgets": [
+    {
+      "type": "metric",
+      "x": 0, "y": 0, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "ALB — Request Count + 5xx Rate (5min)",
+        "region": "us-east-1",
+        "metrics": [
+          [ "AWS/ApplicationELB", "RequestCount", "LoadBalancer", "app/outrena-alb/MAIN", { "label": "req/s", "stat": "Sum", "period": 300 } ],
+          [ ".", "HTTPCode_ELB_5XX_Count", ".", ".", { "label": "elb 5xx", "stat": "Sum", "period": 300, "color": "#d13212" } ],
+          [ ".", "HTTPCode_Target_5XX_Count", ".", ".", { "label": "target 5xx", "stat": "Sum", "period": 300, "color": "#ff7f0e" } ]
+        ],
+        "yAxis": { "left": { "min": 0 }, "right": { "min": 0 } },
+        "legend": { "position": "right" }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 0, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "Backend ECS — CPU% + Memory%",
+        "region": "us-east-1",
+        "metrics": [
+          [ "AWS/ECS", "CPUUtilization", "ClusterName", "outrena-cluster", "ServiceName", "outrena-backend", { "label": "backend CPU%", "stat": "Average", "period": 300 } ],
+          [ ".", "MemoryUtilization", ".", ".", ".", ".", { "label": "backend MEM%", "stat": "Average", "period": 300 } ],
+          [ ".", "CPUUtilization", "ClusterName", "outrena-cluster", "ServiceName", "outrena-worker", { "label": "worker CPU%", "stat": "Average", "period": 300 } ],
+          [ ".", "MemoryUtilization", ".", ".", ".", ".", { "label": "worker MEM%", "stat": "Average", "period": 300 } ]
+        ],
+        "annotations": { "horizontal": [ { "label": "auto-scale @ 70%", "value": 70, "color": "#d62728" } ] }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 6, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "RDS — CPU% + Connections + FreeStorage",
+        "region": "us-east-1",
+        "metrics": [
+          [ "AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "outrena-pg", { "label": "CPU%", "stat": "Average", "period": 300, "color": "#1f77b4" } ],
+          [ ".", "DatabaseConnections", ".", ".", { "label": "connections", "stat": "Average", "period": 300, "color": "#2ca02c", "yAxis": "right" } ],
+          [ ".", "FreeStorageSpace", ".", ".", { "label": "free storage (Bytes)", "stat": "Average", "period": 300, "color": "#9467bd", "yAxis": "right" } ]
+        ],
+        "annotations": { "horizontal": [ { "label": "CPU alert @ 80%", "value": 80, "color": "#d62728" } ] }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 6, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "Redis — CPU% + Memory + Evictions",
+        "region": "us-east-1",
+        "metrics": [
+          [ "AWS/ElastiCache", "CPUUtilization", "CacheClusterId", "outrena-redis", { "label": "CPU%", "stat": "Average", "period": 300, "color": "#e377c2" } ],
+          [ ".", "FreeableMemory", "CacheClusterId", "outrena-redis", { "label": "freeable (Bytes)", "stat": "Average", "period": 300, "color": "#17becf", "yAxis": "right" } ],
+          [ ".", "Evictions", "CacheClusterId", "outrena-redis", { "label": "evictions", "stat": "Sum", "period": 300, "color": "#d62728" } ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 12, "width": 8, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "Backend — p99 Latency (ms)",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/Backend", "http.server.duration", "service.name", "outrena-backend", { "label": "p99 ms", "stat": "p99", "period": 300, "color": "#1f77b4" } ],
+          [ ".", ".", "service.name", ".", { "label": "p95 ms", "stat": "p95", "period": 300, "color": "#2ca02c" } ],
+          [ ".", ".", "service.name", ".", { "label": "p50 ms", "stat": "p50", "period": 300, "color": "#7f7f7f" } ]
+        ],
+        "annotations": { "horizontal": [ { "label": "SLO p99 < 1000ms", "value": 1000, "color": "#d62728" } ] }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 8, "y": 12, "width": 8, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "Error Log Count (CloudWatch Logs Metric Filter)",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/Logs", "ErrorCount", "LogGroup", "outrena-backend", { "label": "backend errors", "stat": "Sum", "period": 300, "color": "#d13212" } ],
+          [ ".", ".", "LogGroup", "outrena-worker", { "label": "worker errors", "stat": "Sum", "period": 300, "color": "#ff7f0e" } ],
+          [ ".", ".", "LogGroup", "outrena-scheduler", { "label": "scheduler errors", "stat": "Sum", "period": 300, "color": "#9467bd" } ]
+        ],
+        "annotations": { "horizontal": [ { "label": "alert @ 10/5min", "value": 10, "color": "#d62728" } ] }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16, "y": 12, "width": 8, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "Active Tenant Count (custom metric — placeholder)",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/Tenants", "ActiveCount", "Environment", "prod", { "label": "active tenants", "stat": "Maximum", "period": 300, "color": "#17becf" } ],
+          [ ".", "NewTenantsPerDay", "Environment", "prod", { "label": "new tenants / day", "stat": "Sum", "period": 86400, "color": "#2ca02c" } ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 18, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "Celery Worker Queue Depth (custom metric)",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/Celery", "QueueDepth", "Queue", "default", { "label": "default queue", "stat": "Maximum", "period": 300, "color": "#1f77b4" } ],
+          [ ".", ".", "Queue", "autopilot", { "label": "autopilot queue", "stat": "Maximum", "period": 300, "color": "#ff7f0e" } ],
+          [ ".", ".", "Queue", "sequences", { "label": "sequences queue", "stat": "Maximum", "period": 300, "color": "#2ca02c" } ]
+        ],
+        "annotations": { "horizontal": [ { "label": "backlog alert @ 100", "value": 100, "color": "#d62728" } ] }
+      }
+    },
+    {
+      "type": "log",
+      "x": 12, "y": 18, "width": 12, "height": 6,
+      "properties": {
+        "view": "table",
+        "title": "Recent Backend Errors (live tail, last 100)",
+        "region": "us-east-1",
+        "stacked": false,
+        "query": "fields @timestamp, tenant_slug, request_id, @message\n| filter @logGroup like /outrena-backend/\n| filter level == \"ERROR\"\n| sort @timestamp desc\n| limit 100",
+        "region": "us-east-1"
+      }
+    }
+  ]
+}

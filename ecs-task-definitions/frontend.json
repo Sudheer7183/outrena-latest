@@ -1,0 +1,71 @@
+{
+  "_comment": "OUTRENA frontend ECS task definition (portable JSON form of terraform/aws/ecs_frontend.tf).",
+  "_usage": "aws ecs register-task-definition --cli-input-json file://frontend.json --region us-east-1",
+  "_notes": [
+    "Replace PLACEHOLDER_ARN values with real ARNs from your AWS account.",
+    "executionRoleArn: needs ecs-tasks:AssumeRole + ECR pull permissions (no secrets for frontend).",
+    "taskRoleArn: typically empty — frontend has no AWS resource access.",
+    "Source of truth is terraform/aws/ecs_frontend.tf — this JSON is for AWS Console / CLI users without Terraform."
+  ],
+  "family": "outrena-prod-frontend",
+  "cpu": "256",
+  "memory": "512",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "executionRoleArn": "PLACEHOLDER_ECS_TASK_EXECUTION_ROLE_ARN",
+  "taskRoleArn": "PLACEHOLDER_FRONTEND_TASK_ROLE_ARN",
+  "tags": [
+    { "key": "Project", "value": "OUTRENA" },
+    { "key": "Phase", "value": "Phase6" },
+    { "key": "Component", "value": "frontend" },
+    { "key": "Environment", "value": "production" }
+  ],
+  "containerDefinitions": [
+    {
+      "name": "frontend",
+      "image": "PLACEHOLDER_ECR_REPO_URL/frontend:1.0.0",
+      "essential": true,
+      "portMappings": [
+        {
+          "name": "frontend-http",
+          "containerPort": 80,
+          "hostPort": 80,
+          "protocol": "tcp",
+          "appProtocol": "http"
+        }
+      ],
+      "environment": [
+        { "name": "VITE_API_BASE_URL", "value": "/api/v1" },
+        { "name": "VITE_KEYCLOAK_URL", "value": "https://auth.outrena.com" },
+        { "name": "VITE_KEYCLOAK_REALM", "value": "outrena" },
+        { "name": "VITE_KEYCLOAK_CLIENT_ID", "value": "outrena-frontend" },
+        { "name": "VITE_DEV_BYPASS_AUTH", "value": "false" },
+        { "name": "BASE_DOMAIN", "value": "outrena.com" },
+        { "name": "ENVIRONMENT", "value": "production" },
+        { "name": "NGINX_WORKER_PROCESSES", "value": "auto" },
+        { "name": "NGINX_CLIENT_MAX_BODY_SIZE", "value": "50m" }
+      ],
+      "secrets": [],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost/ || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/outrena-prod/frontend",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "mountPoints": [],
+      "volumesFrom": [],
+      "linuxParameters": {
+        "initProcessEnabled": true
+      }
+    }
+  ]
+}

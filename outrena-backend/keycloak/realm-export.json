@@ -1,0 +1,402 @@
+{
+  "realm": "outrena",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "registrationEmailAsUsername": false,
+  "rememberMe": true,
+  "verifyEmail": false,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "minimumQuickLoginWaitSeconds": 60,
+  "waitIncrementSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+  "maxDeltaTimeSeconds": 43200,
+  "failureFactor": 5,
+  "roles": {
+    "realm": [
+      {
+        "name": "super_admin",
+        "description": "Platform administrator (structural \u2014 platform-level only)",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "outrena"
+      },
+      {
+        "name": "tenant_admin",
+        "description": "Tenant administrator (was 'admin' in NextAuth source)",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "outrena"
+      },
+      {
+        "name": "manager",
+        "description": "Sales manager role",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "outrena"
+      },
+      {
+        "name": "rep",
+        "description": "Sales rep role (least privilege)",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "outrena"
+      }
+    ],
+    "client": {
+      "realm-management": [
+        {
+          "name": "view-realm",
+          "description": "",
+          "composite": false,
+          "clientRole": true,
+          "containerId": "realm-management"
+        }
+      ],
+      "frontend": [],
+      "admin-cli": []
+    }
+  },
+  "groups": [
+    {
+      "name": "platform-admins",
+      "path": "/platform-admins",
+      "attributes": {},
+      "realmRoles": [
+        "super_admin"
+      ],
+      "clientRoles": {},
+      "subGroups": []
+    },
+    {
+      "name": "tenant-admins",
+      "path": "/tenant-admins",
+      "attributes": {},
+      "realmRoles": [
+        "tenant_admin"
+      ],
+      "clientRoles": {},
+      "subGroups": []
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "frontend",
+      "name": "OUTRENA Frontend SPA",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "authorizationServicesEnabled": false,
+      "rootUrl": "http://localhost:5173",
+      "baseUrl": "/",
+      "adminUrl": "",
+      "surrogateAuthRequired": false,
+      "frontchannelLogout": true,
+      "nodeReRegistrationTimeout": -1,
+      "clientAuthenticatorType": "client-secret",
+      "redirectUris": [
+        "http://localhost:5173/*",
+        "http://localhost:3000/*",
+        "https://*.outrena.com/*",
+        "http://localhost:3080/*"
+      ],
+      "webOrigins": [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "+",
+        "http://localhost:3080"
+      ],
+      "notBefore": 0,
+      "alwaysDisplayInConsole": false,
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "tls.client.certificate.bound.access.tokens": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "post.logout.redirect.uris": "http://localhost:5173/*##http://localhost:3080/*"
+      },
+      "authenticationFlowBindingOverrides": {},
+      "fullScopeAllowed": true,
+      "protocolMappers": [
+        {
+          "name": "tenant_slug",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "tenant_slug",
+            "claim.name": "tenant_slug",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "aggregate.attrs": "false"
+          }
+        },
+        {
+          "name": "role",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "role",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "aggregate.attrs": "false",
+            "multivalued": "false"
+          }
+        },
+        {
+          "name": "email",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "userinfo.token.claim": "true",
+            "user.attribute": "email",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "email",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "sub",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "userinfo.token.claim": "true",
+            "user.attribute": "id",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "sub",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "admin-cli",
+      "name": "admin-cli",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false
+    },
+    {
+      "clientId": "realm-management",
+      "name": "realm-management",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false
+    }
+  ],
+  "users": [
+    {
+      "username": "superadmin@outrena.com",
+      "email": "superadmin@outrena.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Platform",
+      "lastName": "Admin",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "super_admin"
+      ],
+      "groups": [
+        "/platform-admins"
+      ],
+      "attributes": {
+        "tenant_slug": []
+      },
+      "requiredActions": []
+    },
+    {
+      "username": "admin@acme.com",
+      "email": "admin@acme.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Acme",
+      "lastName": "Admin",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "tenant_admin"
+      ],
+      "groups": [
+        "/tenant-admins"
+      ],
+      "attributes": {
+        "tenant_slug": [
+          "acme"
+        ]
+      },
+      "requiredActions": []
+    },
+    {
+      "username": "manager@acme.com",
+      "email": "manager@acme.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Acme",
+      "lastName": "Manager",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "manager123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "manager"
+      ],
+      "attributes": {
+        "tenant_slug": [
+          "acme"
+        ]
+      },
+      "requiredActions": []
+    },
+    {
+      "username": "rep@acme.com",
+      "email": "rep@acme.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Acme",
+      "lastName": "Rep",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "rep123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "rep"
+      ],
+      "attributes": {
+        "tenant_slug": [
+          "acme"
+        ]
+      },
+      "requiredActions": []
+    },
+    {
+      "username": "admin@globex.com",
+      "email": "admin@globex.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Globex",
+      "lastName": "Admin",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "tenant_admin"
+      ],
+      "attributes": {
+        "tenant_slug": [
+          "globex"
+        ]
+      },
+      "requiredActions": []
+    }
+  ],
+  "clientScopes": [
+    {
+      "name": "openid",
+      "description": "OpenID Connect scope",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true"
+      },
+      "protocolMappers": []
+    },
+    {
+      "name": "profile",
+      "description": "OpenID Connect built-in scope: profile",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true"
+      }
+    },
+    {
+      "name": "email",
+      "description": "OpenID Connect built-in scope: email",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true"
+      }
+    },
+    {
+      "name": "roles",
+      "description": "OpenID Connect scope for role claims",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "true"
+      }
+    }
+  ],
+  "keycloakVersion": "24.0",
+  "eventsEnabled": false,
+  "adminEventsEnabled": false,
+  "internationalizationEnabled": false,
+  "supportedLocales": [
+    "en"
+  ],
+  "otpPolicyType": "totp",
+  "otpPolicyAlgorithm": "HmacSHA1",
+  "otpPolicyDigits": 6,
+  "otpPolicyLookAheadWindow": 1,
+  "otpPolicyPeriod": 30,
+  "otpPolicyCodeReusable": false,
+  "requiredActions": [
+    {
+      "alias": "CONFIGURE_TOTP",
+      "name": "Configure OTP",
+      "providerId": "CONFIGURE_TOTP",
+      "enabled": true,
+      "defaultAction": false,
+      "priority": 10,
+      "config": {}
+    }
+  ]
+}

@@ -1,0 +1,115 @@
+{
+  "dashboardName": "OUTRENA-Scheduler",
+  "description": "OUTRENA Phase 6 — scheduler mini-service health. Watches tick duration, skipped ticks, PARTIAL cap hits (§14 Risk #4 scheduler partial-cap), MailBridge send success/fail rate (§14 Risk #15 MailBridge deliverability), and LLM call latency. The scheduler emits structured JSON to stdout consumed by Promtail → Loki; key fields are surfaced here as CloudWatch EMF metrics (via aws-otel ADOT exporter). Refresh: 1 min. Time range: 3h default.",
+  "start": "-PT3H",
+  "periodOverride": "PT1M",
+  "widgets": [
+    {
+      "type": "metric",
+      "x": 0, "y": 0, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "Scheduler — Tick Duration p95/p99 (ms)",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/Scheduler", "tick.duration", "service.name", "outrena-scheduler", { "label": "p99 ms", "stat": "p99", "period": 60, "color": "#d62728" } ],
+          [ ".", "tick.duration", "service.name", "outrena-scheduler", { "label": "p95 ms", "stat": "p95", "period": 60, "color": "#ff7f0e" } ],
+          [ ".", "tick.duration", "service.name", "outrena-scheduler", { "label": "p50 ms", "stat": "p50", "period": 60, "color": "#7f7f7f" } ]
+        ],
+        "annotations": {
+          "horizontal": [
+            { "label": "SCHEDULER_TICK_SECONDS=300 — tick MUST finish before next", "value": 300000, "color": "#d62728" },
+            { "label": "warn @ 120s", "value": 120000, "color": "#ff7f0e" }
+          ]
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 0, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "Scheduler — Ticks Skipped (re-entrancy guard)",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/Scheduler", "tick.skipped", "service.name", "outrena-scheduler", { "label": "ticks skipped", "stat": "Sum", "period": 60, "color": "#d62728" } ],
+          [ ".", "tick.completed", "service.name", "outrena-scheduler", { "label": "ticks completed", "stat": "Sum", "period": 60, "color": "#2ca02c" } ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 6, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "Scheduler — PARTIAL Cap Hits (Risk #4)",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/Autopilot", "run.partial_cap_hit", "service.name", "outrena-scheduler", { "label": "PARTIAL cap hits", "stat": "Sum", "period": 300, "color": "#d62728" } ],
+          [ ".", "run.started", "service.name", "outrena-scheduler", { "label": "runs started", "stat": "Sum", "period": 300, "color": "#1f77b4" } ],
+          [ ".", "run.partial", "service.name", "outrena-scheduler", { "label": "runs PARTIAL", "stat": "Sum", "period": 300, "color": "#ff7f0e" } ]
+        ],
+        "annotations": { "horizontal": [ { "label": "SCHEDULER_PARTIAL_CAP=5 (dev/stg) / 10 (prod)", "value": 5, "color": "#d62728" } ] }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 6, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "MailBridge — Send Success vs Fail Rate (Risk #15)",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/MailBridge", "send.success", "service.name", "outrena-scheduler", { "label": "success", "stat": "Sum", "period": 300, "color": "#2ca02c" } ],
+          [ ".", "send.failed", "service.name", "outrena-scheduler", { "label": "failed", "stat": "Sum", "period": 300, "color": "#d62728" } ],
+          [ { "expression": "m2 / (m1 + m2) * 100", "label": "fail rate %", "yAxis": "right", "color": "#ff7f0e" } ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 12, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "LLM — Call Latency p50/p95/p99 (ms)",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/LLM", "llm.call.duration", "service.name", "outrena-backend", { "label": "p99 ms", "stat": "p99", "period": 60, "color": "#d62728" } ],
+          [ ".", "llm.call.duration", "service.name", "outrena-backend", { "label": "p95 ms", "stat": "p95", "period": 60, "color": "#ff7f0e" } ],
+          [ ".", "llm.call.duration", "service.name", "outrena-backend", { "label": "p50 ms", "stat": "p50", "period": 60, "color": "#1f77b4" } ]
+        ],
+        "annotations": { "horizontal": [ { "label": "LLM timeout 30s", "value": 30000, "color": "#d62728" } ] }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 12, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "Scheduler — Autopilot Queue Depth (custom metric)",
+        "region": "us-east-1",
+        "metrics": [
+          [ "OUTRENA/Scheduler", "autopilot.queue.depth", "service.name", "outrena-scheduler", { "label": "QUEUED items", "stat": "Maximum", "period": 60, "color": "#9467bd" } ],
+          [ ".", "autopilot.queue.processed", "service.name", "outrena-scheduler", { "label": "processed / tick", "stat": "Sum", "period": 60, "color": "#2ca02c" } ]
+        ]
+      }
+    },
+    {
+      "type": "log",
+      "x": 0, "y": 18, "width": 24, "height": 6,
+      "properties": {
+        "view": "table",
+        "title": "Scheduler — Recent Tick Summaries (live tail)",
+        "region": "us-east-1",
+        "stacked": false,
+        "query": "fields @timestamp, tick_id, queue_depth, processed, succeeded, failed, partial_cap_hits, tick_duration_ms\n| filter @logGroup like /outrena-scheduler/\n| filter @message like /tick summary/\n| sort @timestamp desc\n| limit 200"
+      }
+    }
+  ]
+}

@@ -1,0 +1,110 @@
+{{/*
+NOTES.txt — printed by `helm install` and `helm status`.
+Operators read this to know what to do next.
+*/}}
+
+Thank you for installing {{ .Chart.Name }}-{{ .Chart.Version }} (appVersion {{ .Chart.AppVersion }})!
+
+Release: {{ .Release.Name }} in namespace {{ .Release.Namespace }}
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║  OUTRENA Phase 6 — Kubernetes deployment                                   ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+1.  GET THE APP URL
+    ─────────────────
+    Ingress is {{ if .Values.ingress.enabled }}ENABLED{{ else }}DISABLED{{ end }}.
+
+    {{- if .Values.ingress.enabled }}
+    {{- range $host := .Values.ingress.hosts }}
+    Host:        https://{{ $host.host }}
+    {{- end }}
+
+    If cert-manager is installed + the ClusterIssuer is ready, TLS will be
+    issued within ~60s. Verify with:
+      kubectl get certificate -n {{ .Release.Namespace }}
+
+    If ingress is nginx, get the controller's external IP:
+      kubectl get svc -n ingress-nginx
+      # Look for `ingress-nginx-controller` of type LoadBalancer
+
+    For local dev (minikube / kind):
+      kubectl port-forward svc/{{ include "outrena.fullname" . }}-frontend 8080:80 -n {{ .Release.Namespace }}
+      open http://localhost:8080
+    {{- else }}
+    Port-forward the frontend service:
+      kubectl port-forward svc/{{ include "outrena.fullname" . }}-frontend 8080:80 -n {{ .Release.Namespace }}
+      open http://localhost:8080
+    {{- end }}
+
+2.  RUN DATABASE MIGRATIONS  (§15.1 — schema-per-tenant idempotency)
+    ─────────────────────────
+    {{- if .Values.backend.migration.enabled }}
+    The migration init container is ENABLED — Alembic runs automatically on
+    every backend Pod startup. Skip to step 3.
+    {{- else }}
+    The migration init container is DISABLED (default). Run migrations manually:
+
+      # Pick any backend pod
+      BACKEND_POD=$(kubectl get pod -n {{ .Release.Namespace }} \
+        -l app.kubernetes.io/name={{ include "outrena.backend.name" . }} \
+        -o jsonpath='{.items[0].metadata.name}')
+
+      # Run alembic upgrade head (idempotent — safe to re-run)
+      kubectl exec -n {{ .Release.Namespace }} "$BACKEND_POD" -- \
+        alembic upgrade head
+
+      # Verify schema-per-tenant invariant (§14 Risk #17):
+      kubectl exec -n {{ .Release.Namespace }} "$BACKEND_POD" -- \
+        python -m app.scripts.verify_tenant_schemas
+    {{- end }}
+
+3.  VERIFY
+    ───────
+      # Backend health (DB + Redis + Keycloak reachable):
+      kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "outrena.fullname" . }}-backend -- \
+        curl -sS http://localhost:8000/health | jq .
+
+      # Keycloak realm ready:
+      kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "outrena.fullname" . }}-keycloak -- \
+        curl -sS http://localhost:8080/auth/realms/outrena/.well-known/openid-configuration | jq .issuer
+
+      # Frontend index served:
+      kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "outrena.fullname" . }}-frontend -- \
+        curl -sS -o /dev/null -w '%{http_code}\n' http://localhost/
+
+      # Pods all Running:
+      kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/part-of=outrena
+
+4.  UPGRADE
+    ───────
+      # Update values or image tag, then:
+      helm upgrade {{ .Release.Name }} ./k8s/outrena -f values-prod.yaml -n {{ .Release.Namespace }}
+
+      # Watch rollout:
+      kubectl rollout status deploy/{{ include "outrena.fullname" . }}-backend -n {{ .Release.Namespace }}
+
+5.  ROLLBACK  (§16.3 — blue/green cutover safety)
+    ─────────
+      # List revisions:
+      helm history {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+      # Roll back to previous:
+      helm rollback {{ .Release.Name }} 0 -n {{ .Release.Namespace }}
+
+      # Or to a specific revision:
+      helm rollback {{ .Release.Name }} <REVISION> -n {{ .Release.Namespace }}
+
+6.  POST-INSTALL CHECKLIST
+    ───────────────────────
+    [ ] TLS certificate issued (kubectl get certificate)
+    [ ] Backend /health returns 200
+    [ ] Keycloak realm `outrena` exists (kubectl exec ... curl /auth/realms/outrena)
+    [ ] Alembic head applied (kubectl exec ... alembic current)
+    [ ] Tenant schemas present (kubectl exec ... python -m app.scripts.verify_tenant_schemas)
+    [ ] Worker consuming from celery/scheduler/mailbridge queues
+        (kubectl logs -l app.kubernetes.io/name=worker --tail=50 | grep "ready")
+    [ ] Ingress reachable from outside (curl https://app.{{ .Values.global.baseDomain }})
+
+See /migration/k8s/README.md for full operator guide.
+See /migration/PHASE6-VERIFICATION.md for the verification checklist.

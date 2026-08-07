@@ -1,0 +1,60 @@
+{{/*
+ingress.yaml — Single ingress object with path-based routing:
+  /api/*   → backend (port 8000)
+  /auth/*  → keycloak (port 8080)
+  /*       → frontend (port 80)
+
+Requires:
+  - ingress-nginx controller installed in the cluster
+  - cert-manager + ClusterIssuer letsencrypt-prod (or your org's issuer)
+  - DNS A/ALIAS record pointing app.<baseDomain> at the ingress controller's
+    LoadBalancer external IP
+
+The path regex `/api(/|$)(.*)` with rewrite-target captures the suffix and
+re-writes to /$2 on the backend. Without rewrite-target, the backend sees
+the full /api/v1/... path (which is what we want — FastAPI mounts routes at
+/api/v1). So we deliberately DO NOT set rewrite-target here.
+*/}}
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "outrena.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "outrena.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    # nginx.ingress.kubernetes.io/configuration-snippet — add per-backend
+    # CORS headers (the backend also sets these via FastAPI middleware, this
+    # is defense-in-depth for static assets served by nginx).
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header X-Forwarded-Proto https;
+      proxy_set_header X-Forwarded-Host $host;
+      # Don't pass the internal auth token to the frontend (defense-in-depth
+      # for §14 Risk #17 — token must never cross component boundaries).
+      proxy_set_header Authorization $http_authorization;
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range $host := .Values.ingress.hosts }}
+    - host: {{ $host.host }}
+      http:
+        paths:
+          {{- range $path := $host.paths }}
+          - path: {{ $path.path }}
+            pathType: {{ $path.pathType }}
+            backend:
+              service:
+                name: {{ include "outrena.fullname" $ }}-{{ $path.serviceName }}
+                port:
+                  number: {{ $path.servicePort }}
+          {{- end }}
+    {{- end }}
+{{- end }}

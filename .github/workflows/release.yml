@@ -1,0 +1,143 @@
+name: Release
+
+# Phase 6 — Release workflow on tag push `v*`. Builds changelog from commits
+# since the last tag, creates a GitHub release with the changelog body, then
+# archives a cumulative zip of the repo (excluding .git, node_modules,
+# __pycache__) for long-term retention (e.g. upload to S3/Azure blob separately).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  # ── Build changelog from commits since last tag ─────────────────────────────
+  build-changelog:
+    name: Build · changelog
+    runs-on: ubuntu-latest
+    outputs:
+      changelog: ${{ steps.changelog.outputs.changelog }}
+      previous-tag: ${{ steps.changelog.outputs.previous_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history for commit range + previous tag
+
+      - name: Resolve previous tag
+        id: prev
+        run: |
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          # Find the most recent tag that is NOT the current tag
+          PREV_TAG=$(git tag --sort=-creatordate | grep -v "^${CURRENT_TAG}$" | head -n 1 || true)
+          if [ -z "${PREV_TAG}" ]; then
+            echo "No previous tag found — building full changelog from root."
+            RANGE="HEAD"
+          else
+            RANGE="${PREV_TAG}..HEAD"
+          fi
+          echo "previous_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+          echo "range=${RANGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog
+        id: changelog
+        env:
+          RANGE: ${{ steps.prev.outputs.range }}
+          PREV_TAG: ${{ steps.prev.outputs.previous_tag }}
+        run: |
+          {
+            echo "## Changes"
+            echo ""
+            if [ -n "${PREV_TAG}" ]; then
+              echo "Commits since \`${PREV_TAG}\`:"
+            else
+              echo "Commits since repo inception:"
+            fi
+            echo ""
+            echo "| SHA | Author | Subject |"
+            echo "| --- | --- | --- |"
+            git log ${RANGE} --pretty=format:"| %h | %an | %s |" | head -n 200
+            echo ""
+            echo ""
+            echo "### Files changed"
+            echo ""
+            '```'
+            git diff --stat ${RANGE} | tail -n 50
+            echo '```'
+          } > /tmp/changelog.md
+
+          # Multi-line output: use delimiter per GitHub Actions docs
+          {
+            echo "changelog<<EOF_CHANGELOG"
+            cat /tmp/changelog.md
+            echo "EOF_CHANGELOG"
+          } >> "$GITHUB_OUTPUT"
+
+  # ── Create GitHub release with the changelog ───────────────────────────────
+  create-release:
+    name: Create · GitHub release
+    runs-on: ubuntu-latest
+    needs: build-changelog
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: OUTRENA ${{ github.ref_name }}
+          body: ${{ needs.build-changelog.outputs.changelog }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: false
+
+  # ── Archive cumulative repo zip (excludes .git/node_modules/__pycache__) ────
+  archive-zip:
+    name: Archive · cumulative zip
+    runs-on: ubuntu-latest
+    needs: build-changelog
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Clean build artifacts before zipping
+        run: |
+          # Remove items we never want in the release archive
+          find . -type d \( -name node_modules -o -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache -o -name .terraform -o -name dist -o -name build \) -prune -exec rm -rf {} +
+          rm -rf .git
+          rm -rf outrena-frontend/tsconfig.tsbuildinfo
+          echo "Archive source size:"; du -sh .
+
+      - name: Build cumulative zip
+        run: |
+          STAGING_DIR="$(mktemp -d)"
+          BASENAME="outrena-${GITHUB_REF_NAME}"
+          zip -r -q "${STAGING_DIR}/${BASENAME}.zip" . \
+            -x "*.pyc" "*.pyo" ".DS_Store" "*/.env" "*/.env.*" "*/.terraform.lock.hcl"
+          mkdir -p artifacts
+          mv "${STAGING_DIR}/${BASENAME}.zip" "artifacts/${BASENAME}.zip"
+          ls -lh "artifacts/${BASENAME}.zip"
+          sha256sum "artifacts/${BASENAME}.zip" > "artifacts/${BASENAME}.zip.sha256sum"
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: outrena-archive-${{ github.ref_name }}
+          path: |
+            artifacts/*.zip
+            artifacts/*.sha256sum
+          retention-days: 90
+          if-no-files-found: error

@@ -1,0 +1,22 @@
+{{/*
+backend-service.yaml — ClusterIP Service for backend.
+Internal-only; ingress-nginx fronts it for external traffic.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "outrena.fullname" . }}-{{ include "outrena.backend.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "outrena.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ include "outrena.backend.name" . }}
+spec:
+  type: {{ .Values.backend.service.type }}
+  ports:
+    - port: {{ .Values.backend.service.port }}
+      targetPort: {{ .Values.backend.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "outrena.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ include "outrena.backend.name" . }}

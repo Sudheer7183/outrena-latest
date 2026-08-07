@@ -1,0 +1,248 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "OUTRENA Phase 6 — blue/green cutover dashboard per migration doc §16.3. Open during every cutover window. Compares traffic split, error rate, and p99 latency between the new (Azure Container Apps) and old (Next.js legacy) stacks. The rollback trigger indicator combines all three signals into a single green/red stat panel — green = continue ramping traffic, red = automatic rollback recommended.",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Rollback Trigger",
+      "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 6 },
+      "description": "Composite indicator: GREEN when new-stack error rate < 1% AND new-stack p99 latency < 1.5x old-stack p99 AND new-stack traffic share > 0. RED otherwise. When RED, invoke §16.3 rollback procedure: lower blue_green_weight_new to 0 (Terraform apply), confirm Traffic Manager endpoint removal via DNS TTL=60s propagation (5-min SLA).",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Cutover",
+          "metricName": "rollback_signal",
+          "stat": "Maximum",
+          "period": "60"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "textMode": "value_and_name" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "options": { "0": { "text": "PROCEED", "color": "green" }, "1": { "text": "ROLLBACK", "color": "red" } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "gauge",
+      "title": "New Stack Traffic Share (%)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 6 },
+      "description": "Live traffic share to the new (Azure Container Apps) stack. Cutover plan: 5% → 25% → 50% → 100% with a 15-min observation window at each step per §16.3.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Cutover",
+          "metricName": "new_stack_traffic_share",
+          "stat": "Average",
+          "period": "60"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "blue", "value": null }, { "color": "green", "value": 50 }, { "color": "purple", "value": 100 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "showThresholdLabels": false, "showThresholdMarkers": true }
+    },
+    {
+      "type": "stat",
+      "title": "New-Stack Error Rate (5min)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 6 },
+      "description": "5xx rate from the new Azure Container Apps stack. Rollback threshold: > 1% sustained 5min.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Cutover",
+          "metricName": "new_stack_5xx_rate",
+          "stat": "Average",
+          "period": "300"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.5 }, { "color": "red", "value": 1 } ] } },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat",
+      "title": "Latency Ratio (new p99 / old p99)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 6 },
+      "description": "Ratio of new-stack p99 to old-stack p99 latency. Should approach 1.0. Rollback threshold: > 1.5x sustained 5min.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Cutover",
+          "metricName": "latency_ratio",
+          "stat": "Average",
+          "period": "300"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1.2 }, { "color": "red", "value": 1.5 } ] },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Traffic Split — New vs Old (%)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 0, "y": 6, "w": 12, "h": 10 },
+      "description": "Stacked: % of API requests served by new (Azure) vs old (legacy Next.js) stack. Driven by Traffic Manager weights (Terraform: blue_green_weight_new/blue_green_weight_old).",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Cutover",
+          "metricName": "new_stack_request_count",
+          "stat": "Sum",
+          "period": "60"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Cutover",
+          "metricName": "old_stack_request_count",
+          "stat": "Sum",
+          "period": "60"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "stacking": { "mode": "percent" } } }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Error Rate Comparison (5xx %)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 12, "y": 6, "w": 12, "h": 10 },
+      "description": "Side-by-side 5xx rate from new vs old stack. Old stack is the baseline — new should not exceed it.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Cutover",
+          "metricName": "new_stack_5xx_rate",
+          "stat": "Average",
+          "period": "300"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Cutover",
+          "metricName": "old_stack_5xx_rate",
+          "stat": "Average",
+          "period": "300"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "p99 Latency Comparison (ms)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 10 },
+      "description": "p99 latency on each stack. New stack should be <= old stack after warmup.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Cutover",
+          "metricName": "new_stack_p99_ms",
+          "stat": "p99",
+          "period": "60"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Cutover",
+          "metricName": "old_stack_p99_ms",
+          "stat": "p99",
+          "period": "60"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 500 }, { "color": "red", "value": 1000 } ] } }, "overrides": [] }
+    },
+    {
+      "type": "logs",
+      "title": "New-Stack Cutover Events (Loki)",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 10 },
+      "description": "Live tail of cutover-related events emitted by the new Azure backend. Filter for `cutover` events.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{service=\"outrena-backend\"} |= \"cutover\" | json | line_format \"{{.time}} [{{.cutover_step}}] {{.message}}\""
+        }
+      ],
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["outrena", "phase6", "cutover", "blue-green"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": { "refresh_intervals": ["10s", "30s", "1m", "5m"] },
+  "timezone": "browser",
+  "title": "OUTRENA Cutover (Blue/Green)",
+  "uid": "outrena-cutover",
+  "version": 1,
+  "weekStart": ""
+}

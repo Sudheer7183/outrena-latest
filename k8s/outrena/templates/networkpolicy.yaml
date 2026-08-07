@@ -1,0 +1,274 @@
+{{/*
+networkpolicy.yaml — Tenant-isolation focused NetworkPolicy (§14 Risk #17).
+
+Default posture:
+  - Ingress to backend ONLY from the ingress-nginx namespace (pods labeled
+    app.kubernetes.io/name=ingress-nginx) on port 8000.
+  - Ingress to frontend ONLY from ingress-nginx on port 80.
+  - Ingress to keycloak ONLY from ingress-nginx on port 8080
+    + from backend pods on 8080 (backend calls Keycloak for JWKS).
+  - Egress from backend → postgres (5432) + redis (6379) + keycloak (8080)
+    + DNS (udp/53).
+  - Egress from worker → postgres + redis + DNS.
+  - Egress from keycloak → postgres (5432) + DNS.
+  - All other ingress + egress DENIED.
+
+Adjust the namespaceSelectors + podSelectors via .Values.networkPolicy to
+match your cluster's topology (e.g. if postgres lives in a different
+namespace or uses different labels).
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "outrena.fullname" . }}-backend-netpol
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "outrena.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "outrena.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: backend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from ingress-nginx controller pods (any namespace).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Allow frontend → backend (only if backend serves SSR; otherwise omit).
+    # Kept disabled by default — frontend is a static SPA talking to backend
+    # via the ingress controller (so it appears as ingress-nginx traffic).
+    # - from:
+    #     - podSelector:
+    #         matchLabels:
+    #           app.kubernetes.io/component: frontend
+    #   ports:
+    #     - protocol: TCP
+    #       port: 8000
+  egress:
+    # DNS — kube-dns in kube-system.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Postgres
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.postgresNamespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgresPodLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Redis
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.redisNamespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.redisPodLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 6379
+    # Keycloak (for JWKS fetching + Admin API)
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "outrena.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: keycloak
+      ports:
+        - protocol: TCP
+          port: 8080
+    # HTTPS egress for LLM API + MailBridge (if those live outside cluster).
+    # Narrow this CIDR in prod to the actual LLM provider's egress range.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "outrena.fullname" . }}-frontend-netpol
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "outrena.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "outrena.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: frontend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 80
+  egress:
+    # DNS only — frontend is static, no upstream calls.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "outrena.fullname" . }}-worker-netpol
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "outrena.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "outrena.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []   # no inbound — worker is headless
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.postgresNamespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgresPodLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.redisNamespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.redisPodLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 6379
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "outrena.fullname" . }}-keycloak-netpol
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "outrena.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "outrena.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: keycloak
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # From ingress-nginx (browser /auth/* requests)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+    # From backend (JWKS fetching + Keycloak Admin API)
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "outrena.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: backend
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.postgresNamespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgresPodLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}

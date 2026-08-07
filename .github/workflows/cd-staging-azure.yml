@@ -1,0 +1,330 @@
+name: CD · Staging (Azure)
+
+# Phase 6 — Deploy to Azure staging on push to main (after CI passes via
+# workflow_run trigger). Builds + pushes backend/frontend images to ACR with
+# staging-latest + $SHA tags, runs terraform plan + posts to PR, applies plan
+# with image tags pinned to $SHA, runs smoke tests against staging.azure.outrena.dev,
+# notifies Slack. OIDC auth via azure/login federated credentials (no static SP secrets).
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: cd-staging-azure-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TERRAFORM_VERSION: "1.9.8"
+  PYTHON_VERSION: "3.11"
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  # ── Gate: only proceed if the triggering CI run was successful ───────────────
+  check-ci:
+    name: Gate · CI success
+    runs-on: ubuntu-latest
+    outputs:
+      pr-sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - name: Verify CI conclusion
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            core.info(`CI run #${run.id} conclusion=${run.conclusion} event=${run.event}`);
+            if (run.conclusion !== 'success') {
+              core.setFailed(`CI run ${run.id} did not succeed (conclusion=${run.conclusion}). Azure staging deploy aborted.`);
+            }
+            core.setOutput('ok', 'true');
+            core.setOutput('sha', run.head_sha);
+
+  # ── Build & push backend + frontend images to ACR (staging tags) ────────────
+  build-and-push:
+    name: Build & push images → ACR
+    runs-on: ubuntu-latest
+    needs: check-ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-ci.outputs.pr-sha }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ACR login
+        run: az acr login --name ${{ secrets.AZURE_ACR_NAME }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build + push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: outrena-backend
+          file: outrena-backend/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.AZURE_ACR_LOGIN_SERVER }}/outrena-backend:staging-latest
+            ${{ secrets.AZURE_ACR_LOGIN_SERVER }}/outrena-backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Build + push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: outrena-frontend
+          file: outrena-frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.AZURE_ACR_LOGIN_SERVER }}/outrena-frontend:staging-latest
+            ${{ secrets.AZURE_ACR_LOGIN_SERVER }}/outrena-frontend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+  # ── Terraform plan against staging tfvars, upload plan to blob, post to PR ──
+  terraform-plan:
+    name: Terraform · plan (staging)
+    runs-on: ubuntu-latest
+    needs: check-ci
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-ci.outputs.pr-sha }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        working-directory: terraform/azure
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          terraform init \
+            -backend-config=envs/staging/backend.tfbackend \
+            -input=false
+
+      - name: terraform plan
+        working-directory: terraform/azure
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          terraform plan \
+            -var-file=envs/staging/staging.tfvars \
+            -var="acr_backend_tag=${{ github.sha }}" \
+            -var="acr_frontend_tag=${{ github.sha }}" \
+            -out=tfplan
+
+      - name: Upload plan to blob storage
+        working-directory: terraform/azure
+        run: |
+          az storage blob upload \
+            --account-name ${{ secrets.AZURE_TF_STATE_SA }} \
+            --container-name plans \
+            --name azure-staging-${{ github.sha }}.tfplan \
+            --file tfplan \
+            --auth-mode login \
+            --overwrite
+
+      - name: Capture plan text
+        working-directory: terraform/azure
+        run: |
+          terraform show -no-color tfplan > /tmp/plan.txt
+          head -c 25000 /tmp/plan.txt > /tmp/plan-trunc.txt
+          {
+            echo "## Terraform Plan · Azure staging"
+            echo ""
+            echo "Plan key: \`plans/azure-staging-${{ github.sha }}.tfplan\` (in storage account \`${{ secrets.AZURE_TF_STATE_SA }}\`)"
+            echo ""
+            '```hcl'
+            cat /tmp/plan-trunc.txt
+            echo '```'
+          } > /tmp/plan-comment.md
+
+      - name: Find PR for this SHA
+        id: find-pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = context.payload.workflow_run.head_sha;
+            const prs = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+            });
+            const matched = prs.data.find(p => p.head.sha === sha);
+            core.setOutput('number', matched ? matched.number : '');
+            core.setOutput('found', matched ? 'true' : 'false');
+
+      - name: Post plan to PR
+        if: steps.find-pr.outputs.found == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/plan-comment.md', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number('${{ steps.find-pr.outputs.number }}'),
+              body,
+            });
+
+  # ── Apply the plan (staging auto-approves; no manual gate) ──────────────────
+  terraform-apply:
+    name: Terraform · apply (staging)
+    runs-on: ubuntu-latest
+    needs: [build-and-push, terraform-plan]
+    environment: staging-azure
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        working-directory: terraform/azure
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          terraform init \
+            -backend-config=envs/staging/backend.tfbackend \
+            -input=false
+
+      - name: terraform apply
+        working-directory: terraform/azure
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          terraform apply \
+            -var-file=envs/staging/staging.tfvars \
+            -var="acr_backend_tag=${{ github.sha }}" \
+            -var="acr_frontend_tag=${{ github.sha }}" \
+            -input=false \
+            -auto-approve
+
+  # ── Smoke tests against the live Azure staging stack ────────────────────────
+  smoke-test:
+    name: Smoke test · Azure staging endpoints
+    runs-on: ubuntu-latest
+    needs: terraform-apply
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install httpx
+        run: pip install "httpx==0.28.1"
+
+      - name: Wait for service warmup (60s)
+        run: sleep 60
+
+      - name: Smoke test (backend health + keycloak well-known + tenant endpoint)
+        env:
+          STAGING_API_BASE: https://api.staging.azure.outrena.dev
+          STAGING_AUTH_BASE: https://auth.staging.azure.outrena.dev
+          TENANT_HOST: https://acme.staging.azure.outrena.dev
+        run: |
+          python - <<'PY'
+          import os, sys, httpx
+          targets = [
+              ("azure backend health", f"{os.environ['STAGING_API_BASE']}/health"),
+              ("azure keycloak well-known", f"{os.environ['STAGING_AUTH_BASE']}/auth/realms/outrena/.well-known/openid-configuration"),
+              ("azure tenant api", f"{os.environ['TENANT_HOST']}/api/v1/health"),
+          ]
+          failures = []
+          with httpx.Client(timeout=30.0, follow_redirects=True) as c:
+              for name, url in targets:
+                  try:
+                      r = c.get(url)
+                      print(f"[{r.status_code}] {name}: {url}")
+                      if r.status_code >= 400:
+                          failures.append((name, url, r.status_code))
+                  except Exception as e:
+                      print(f"[ERR] {name}: {url} → {e}")
+                      failures.append((name, url, str(e)))
+          if failures:
+              print("FAIL — non-200 responses:")
+              for f in failures:
+                  print("  -", f)
+              sys.exit(1)
+          print("OK — all Azure smoke targets returned 2xx/3xx")
+          PY
+
+  # ── Slack notification ──────────────────────────────────────────────────────
+  notify-slack:
+    name: Notify · Slack
+    runs-on: ubuntu-latest
+    needs: [build-and-push, terraform-plan, terraform-apply, smoke-test]
+    if: always()
+    steps:
+      - name: Post to Slack
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          slack-message: |
+            *Azure Staging deploy · ${{ github.sha }}*
+            Build & push: ${{ needs.build-and-push.result }}
+            TF plan:      ${{ needs.terraform-plan.result }}
+            TF apply:     ${{ needs.terraform-apply.result }}
+            Smoke test:   ${{ needs.smoke-test.result }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

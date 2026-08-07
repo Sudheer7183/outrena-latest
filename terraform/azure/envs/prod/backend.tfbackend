@@ -1,0 +1,11 @@
+# envs/prod/backend.tfbackend — Terraform remote-state config for prod.
+# Usage:
+#   terraform init -backend-config=envs/prod/backend.tfbackend
+#
+# State file locking is provided by an Azure Storage blob lease on `key`.
+# Soft-delete + versioning on the storage account gives accidental-destroy
+# recovery for the state file itself.
+resource_group_name  = "outrena-tfstate-rg"
+storage_account_name = "outrenatfstate"
+container_name       = "tfstate"
+key                  = "azure/prod.terraform.tfstate"

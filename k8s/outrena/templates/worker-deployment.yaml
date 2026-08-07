@@ -1,0 +1,123 @@
+{{/*
+worker-deployment.yaml — Celery worker Deployment.
+
+- Shares the backend image; command overridden to `celery -A app.worker.celery_app worker ...`
+- No Service (headless — no inbound HTTP).
+- No readiness/liveness probe — Celery workers don't expose a port. Kubernetes
+  relies on the container PID 1 staying alive. For deeper health, add a
+  celery inspect ping sidecar (documented in ecs_worker.tf, not implemented
+  here in v1).
+- SCHEDULER_ENABLED=false — APScheduler must only run in the backend task.
+- CELERY_WORKER_MODE=true — signals the app to skip FastAPI lifespan startup.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "outrena.fullname" . }}-{{ include "outrena.worker.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "outrena.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ include "outrena.worker.name" . }}
+spec:
+  {{- if not .Values.worker.autoscaling.enabled }}
+  replicas: {{ .Values.worker.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "outrena.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: {{ include "outrena.worker.name" . }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Workers process long-running tasks; allow 25% unavailability during
+      # rollout so a new pod can drain its in-flight tasks without blocking.
+      maxSurge: 1
+      maxUnavailable: 25%
+  template:
+    metadata:
+      labels:
+        {{- include "outrena.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: {{ include "outrena.worker.name" . }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "outrena.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: default
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Graceful shutdown — give Celery 10min to finish in-flight tasks
+      # before SIGKILL. Long tasks (autopilot pipeline, CSV import) can
+      # take minutes.
+      terminationGracePeriodSeconds: 600
+      containers:
+        - name: {{ include "outrena.worker.name" . }}
+          image: {{ include "outrena.image" (list . .Values.worker.image) }}
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy | default .Values.global.imagePullPolicy }}
+          command:
+            {{- toYaml .Values.worker.command | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ .Values.worker.envFrom.configMapRef }}
+            - secretRef:
+                name: {{ .Values.worker.existingSecret }}
+          env:
+            - name: ENVIRONMENT
+              value: {{ .Values.global.environment | quote }}
+            - name: BASE_DOMAIN
+              value: {{ .Values.global.baseDomain | quote }}
+            - name: KEYCLOAK_BASE_URL
+              value: {{ printf "http://%s-keycloak:%v" (include "outrena.fullname" .) .Values.keycloak.service.port | quote }}
+            - name: KEYCLOAK_REALM
+              value: "outrena"
+            - name: REDIS_HOST
+              value: {{ printf "%s-redis" (include "outrena.fullname" .) | quote }}
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_DB
+              value: "0"
+            - name: CELERY_BROKER_DB
+              value: "1"
+            - name: CELERY_RESULT_BACKEND_DB
+              value: "2"
+            - name: CELERY_WORKER_MODE
+              value: "true"
+            - name: SCHEDULER_ENABLED
+              value: "false"
+            - name: STORAGE_PROVIDER
+              value: {{ .Values.global.storageProvider | quote }}
+            {{- range $k, $v := .Values.worker.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

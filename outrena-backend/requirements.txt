@@ -1,0 +1,74 @@
+# requirements.txt — pinned dependencies for OUTRENA backend.
+#
+# This file is the canonical, pip-installable requirements list. The
+# pyproject.toml is the source-of-truth project definition; this file
+# is what CI and production Docker builds use (`pip install -r`).
+#
+# Update with:  pip-compile pyproject.toml --output-file=requirements.txt
+# Or manually when adding a single new dependency.
+#
+# ── Existing pinned dependencies (mirrors pyproject.toml) ─────────────────────
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+gunicorn==23.0.0
+starlette>=0.41.3
+pydantic==2.10.4
+pydantic-settings==2.7.1
+email-validator==2.2.0
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+greenlet==3.1.1
+redis>=5.2.1
+celery[redis]==5.4.0
+python-jose[cryptography]==3.3.0
+python-multipart==0.0.20
+cryptography==44.0.0
+httpx==0.28.1
+dnspython==2.7.1
+apscheduler==3.11.0
+structlog==24.4.0
+rich==13.9.4
+python-dotenv==1.0.1
+tenacity==9.0.0
+orjson==3.10.12
+uvloop==0.21.0; sys_platform != 'win32'
+
+# ── SaaS platform (Phase 7) additions ─────────────────────────────────────────
+# Stripe SDK — only required if PAYMENT_PROVIDER=stripe; mock mode works without.
+stripe==10.5.0
+# Fernet is bundled with cryptography (already pinned above) — used for
+# encrypt_at_rest / decrypt_at_rest in secret_service.
+
+# ── Observability (Phase 8 — SAAS2-OBS-BE) ───────────────────────────────────
+# Prometheus client — exposes /metrics for the Prometheus scraper. Used by
+# app/core/metrics.py + app/middleware/metrics_middleware.py.
+prometheus-client==0.21.1
+# OpenTelemetry SDK + FastAPI auto-instrumentation — optional traces path.
+# Traces ship to the otel-collector sidecar (see docker-compose.prod.yml +
+# monitoring/otel/collector-config.yml). The app boots fine without these
+# installed (instrumentation is opt-in via setup_otel() — see
+# monitoring/otel/backend-instrumentation.md).
+opentelemetry-sdk==1.27.0
+opentelemetry-api==1.27.0
+opentelemetry-exporter-otlp==1.27.0
+opentelemetry-instrumentation-fastapi==0.48b0
+opentelemetry-instrumentation-sqlalchemy==0.48b0
+opentelemetry-instrumentation-redis==0.48b0
+opentelemetry-instrumentation-httpx==0.48b0
+opentelemetry-instrumentation-logging==0.48b0
+
+# ── PostHog (Phase 9 — PH-BE) ────────────────────────────────────────────────
+# PostHog client — exception tracking + product analytics. Self-hosted
+# (see docker-compose.posthog.yml + runbooks/15). Used by
+# app/core/posthog_client.py + app/middleware/exception_logging_middleware.py.
+# When POSTHOG_KEY is empty, the client no-ops (dev-safe) so the app boots
+# fine without a PostHog instance running.
+posthog==3.13.0
+
+# ── Optional cloud-provider SDKs (install only if SECRET_BACKEND is set) ──────
+# These are NOT installed by default — uncomment or `pip install` them in
+# production deployments that use the corresponding backend.
+# boto3>=1.35               # AWS Secrets Manager (SECRET_BACKEND=aws)
+# azure-identity>=1.19      # Azure Key Vault (SECRET_BACKEND=azure)
+# azure-keyvault-secrets>=4.8  # Required together with azure-identity for KV

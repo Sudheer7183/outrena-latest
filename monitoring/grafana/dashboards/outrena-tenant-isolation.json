@@ -1,0 +1,202 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "OUTRENA Phase 6 — tenant-isolation verification dashboard. Designed for §15.1 multi-tenant acceptance testing. Three panels: cross-tenant 403 attempts (Loki), cache miss rate per tenant (CloudWatch), schema-per-tenant row counts (custom metric). The third panel enforces the §14 Risk #17 (tenant schema drift) invariant by tracking row counts per tenant schema.",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "logs",
+      "title": "Cross-Tenant Access Attempts (HTTP 403 — Loki)",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
+      "description": "Every 403 response emitted by outrena-backend. A spike in 403s on a single tenant often indicates either (a) a regression in tenant-isolation middleware, or (b) a legitimate abuse attempt. The expectation is near-zero 403s for honest users; values > 50/5min trigger the tenant-isolation-violation alert (Azure alert-rules.json).",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{service=\"outrena-backend\"} |= \"http.status_code=403\" | json | line_format \"[{{.tenant_slug}}] {{.request_id}} {{.http.route}} {{.message}}\""
+        }
+      ],
+      "options": { "showTime": true, "showLabels": false, "wrapLogMessage": true, "enableLogDetails": true, "dedupStrategy": "none", "sortOrder": "Descending" }
+    },
+    {
+      "type": "timeseries",
+      "title": "Cache Miss Rate per Tenant (CloudWatch)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 10 },
+      "description": "Cache miss rate grouped by tenant_slug dimension. A tenant with abnormally high miss rate suggests (a) cold-cache after a tenant schema migration (Risk #17), or (b) cache key prefixing bug that bleeds tenant data. Threshold: < 30% miss rate is healthy.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Cache",
+          "metricName": "misses",
+          "stat": "Sum",
+          "period": "300",
+          "matchExact": false
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Cache",
+          "metricName": "hits",
+          "stat": "Sum",
+          "period": "300",
+          "matchExact": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 30 }, { "color": "red", "value": 50 } ] } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Schema-Per-Tenant Row Counts (custom metric)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 10 },
+      "description": "Row count per tenant schema, emitted hourly by a maintenance cron job that runs `SELECT count(*) FROM <tenant_schema>.contacts` per tenant. Sudden zero or sudden 10x growth indicates schema drift (Risk #17). This is the strongest invariant for schema-per-tenant isolation — if row counts are non-monotonic across deployments, the migration script in §15.1 has run incorrectly.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/TenantSchema",
+          "metricName": "row_count",
+          "dimensions": { "table_name": "contacts" },
+          "stat": "Maximum",
+          "period": "3600",
+          "matchExact": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 10, "stacking": { "mode": "none" } } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Distinct Tenants Active (24h)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 0, "y": 20, "w": 6, "h": 6 },
+      "description": "Distinct tenant_slug dimension values seen in OUTRENA/Backend custom metric over the last 24h. Should match the tenant count in the tenants table — a mismatch indicates silent label loss in Promtail or OTel.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Tenants",
+          "metricName": "ActiveCount",
+          "stat": "Maximum",
+          "period": "300"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Cross-Tenant 403s (24h)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 6, "y": 20, "w": 6, "h": 6 },
+      "description": "Total 403 responses in last 24h. Should be near-zero. Spike = isolation regression.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Backend",
+          "metricName": "http.server.response.count",
+          "dimensions": { "http.status_code": "5xx" },
+          "stat": "Sum",
+          "period": "86400"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["sum"] }, "colorMode": "background" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 100 } ] } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Avg Cache Miss Rate (24h)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 12, "y": 20, "w": 6, "h": 6 },
+      "description": "Average cache miss rate across all tenants over 24h.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/Cache",
+          "metricName": "misses",
+          "stat": "Average",
+          "period": "300"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 30 }, { "color": "red", "value": 50 } ] } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Schemas Drift Detected (24h)",
+      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+      "gridPos": { "x": 18, "y": 20, "w": 6, "h": 6 },
+      "description": "Count of tenant schemas whose row count regressed (lower count) compared to the previous day. Anything > 0 is a drift incident (Risk #17).",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryType": "Metrics",
+          "region": "us-east-1",
+          "namespace": "OUTRENA/TenantSchema",
+          "metricName": "drift_detected",
+          "stat": "Sum",
+          "period": "86400"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["sum"] }, "colorMode": "background" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } },
+        "overrides": []
+      }
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["outrena", "phase6", "tenant-isolation", "security"],
+  "templating": { "list": [] },
+  "time": { "from": "now-24h", "to": "now" },
+  "timepicker": { "refresh_intervals": ["1m", "5m", "15m", "1h"] },
+  "timezone": "browser",
+  "title": "OUTRENA Tenant Isolation",
+  "uid": "outrena-tenant-isolation",
+  "version": 1,
+  "weekStart": ""
+}

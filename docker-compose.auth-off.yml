@@ -1,0 +1,30 @@
+# docker-compose.auth-off.yml — Override to disable dev-bypass auth.
+#
+# Use this when you want real Keycloak login instead of the dev-bypass:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.auth-off.yml up -d --build
+#
+# What this changes:
+#   1. Backend: SKIP_JWT_VERIFICATION → false  (validates real Keycloak JWTs)
+#   2. Frontend build: VITE_DEV_BYPASS_AUTH → false  (shows Keycloak login form)
+#
+# Prerequisites:
+#   - Keycloak must be running and healthy (http://localhost:8080)
+#   - The realm "outrena" must be imported (happens automatically on first start)
+#   - Log in as superadmin@outrena.com / admin123 for SUPER_ADMIN access
+
+services:
+  backend:
+    environment:
+      SKIP_JWT_VERIFICATION: "false"
+      VERIFY_JWT_ISSUER: "false"   # keep false unless KC_HOSTNAME matches issuer
+
+  frontend:
+    build:
+      context: ./outrena-frontend
+      args:
+        VITE_DEV_BYPASS_AUTH: "false"
+        VITE_API_BASE_URL: "http://localhost:8000"
+        VITE_KEYCLOAK_URL: "http://localhost:8080"
+        VITE_KEYCLOAK_REALM: "outrena"
+        VITE_KEYCLOAK_CLIENT_ID: "frontend"

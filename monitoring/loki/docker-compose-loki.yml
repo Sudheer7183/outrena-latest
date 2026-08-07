@@ -1,0 +1,121 @@
+# OUTRENA Phase 6 — local Loki + Promtail + Grafana stack for dev/staging testing.
+#
+# Mirrors what the production Fargate stack does, minus the S3 backend and Firehose
+# ingest (dev uses filesystem storage + docker-socket promtail scrape).
+#
+# Usage:
+#   cd /home/z/phase6-work/migration/monitoring/loki
+#   docker compose -f docker-compose-loki.yml up -d
+#   open http://localhost:3000  → Grafana (admin/outrena)
+#   open http://localhost:9080  → Promtail metrics
+#   open http://localhost:3100  → Loki /ready
+#
+# The backend/frontend/worker/keycloak services are NOT started here — this stack
+# assumes they are already running (or are run by the top-level project compose).
+# In a true dev environment, you would either:
+#   (a) add the 4 app services to this compose file (network: outrena-dev), OR
+#   (b) point promtail at the host docker socket (`/var/run/docker.sock`) and label
+#       the app containers with `com.docker.compose.service=outrena-backend` etc.
+#
+# Volume mounts assume the configs in this directory are bind-mounted read-only.
+
+version: "3.8"
+
+networks:
+  outrena-monitoring:
+    driver: bridge
+    name: outrena-monitoring
+
+volumes:
+  loki-data:       # /loki — chunks + wal + compactor + index
+  promtail-data:   # /var/lib/promtail — positions
+  grafana-data:    # /var/lib/grafana — sqlite DB + dashboards
+
+services:
+
+  loki:
+    image: grafana/loki:2.9.8
+    container_name: outrena-loki
+    restart: unless-stopped
+    networks: [outrena-monitoring]
+    ports:
+      - "3100:3100"   # HTTP /loki/api/v1/push + /metrics
+      - "9095:9095"   # gRPC (intra-cluster only — fine to expose on dev)
+    volumes:
+      - ./loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/loki-config.yml
+    environment:
+      # Dev profile: filesystem storage, replication 1
+      - LOKI_STORAGE_BACKEND=filesystem
+      - LOKI_REPLICATION_FACTOR=1
+      - ENVIRONMENT=dev
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready | grep -q 'ready' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  promtail:
+    image: grafana/promtail:2.9.8
+    container_name: outrena-promtail
+    restart: unless-stopped
+    networks: [outrena-monitoring]
+    depends_on:
+      - loki
+    ports:
+      - "9080:9080"   # Promtail metrics
+    volumes:
+      - ./promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - promtail-data:/tmp
+      # Bind the host docker socket so promtail can do docker_sd_configs discovery
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Optional: also scrape /var/log/containers if running on an ECS-optimized AMI host
+      - /var/log/containers:/var/log/containers:ro
+    command: -config.file=/etc/promtail/promtail-config.yml
+    environment:
+      - ENVIRONMENT=dev
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9080/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: outrena-grafana
+    restart: unless-stopped
+    networks: [outrena-monitoring]
+    depends_on:
+      - loki
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      # Provision datasources + dashboards via the standard provisioning dir
+      - ../grafana/provisioning-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ../grafana/provisioning-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=outrena  # dev only — set GF_SECURITY_ADMIN_PASSWORD_FILE in prod
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_INSTALL_PLUGINS=grafana-azure-monitor-datasource  # for Azure Monitor panels
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q 'ok' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+# ============================================================================
+# Quick verification once the stack is up:
+#   1. curl http://localhost:3100/ready           → "ready"
+#   2. curl http://localhost:9080/metrics | head  → promtail emits metrics
+#   3. curl -G -s "http://localhost:3100/loki/api/v1/labels"  → should show
+#      level, service, environment, container (and tenant_slug in dev only)
+#   4. In Grafana (localhost:3000) → Explore → Loki → run:
+#      {service="outrena-backend"} |= "ERROR" | json | line_format "{{.message}}"
+# ============================================================================

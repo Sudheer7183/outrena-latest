@@ -1,0 +1,382 @@
+# docker-compose.posthog.yml — Self-hosted PostHog stack (PH-INFRA).
+#
+# Mirrors the official PostHog self-host deployment structure
+# (https://posthog.com/docs/self-host/deploy/docker) with the
+# ClickHouse-backed variant we use for production-grade event volume.
+#
+# This stack is INTENTIONALLY SEPARATE from docker-compose.yml (dev) and
+# docker-compose.prod.yml because:
+#   1. PostHog is heavy (ClickHouse + Kafka + Postgres + Redis + MinIO + web
+#      + worker + plugin-server) and would slow local dev loops.
+#   2. We want a single dedicated `posthog-network` so the OUTRENA backend
+#      can reach PostHog by service name (http://posthog-web:8000) without
+#      leaking PostHog's internal topics onto the OUTRENA network.
+#   3. Self-hosting keeps ALL analytics data inside our infra — this is the
+#      GDPR Article 28 sub-processor replacement for PostHog Cloud (see
+#      runbooks/12-gdpr-compliance.md §"Sub-processors").
+#
+# Usage:
+#   # 1. Copy + edit env (DO NOT commit the real .env):
+#   cp posthog/.env.example posthog/.env
+#   # 2. Bring up the stack:
+#   docker compose -f docker-compose.posthog.yml --env-file posthog/.env up -d
+#   # 3. Wait for web to become healthy (~60s on first boot — async migrations):
+#   ./scripts/posthog-health-check.sh
+#   # 4. Open http://localhost:8000 and complete the first-run wizard.
+#   # 5. Create project "OUTRENA" + note the public project API key + project ID.
+#
+# Override with OUTRENA-specific settings via:
+#   docker compose -f docker-compose.posthog.yml \
+#                  -f posthog/docker-compose.override.yml up -d
+#
+# See runbooks/15-exception-logging-self-healing.md for the full ops guide.
+#
+# Teardown (keep data):
+#   docker compose -f docker-compose.posthog.yml down
+# Teardown (wipe all data — DEV ONLY):
+#   docker compose -f docker-compose.posthog.yml down -v
+
+# ── Named network (internal only — backend joins this network externally) ───
+networks:
+  posthog-network:
+    name: posthog-network
+    driver: bridge
+    internal: false  # set true to block egress (then add a separate egress proxy)
+
+# ── Volumes (one per stateful service so each can be snapshotted + restored) ──
+volumes:
+  clickhouse-data:
+    name: posthog-clickhouse-data
+  postgres-data:
+    name: posthog-postgres-data
+  redis-data:
+    name: posthog-redis-data
+  kafka-data:
+    name: posthog-kafka-data
+  zookeeper-data:
+    name: posthog-zookeeper-data
+  minio-data:
+    name: posthog-minio-data
+
+services:
+  # ── ClickHouse 24.3 (event storage + aggregations) ──────────────────────────
+  # ClickHouse is PostHog's primary analytics store — events are ingested via
+  # Kafka then consumed into ClickHouse by the plugin-server. The 24.3 LTS
+  # line is what PostHog self-host currently pins (see PostHog release notes).
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: posthog-clickhouse
+    environment:
+      CLICKHOUSE_DB: posthog
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+      # Allow larger distributed queries (PostHog insights can be heavy).
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      ULIMIT_NOFILE: 262144
+    ports:
+      # Expose ONLY on localhost so the ops team can run ad-hoc `clickhouse-client`.
+      - "127.0.0.1:8123:8123"  # HTTP
+      - "127.0.0.1:9000:9000"  # native TCP
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    networks: [posthog-network]
+
+  # ── Postgres 14 (PostHog metadata DB — separate from OUTRENA app DB) ────────
+  # PostHog's metadata DB stores: organizations, projects, persons, cohorts,
+  # feature flags, dashboards, annotations, etc. We pin to PG14 because that
+  # is what the official PostHog self-host compose uses (PG16 is not yet
+  # validated by PostHog as of release-1.215). This DB is COMPLETELY SEPARATE
+  # from the OUTRENA app DB (which is PG16 in docker-compose.yml).
+  postgres:
+    image: postgres:14-alpine
+    container_name: posthog-postgres
+    environment:
+      POSTGRES_DB: ${POSTHOG_POSTGRES_DB:-posthog}
+      POSTGRES_USER: ${POSTHOG_POSTGRES_USER:-posthog}
+      POSTGRES_PASSWORD: ${POSTHOG_POSTGRES_PASSWORD:-posthog}
+    ports:
+      - "127.0.0.1:5433:5432"  # 5433 to avoid clashing with OUTRENA's 5432
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTHOG_POSTGRES_USER:-posthog} -d ${POSTHOG_POSTGRES_DB:-posthog}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    networks: [posthog-network]
+
+  # ── Redis 7 (cache + Celery broker + async task queue) ──────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: posthog-redis
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "127.0.0.1:6380:6379"  # 6380 to avoid clashing with OUTRENA's 6379
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    networks: [posthog-network]
+
+  # ── ZooKeeper (Kafka coordination) ──────────────────────────────────────────
+  # Required by cp-kafka in KRaft-disabled mode. PostHog's official self-host
+  # chart still ships ZK; moving to KRaft is on PostHog's roadmap but not GA
+  # for self-host as of release-1.215.
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: posthog-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SYNC_LIMIT: 2
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    networks: [posthog-network]
+
+  # ── Kafka (event ingestion buffer) ──────────────────────────────────────────
+  # PostHog ingests events into Kafka topics (events, session_recording,
+  # plugin_log_entries, etc.) which are consumed by the plugin-server and
+  # worker. Single broker is fine for dev/staging; prod uses MSK / Event Hubs
+  # (see terraform/aws/posthog.tf + terraform/azure/posthog.tf).
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: posthog-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # Listeners: INTERNAL (plain, in-network) + HOST (for host-side debugging).
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,HOST://localhost:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+      # Auto-create topics so first-boot Just Works. Prod should set to false
+      # + provision topics via the posthog-setup init job.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 8
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 168  # 7d
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+    ports:
+      - "127.0.0.1:29092:29092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    networks: [posthog-network]
+
+  # ── MinIO (S3-compatible object storage) ────────────────────────────────────
+  # PostHog uses object storage for: session recording exports, async
+  # migration artifacts, query cache exports, batch exports. MinIO in dev;
+  # S3 / Azure Blob in prod (see terraform/aws/posthog.tf + terraform/azure/posthog.tf).
+  minio:
+    image: minio/minio:RELEASE.2024-01-01T00-00-00Z
+    container_name: posthog-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${OBJECT_STORAGE_ACCESS_KEY_ID:-posthog}
+      MINIO_ROOT_PASSWORD: ${OBJECT_STORAGE_SECRET_ACCESS_KEY:-posthogposthog}
+    ports:
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9001:9001"   # MinIO console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+    networks: [posthog-network]
+
+  # ── Async migrations (one-shot — runs on first boot, then exits) ────────────
+  # PostHog ships "async migrations" — long-running schema/data migrations
+  # that run in the background after the main web container starts. This
+  # sidecar runs them to completion on first boot (and is a no-op on
+  # subsequent boots because the migration table is already up to date).
+  # Keep this BEFORE `web` in the dependency chain so the web container
+  # doesn't serve traffic until the schema is settled.
+  async-migrations:
+    image: posthog/posthog:${POSTHOG_IMAGE_TAG:-release-latest}
+    container_name: posthog-async-migrations
+    command: >
+      python -m posthog.async_migrations.runner
+      --check --force
+    environment: &posthog_env
+      DATABASE_URL: postgres://${POSTHOG_POSTGRES_USER:-posthog}:${POSTHOG_POSTGRES_PASSWORD:-posthog}@postgres:5432/${POSTHOG_POSTGRES_DB:-posthog}
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_URL: kafka:9092
+      KAFKA_HOSTS: kafka:9092
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_DATABASE: posthog
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_SECURE: "false"
+      PG_HOST: postgres
+      PG_PASSWORD: ${POSTHOG_POSTGRES_PASSWORD:-posthog}
+      POSTHOG_SECRET_KEY: ${POSTHOG_SECRET_KEY:-change-me-in-prod-please-32-chars-min}
+      POSTHOG_DB_NAME: ${POSTHOG_POSTGRES_DB:-posthog}
+      POSTHOG_POSTGRES_USER: ${POSTHOG_POSTGRES_USER:-posthog}
+      SITE_URL: ${POSTHOG_SITE_URL:-http://localhost:8000}
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      OBJECT_STORAGE_ACCESS_KEY_ID: ${OBJECT_STORAGE_ACCESS_KEY_ID:-posthog}
+      OBJECT_STORAGE_SECRET_ACCESS_KEY: ${OBJECT_STORAGE_SECRET_ACCESS_KEY:-posthogposthog}
+      OBJECT_STORAGE_ENABLED: "true"
+      EMAIL_HOST: ${EMAIL_HOST:-}
+      EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER:-}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD:-}
+      EMAIL_USE_TLS: ${EMAIL_USE_TLS:-true}
+      SLACK_TOKEN: ${SLACK_TOKEN:-}
+      DISABLE_SECURE_SSL_REDIRECT: ${DISABLE_SECURE_SSL_REDIRECT:-true}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      # Toggle feature flags that self-driving depends on.
+      SELF_HOSTED: "true"
+      USE_TZ: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: "no"  # one-shot
+    networks: [posthog-network]
+
+  # ── PostHog web (Django + uvicorn — the main app + API) ─────────────────────
+  # This is the primary PostHog service — it serves the UI + REST + ingestion
+  # endpoints (/batch, /capture, /decide, /api/*). Port 8000 matches PostHog's
+  # convention so SDKs work with default URLs.
+  web:
+    image: posthog/posthog:${POSTHOG_IMAGE_TAG:-release-latest}
+    container_name: posthog-web
+    command: >
+      /bin/sh -c "python -m posthog.async_migrations.check --force &&
+                  ./bin/docker --web"
+    environment:
+      <<: *posthog_env
+      # Public URL the browser sees — overridden to https://posthog.outrena.ai in prod.
+      SERVER_URL: ${POSTHOG_PUBLIC_URL:-http://localhost:8000}
+    ports:
+      - "8000:8000"  # Public on 8000 — configure reverse proxy (Caddy/Nginx/ALB) for prod
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      async-migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/_health/"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s  # first boot runs migrations + Django checks
+    restart: unless-stopped
+    networks: [posthog-network]
+
+  # ── PostHog worker (Celery worker — async jobs) ─────────────────────────────
+  # Processes: cohort calculation, plugin schedules, action matching, exports,
+  # integration syncs, async migrations, hourly + daily insights rollups.
+  worker:
+    image: posthog/posthog:${POSTHOG_IMAGE_TAG:-release-latest}
+    container_name: posthog-worker
+    command: ./bin/docker --worker
+    environment:
+      <<: *posthog_env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A posthog inspect ping -d celery@$$HOSTNAME || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 6
+      start_period: 60s
+    restart: unless-stopped
+    networks: [posthog-network]
+
+  # ── PostHog plugin-server (Node.js — plugin execution + event ingestion) ────
+  # The plugin-server is a separate Node.js process that handles: event
+  # ingestion from Kafka, plugin execution (transform/filter/export), and
+  # app framework webhooks. It MUST run alongside web — without it, events
+  # are accepted but never persisted to ClickHouse.
+  plugin-server:
+    image: posthog/posthog:${POSTHOG_IMAGE_TAG:-release-latest}
+    container_name: posthog-plugin-server
+    command: ./bin/docker --plugin-server
+    environment:
+      <<: *posthog_env
+      # Plugin-server specific overrides.
+      PLUGINS_RELOAD_PUBSUB_CHANNEL: reload-plugins
+      NODE_OPTIONS: "--max_old_space_size=2048"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/_health/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 6
+      start_period: 60s
+    restart: unless-stopped
+    networks: [posthog-network]

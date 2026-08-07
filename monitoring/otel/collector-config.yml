@@ -1,0 +1,200 @@
+# OUTRENA Phase 6 — OpenTelemetry Collector config
+#
+# Deployed as a sidecar to each ECS Fargate / Container App task (backend, worker,
+# scheduler). Receives OTLP traces/metrics/logs from the FastAPI app on the
+# standard OTLP ports (4317 gRPC, 4318 HTTP), enriches them, and fans out to:
+#   - Tempo (traces via otlp/grpc)
+#   - Loki  (logs via otlp/http — Loki 2.4+ accepts OTLP directly)
+#   - Prometheus remote-write (metrics — Cortex/Mimir or VictoriaMetrics)
+#   - CloudWatch Logs (logs via aws-otel ADOT exporter — fallback for AWS ops)
+#
+# Image: otel/opentelemetry-collector-contrib:0.101.0
+# Run:   otelcol-contrib --config=/etc/otel/collector-config.yml
+#
+# Sampling is done at the SDK level (10% in prod, 100% in dev — see
+# backend-instrumentation.md). The collector does NOT further sample by default.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        # In prod, enable TLS on this listener (the sidecar pattern keeps the
+        # listener on localhost; for a daemonset deployment, add tls settings).
+        max_recv_msg_size_mib: 16
+      http:
+        endpoint: 0.0.0.0:4318
+        # CORS — allow the frontend to send browser traces (rare; usually traces
+        # come from the backend only). Commented by default.
+        # cors:
+        #   allowed_origins: ["https://app.outrena.com"]
+        #   max_age: 7200
+
+processors:
+  # Memory limiter — kicks in before OOM-killed. Critical for Fargate tasks
+  # with hard memory limits (512Mi dev, 2Gi prod).
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # Batch — group spans/metrics/logs to reduce egress calls.
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 8192
+
+  # Attributes processor — inject deployment-level attributes onto every
+  # span/metric/log record. `tenant_slug` is injected here when the SDK has
+  # not already attached it (e.g., for system-level spans).
+  attributes/inject_environment:
+    actions:
+      - key: deployment.environment
+        value: ${env:ENVIRONMENT}
+        action: upsert
+      - key: deployment.region
+        value: ${env:AWS_REGION}
+        action: upsert
+      - key: cloud.provider
+        value: ${env:CLOUD_PROVIDER}
+        action: upsert
+      # tenant_slug is normally attached by the SDK from the JWT context; this
+      # upsert only fires when the SDK missed it (e.g., background jobs without
+      # a request context). The value is read from a per-task env var that the
+      # scheduler sets when it spawns the sidecar — generally empty, in which
+      # case the action is a no-op.
+      - key: tenant_slug
+        value: ${env:TENANT_SLUG}
+        action: upsert
+
+  # Resource processor — attach service identity. Matches the SDK-side
+  # OTEL_RESOURCE_ATTRIBUTES but is enforced at the collector so that any
+  # non-instrumented SDK (e.g., a third-party lib emitting raw OTLP) still
+  # gets the right service.name.
+  resource/add_service_identity:
+    attributes:
+      - key: service.name
+        value: ${env:OTEL_SERVICE_NAME}
+        action: upsert
+      - key: service.version
+        value: ${env:SERVICE_VERSION}
+        action: upsert
+      - key: service.namespace
+        value: outrena
+        action: upsert
+      - key: host.name
+        value: ${env:HOSTNAME}
+        action: upsert
+
+  # Tail-based sampling (optional, off by default in prod because the SDK already
+  # samples at 10%). Enable in dev/staging for stress-testing.
+  # tail_sampling:
+  #   decision_wait: 10s
+  #   policies:
+  #     - name: errors
+  #       type: status_code
+  #       status_code: { status_codes: [ERROR] }
+  #     - name: slow
+  #       type: latency
+  #       latency: { threshold_ms: 1000 }
+  #     - name: baseline
+  #       type: probabilistic
+  #       probabilistic: { sampling_percentage: 10 }
+
+  # Filter — drop health-check spans (clog Tempo, no business value)
+  filter/drop_health:
+    traces:
+      span:
+        - 'attributes["http.route"] == "/api/v1/health"'
+        - 'attributes["http.route"] == "/health"'
+        - 'attributes["http.route"] == "/metrics"'
+    logs:
+      log_record:
+        - 'attributes["http.route"] == "/api/v1/health"'
+
+exporters:
+  # Tempo — traces
+  otlp/tempo:
+    endpoint: tempo:4317  # docker-compose internal; prod: tempo.internal.outrena.com:4317
+    tls:
+      insecure: true  # prod: false + ca_file + cert_file + key_file
+    compression: gzip
+    timeout: 10s
+
+  # Loki — logs (via OTLP HTTP — Loki 2.4+ supports it natively)
+  otlp/loki:
+    endpoint: http://loki:4318  # Loki OTLP endpoint
+    tls:
+      insecure: true
+    # Headers for multi-tenant Loki (X-Scope-OrgID). OUTRENA is single-org, so
+    # this is a no-op but kept for forward compat.
+    headers:
+      "X-Scope-OrgID": outrena
+
+  # Prometheus remote-write — metrics
+  prometheusremotewrite:
+    endpoint: http://prometheus:9090/api/v1/write  # or Cortex/Mimir
+    tls:
+      insecure: true
+    resource_to_telemetry_conversion:
+      enabled: true  # promote resource attrs (service.name, tenant_slug) to labels
+    target_info:
+      enabled: true
+
+  # CloudWatch Logs — AWS fallback for ops who don't want to leave the AWS console.
+  # Uses the aws-otel ADOT exporter (only available in the `aws-otel-collector`
+  # image, not vanilla otel-collector-contrib). Commented here; uncomment if you
+  # swap the image.
+  # awscloudwatchlogs:
+  #   region: us-east-1
+  #   log_group_name: outrena-otel
+  #   log_stream_name: ${env:OTEL_SERVICE_NAME}-${env:HOSTNAME}
+  #   log_retention: 30
+
+  # Debug exporter — uncomment for local troubleshooting (huge volume!)
+  # debug:
+  #   verbosity: basic
+  #   sampling_initial: 2
+  #   sampling_thereafter: 1000
+
+service:
+  # Telemetry emitted by the collector itself — scraped by Prometheus.
+  telemetry:
+    logs:
+      level: info  # debug | info | warn | error
+    metrics:
+      address: 0.0.0.0:8888  # scrape with: - job_name: 'otel-collector' on /metrics
+
+  pipelines:
+    # ----- Traces -----------------------------------------------------------
+    traces:
+      receivers:  [otlp]
+      processors:
+        - memory_limiter
+        - filter/drop_health
+        - resource/add_service_identity
+        - attributes/inject_environment
+        - batch
+      exporters:  [otlp/tempo]
+
+    # ----- Metrics ----------------------------------------------------------
+    metrics:
+      receivers:  [otlp]
+      processors:
+        - memory_limiter
+        - resource/add_service_identity
+        - attributes/inject_environment
+        - batch
+      exporters:  [prometheusremotewrite]
+
+    # ----- Logs -------------------------------------------------------------
+    logs:
+      receivers:  [otlp]
+      processors:
+        - memory_limiter
+        - resource/add_service_identity
+        - attributes/inject_environment
+        - batch
+      exporters:  [otlp/loki]
+      # To also fan out to CloudWatch Logs, add `awscloudwatchlogs` to exporters
+      # and ensure the collector image is `aws-otel-collector` (not -contrib).

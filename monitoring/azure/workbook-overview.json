@@ -1,0 +1,255 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workbookDisplayName": {
+      "type": "string",
+      "defaultValue": "OUTRENA-Overview",
+      "metadata": { "description": "Display name shown in the Azure Portal Workbook gallery" }
+    },
+    "workbookSourceId": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().id]",
+      "metadata": { "description": "Resource id the workbook is attached to (rg id for standalone workbooks)" }
+    },
+    "logAnalyticsWorkspaceResourceId": {
+      "type": "string",
+      "metadata": { "description": "Full ARM id of the Log Analytics workspace where AppBackend / ContainerAppConsoleLogs / AppRequests are streamed" }
+    },
+    "appGatewayResourceId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": { "description": "Full ARM id of the Application Gateway (for metric queries). Leave blank to use KQL on AppGatewayAccessLog instead." }
+    },
+    "containerAppEnvResourceId": {
+      "type": "string",
+      "metadata": { "description": "Full ARM id of the Container Apps Environment (for CPU/mem metrics)" }
+    },
+    "postgresServerResourceId": {
+      "type": "string",
+      "metadata": { "description": "Full ARM id of the Postgres Flexible Server" }
+    },
+    "redisCacheResourceId": {
+      "type": "string",
+      "metadata": { "description": "Full ARM id of the Redis Cache" }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    }
+  },
+  "variables": {
+    "workbookName": "[concat('outrena-overview-', uniqueString(resourceGroup().id))]",
+    "serializedData": {
+      "version": "Notebook/1.0",
+      "items": [
+        {
+          "type": 1,
+          "content": { "json": "# OUTRENA Overview — Azure\n\nMirrors the AWS `OUTRENA-Overview` CloudWatch dashboard on Azure (App Gateway + Container Apps + PG Flexible + Redis). All log queries target the Log Analytics workspace provisioned by the Azure Terraform stack (monitoring.tf → azurerm_log_analytics_workspace.main)." },
+          "name": "heading"
+        },
+        {
+          "type": 9,
+          "content": {
+            "version": "KqlParameterItem/1.0",
+            "crossComponentResources": [ "[parameters('logAnalyticsWorkspaceResourceId')]" ],
+            "parameters": [
+              {
+                "id": "timeRange",
+                "label": "Time range",
+                "type": 4,
+                "requirement": { "type": 1, "requirementType": 1, "minimum": 1, "maximum": 1 },
+                "typeSettings": {
+                  "selectableValues": [
+                    { "value": "PT5M", "label": "Last 5 minutes" },
+                    { "value": "PT1H", "label": "Last 1 hour" },
+                    { "value": "PT6H", "label": "Last 6 hours" },
+                    { "value": "PT24H", "label": "Last 24 hours" }
+                  ]
+                },
+                "value": "PT1H",
+                "resourceType": { "value": "microsoft.operationalinsights/workspaces", "type": 4 }
+              }
+            ],
+            "style": "pills",
+            "queryType": 0,
+            "resourceType": "microsoft.operationalinsights/workspaces"
+          },
+          "name": "parameters - timeRange"
+        },
+        {
+          "type": 10,
+          "content": {
+            "chartId": "workbook-appgw-req-5xx",
+            "version": "MetricsItem/2.0",
+            "metrics": [
+              {
+                "namespace": "Microsoft.ApplicationGateway/ApplicationGateway",
+                "metric": { "name": "Throughput", "aggregationType": 4 },
+                "resourceMetadata": { "resourceId": "[parameters('appGatewayResourceId')]" }
+              },
+              {
+                "namespace": "Microsoft.ApplicationGateway/ApplicationGateway",
+                "metric": { "name": "FailedRequests", "aggregationType": 4 },
+                "resourceMetadata": { "resourceId": "[parameters('appGatewayResourceId')]" }
+              }
+            ],
+            "title": "AppGateway — Requests + 5xx (5min)",
+            "visualization": { "chartType": 2 },
+            "timeContext": { "durationMs": 3600000 }
+          },
+          "name": "AppGateway Requests + 5xx"
+        },
+        {
+          "type": 10,
+          "content": {
+            "chartId": "workbook-containerapp-cpu-mem",
+            "version": "MetricsItem/2.0",
+            "metrics": [
+              {
+                "namespace": "Microsoft.App/managedEnvironments",
+                "metric": { "name": "CpuUsage", "aggregationType": 4 },
+                "resourceMetadata": { "resourceId": "[parameters('containerAppEnvResourceId')]" }
+              },
+              {
+                "namespace": "Microsoft.App/managedEnvironments",
+                "metric": { "name": "MemoryWorkingSetBytes", "aggregationType": 4 },
+                "resourceMetadata": { "resourceId": "[parameters('containerAppEnvResourceId')]" }
+              }
+            ],
+            "title": "Container Apps — CPU + Memory",
+            "visualization": { "chartType": 2 },
+            "timeContext": { "durationMs": 3600000 }
+          },
+          "name": "ContainerApps CPU+MEM"
+        },
+        {
+          "type": 10,
+          "content": {
+            "chartId": "workbook-pg-cpu-conn-storage",
+            "version": "MetricsItem/2.0",
+            "metrics": [
+              {
+                "namespace": "Microsoft.DBforPostgreSQL/flexibleServers",
+                "metric": { "name": "cpu_percent", "aggregationType": 4 },
+                "resourceMetadata": { "resourceId": "[parameters('postgresServerResourceId')]" }
+              },
+              {
+                "namespace": "Microsoft.DBforPostgreSQL/flexibleServers",
+                "metric": { "name": "active_connections", "aggregationType": 4 },
+                "resourceMetadata": { "resourceId": "[parameters('postgresServerResourceId')]" }
+              },
+              {
+                "namespace": "Microsoft.DBforPostgreSQL/flexibleServers",
+                "metric": { "name": "storage_percent", "aggregationType": 4 },
+                "resourceMetadata": { "resourceId": "[parameters('postgresServerResourceId')]" }
+              }
+            ],
+            "title": "Postgres — CPU + Connections + Storage%",
+            "visualization": { "chartType": 2 },
+            "timeContext": { "durationMs": 3600000 }
+          },
+          "name": "PG CPU+Conn+Storage"
+        },
+        {
+          "type": 10,
+          "content": {
+            "chartId": "workbook-redis-load",
+            "version": "MetricsItem/2.0",
+            "metrics": [
+              {
+                "namespace": "Microsoft.Cache/redis",
+                "metric": { "name": "percentProcessorTime", "aggregationType": 4 },
+                "resourceMetadata": { "resourceId": "[parameters('redisCacheResourceId')]" }
+              },
+              {
+                "namespace": "Microsoft.Cache/redis",
+                "metric": { "name": "usedmemory", "aggregationType": 4 },
+                "resourceMetadata": { "resourceId": "[parameters('redisCacheResourceId')]" }
+              },
+              {
+                "namespace": "Microsoft.Cache/redis",
+                "metric": { "name": "evictedkeys", "aggregationType": 4 },
+                "resourceMetadata": { "resourceId": "[parameters('redisCacheResourceId')]" }
+              }
+            ],
+            "title": "Redis — CPU + Memory + Evictions",
+            "visualization": { "chartType": 2 },
+            "timeContext": { "durationMs": 3600000 }
+          },
+          "name": "Redis Load"
+        },
+        {
+          "type": 3,
+          "content": {
+            "version": "KqlItem/1.0",
+            "query": "AppRequests\n| where TimeGenerated > ago(1h)\n| where AppRoleName =~ \"outrena-backend\"\n| summarize p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by bin(TimeGenerated, 5m)\n| render timechart",
+            "size": 4,
+            "title": "Backend — p99 Latency (ms)",
+            "timeContext": { "durationMs": 3600000 },
+            "queryType": 0,
+            "resourceType": "microsoft.operationalinsights/workspaces",
+            "crossComponentResources": [ "[parameters('logAnalyticsWorkspaceResourceId')]" ]
+          },
+          "name": "Backend p99 latency"
+        },
+        {
+          "type": 3,
+          "content": {
+            "version": "KqlItem/1.0",
+            "query": "ContainerAppConsoleLogs\n| where TimeGenerated > ago(1h)\n| where ContainerAppName in (\"outrena-backend\", \"outrena-worker\", \"outrena-scheduler\")\n| where Level == \"ERROR\" or LogEntry has \"ERROR\"\n| summarize errorCount=count() by bin(TimeGenerated, 5m), ContainerAppName\n| render timechart",
+            "size": 4,
+            "title": "Error Log Count (5min)",
+            "timeContext": { "durationMs": 3600000 },
+            "queryType": 0,
+            "resourceType": "microsoft.operationalinsights/workspaces",
+            "crossComponentResources": [ "[parameters('logAnalyticsWorkspaceResourceId')]" ]
+          },
+          "name": "Error log count"
+        },
+        {
+          "type": 3,
+          "content": {
+            "version": "KqlItem/1.0",
+            "query": "AppBackend\n| where TimeGenerated > ago(1h)\n| where Level == \"ERROR\"\n| summarize count() by bin(TimeGenerated, 5m)\n| render timechart",
+            "size": 4,
+            "title": "ERROR log count (AppBackend table — fallback if structured logs land here)",
+            "timeContext": { "durationMs": 3600000 },
+            "queryType": 0,
+            "resourceType": "microsoft.operationalinsights/workspaces",
+            "crossComponentResources": [ "[parameters('logAnalyticsWorkspaceResourceId')]" ]
+          },
+          "name": "Error log count (AppBackend)"
+        }
+      ],
+      "isLocked": false,
+      "fallbackResource": "[parameters('logAnalyticsWorkspaceResourceId')]"
+    }
+  },
+  "resources": [
+    {
+      "type": "microsoft.insights/workbooks",
+      "apiVersion": "2023-06-01",
+      "name": "[variables('workbookName')]",
+      "location": "[parameters('location')]",
+      "kind": "shared",
+      "properties": {
+        "displayName": "[parameters('workbookDisplayName')]",
+        "serializedData": "[string(variables('serializedData'))]",
+        "version": "1.0",
+        "sourceId": "[parameters('workbookSourceId')]",
+        "category": "workbook",
+        "tags": {
+          "Project": "OUTRENA",
+          "Phase": "Phase6",
+          "ManagedBy": "ARM-template",
+          "[concat('hidden-link:', parameters('workbookSourceId'))]": "Resource"
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "workbookId": { "type": "string", "value": "[resourceId('microsoft.insights/workbooks', variables('workbookName'))]" },
+    "workbookArmId": { "type": "string", "value": "[concat('/subscriptions/', subscription().subscriptionId, '/resourceGroups/', resourceGroup().name, '/providers/microsoft.insights/workbooks/', variables('workbookName'))]" }
+  }
+}

@@ -1,0 +1,70 @@
+{{/*
+configmap.yaml — Non-secret env vars consumed by backend + worker via envFrom.
+
+Secret values (DATABASE_URL, REDIS_AUTH_TOKEN, KEYCLOAK_ADMIN_PASSWORD,
+MAILBRIDGE_DEFAULT_URL) live in the outrena-backend-secret / outrena-keycloak-secret
+Kubernetes Secrets — operators provision those via external-secrets /
+sealed-secrets / kubectl.
+
+§13.1 of the migration doc defines the canonical env-var list — this ConfigMap
+mirrors the non-secret subset.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.backend.envFrom.configMapRef }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "outrena.labels" . | nindent 4 }}
+data:
+  # ── Identity / environment ──
+  ENVIRONMENT: {{ .Values.global.environment | quote }}
+  BASE_DOMAIN: {{ .Values.global.baseDomain | quote }}
+
+  # ── Keycloak ──
+  KEYCLOAK_REALM: "outrena"
+  # Internal ClusterIP URL — avoids hairpin via ingress. Override per-env
+  # if Keycloak is hosted outside the cluster.
+  KEYCLOAK_BASE_URL: {{ printf "http://%s-keycloak:%v" (include "outrena.fullname" .) .Values.keycloak.service.port | quote }}
+
+  # ── Redis ──
+  # REDIS_URL is built at runtime from REDIS_HOST + REDIS_PORT + REDIS_AUTH_TOKEN
+  # (see app.core.config). We expose the components here so a single envFrom
+  # block sets everything consistently.
+  REDIS_HOST: {{ printf "%s-redis" (include "outrena.fullname" .) | quote }}
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  CELERY_BROKER_DB: "1"
+  CELERY_RESULT_BACKEND_DB: "2"
+
+  # ── CORS / security ──
+  # ALLOWED_ORIGINS is a JSON-encoded list — must match the ingress hosts.
+  ALLOWED_ORIGINS: {{ printf "[\"https://app.%s\",\"https://auth.%s\"]" .Values.global.baseDomain .Values.global.baseDomain | quote }}
+  # SKIP_JWT_VERIFICATION MUST be false in staging/prod (validated in code).
+  # Set true ONLY in dev (values-dev.yaml overrides this).
+  SKIP_JWT_VERIFICATION: "false"
+  VERIFY_JWT_ISSUER: "true"
+
+  # ── Scheduler (§14 Risk #4 — tick overrun) ──
+  SCHEDULER_TICK_SECONDS: "300"
+  SCHEDULER_PARTIAL_CAP: "5"
+  SCHEDULER_ENABLED: "true"          # overridden to "false" in worker env
+
+  # ── Storage ──
+  STORAGE_PROVIDER: {{ .Values.global.storageProvider | quote }}
+  # S3 / Azure Blob — populated by envFrom only if STORAGE_PROVIDER matches.
+  # Operators override these via backend.env in values.yaml.
+  S3_REGION: "us-east-1"
+  S3_BUCKET: ""
+  S3_PUBLIC_URL: ""
+
+  # ── LLM ──
+  LLM_API_URL: "https://api.anthropic.com"
+  LLM_MODEL_DEFAULT: "claude-3-5-sonnet-20241022"
+
+  # ── Logging ──
+  # INFO in staging/prod, DEBUG in dev (values-dev.yaml override).
+  LOG_LEVEL: "INFO"
+
+  # ── Worker mode flag (true on worker pods, false elsewhere) ──
+  # Set per-Deployment in env blocks, not here (ConfigMap is shared).

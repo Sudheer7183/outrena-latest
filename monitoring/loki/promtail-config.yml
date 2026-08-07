@@ -1,0 +1,231 @@
+# OUTRENA Phase 6 — Promtail config
+#
+# Deployment modes (per the spec):
+#   - ECS Fargate (preferred production):  the backend/worker/scheduler containers log to
+#     stdout. Fargate has no docker socket. We use the **AWS Firehose → Loki** pattern:
+#     create a Kinesis Firehose delivery stream per log group, point its HTTP destination
+#     at `loki.aws-firehose` (built into the Grafana Loki Docker image since 2.4). The
+#     stream batches and pushes JSON records to Loki's `/loki/api/v1/push` endpoint.
+#       → this file is therefore for the *EC2-hosted* Promtail sidecar pattern, which is
+#         what dev/staging uses (see docker-compose-loki.yml). For prod Fargate, deploy the
+#     Firehose pattern documented at https://grafana.com/docs/loki/latest/send-data/aws/firehose/
+#     and skip promtail entirely.
+#
+#   - EC2 / docker-compose:                   Promtail scrapes container stdout via the
+#     docker socket (`docker_sd_configs`), or static-config pointing at
+#     `/var/log/containers/*.log` (ECS-optimized AMI pattern).
+#
+# Positions file: tracks last-read offset per log stream so promtail doesn't re-ingest
+# on restart. Stored on an EBS volume in prod.
+#
+# Pipeline stages: parse the structured JSON the FastAPI backend emits (RFC5424-ish via
+# structlog), extract `level`, `tenant_slug`, `request_id` as labels.
+#
+# Label cardinality guardrails (HIGH cardinality kills Loki):
+#   - dev/staging: keep `tenant_slug` label (useful for per-tenant isolation testing, §15.1)
+#   - prod:        DROP `tenant_slug` label via relabel — use logQL `{service="outrena-backend"} |= "tenant_slug=acme-corp"`
+#                  for ad-hoc tenant filtering; this avoids the cardinality explosion of
+#                  N tenants × M request_ids at scale.
+#   - ALWAYS drop `request_id` from labels (it is queryable in the log body).
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0  # disabled — promtail doesn't need gRPC
+  log_level: info
+
+positions:
+  filename: /tmp/positions.yaml  # prod: /var/lib/promtail/positions.yaml on EBS
+  sync_period: 10s
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    # prod override:
+    # url: https://loki.internal.outrena.com/loki/api/v1/push
+    # basic_auth:
+    #   username: outrena
+    #   password_file: /etc/promtail/loki-password
+    backoff_config:
+      min_period: 500ms
+      max_period: 5m
+      max_retries: 10
+    batchwait: 1s
+    batchsize: 1048576  # 1MB
+    external_labels:
+      cluster: outrena-prod
+      environment: ${ENVIRONMENT:-dev}
+
+scrape_configs:
+
+  # ---------------------------------------------------------------------------
+  # 1. Backend FastAPI container — stdout via docker socket
+  #    Backend emits JSON lines like:
+  #    {"level":"INFO","time":"2024-...","tenant_slug":"acme-corp","request_id":"abc123",
+  #     "http.route":"/api/v1/contacts","http.status_code":200,"message":"..."}
+  # ---------------------------------------------------------------------------
+  - job_name: outrena-backend
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: label
+            values: ["com.docker.compose.service=outrena-backend"]
+    relabel_configs:
+      # Use docker label `logging_env` if present, else default
+      - source_labels: [__meta_docker_container_label_logging_env]
+        target_label: environment
+        regex: (.+)
+        replacement: ${1}
+        default: ${ENVIRONMENT:-dev}
+      - source_labels: [__meta_docker_container_name]
+        regex: '/(.*)'
+        target_label: container
+      - target_label: service
+        replacement: outrena-backend
+    pipeline_stages:
+      # Parse JSON log body
+      - json:
+          expressions:
+            level: level
+            tenant_slug: tenant_slug
+            request_id: request_id
+            http_route: http.route
+            http_status: http.status_code
+            message: message
+      # Promote level to label
+      - labels:
+          level:
+      # Promote tenant_slug to label ONLY when ENVIRONMENT != prod
+      # (prod uses relabel below to drop the label for cardinality safety)
+      - labels:
+          tenant_slug:
+      # Drop request_id from labels — keep in log body for ad-hoc queries
+      - timestamp:
+          source: time
+          format: RFC3339Nano
+      # In prod, drop DEBUG logs entirely
+      - match:
+          selector: '{job="outrena-backend"} |= "DEBUG"'
+          action: drop
+          # NOTE: `match` with `|= "DEBUG"` matches the log line content; for
+          # structured level matching use:
+          # selector: '{level="DEBUG"}'
+          # action: drop
+
+  # ---------------------------------------------------------------------------
+  # 2. Frontend container (Next.js) — minimal pipeline, just label service
+  # ---------------------------------------------------------------------------
+  - job_name: outrena-frontend
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: label
+            values: ["com.docker.compose.service=outrena-frontend"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: '/(.*)'
+        target_label: container
+      - target_label: service
+        replacement: outrena-frontend
+    pipeline_stages:
+      - json:
+          expressions:
+            level: level
+            message: message
+      - labels:
+          level:
+
+  # ---------------------------------------------------------------------------
+  # 3. Worker container (Celery) — same shape as backend
+  # ---------------------------------------------------------------------------
+  - job_name: outrena-worker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: label
+            values: ["com.docker.compose.service=outrena-worker"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: '/(.*)'
+        target_label: container
+      - target_label: service
+        replacement: outrena-worker
+    pipeline_stages:
+      - json:
+          expressions:
+            level: level
+            tenant_slug: tenant_slug
+            task_name: task_name
+            message: message
+      - labels:
+          level:
+          tenant_slug:
+
+  # ---------------------------------------------------------------------------
+  # 4. Keycloak container — JSON-ish, sometimes plain text. Use regex fallback.
+  # ---------------------------------------------------------------------------
+  - job_name: keycloak
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: label
+            values: ["com.docker.compose.service=keycloak"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: '/(.*)'
+        target_label: container
+      - target_label: service
+        replacement: keycloak
+    pipeline_stages:
+      # Try JSON first; on parse failure, fall back to regex on the raw line
+      - json:
+          expressions:
+            level: level
+            message: message
+          on_error: keep
+      - regex:
+          expression: '(?P<level>DEBUG|INFO|WARN|ERROR)'
+          source: filename
+      - labels:
+          level:
+
+  # ---------------------------------------------------------------------------
+  # 5. Static config fallback — for ECS-optimized AMI (EC2 host) where docker
+  #    socket discovery isn't available, scrape /var/log/containers/*.log
+  #    (each ECS task writes one JSON-line-per-record file here)
+  # ---------------------------------------------------------------------------
+  # - job_name: ecs-containers-static
+  #   static_configs:
+  #     - targets: [localhost]
+  #       labels:
+  #         job: ecs-containers
+  #         __path__: /var/log/containers/*.log
+  #   pipeline_stages:
+  #     - json:
+  #         expressions:
+  #           level: level
+  #           source: source
+  #           log: log
+  #     - labels:
+  #         level:
+
+# ============================================================================
+# Global relabel — drop tenant_slug label in prod to avoid cardinality blowup
+# ============================================================================
+# (Apply via a relabel_configs block on each scrape_configs entry above when
+# ENVIRONMENT=prod. The pattern below is shown once for the backend job; copy
+# verbatim to worker. For prod use only.)
+#
+# relabel_configs:
+#   - action: labeldrop
+#     regex: tenant_slug
+#   - action: labeldrop
+#     regex: request_id
+
+limits_config:
+  # Drop very old logs (8d backfill cap matches Loki reject_old_samples_max_age=168h)
+  readline_rate_enabled: true
+  readline_rate: 10000
+  readline_burst: 20000

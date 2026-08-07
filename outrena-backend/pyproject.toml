@@ -1,0 +1,189 @@
+# pyproject.toml — OUTRENA backend dependencies (Phase 1)
+#
+# Target stack: Python 3.11+ / FastAPI / Pydantic v2 / SQLAlchemy 2.0 async /
+# Alembic / PostgreSQL 16 (asyncpg) / Redis 7 (redis.asyncio) / Keycloak 24+
+# (python-jose for JWT) / structlog / httpx / APScheduler (Phase 6) /
+# Celery (Phase 5 — autopilot.run_pipeline task per migration doc §6.3) /
+# pytest (testing).
+#
+# Lock with:  pip install -e ".[dev]"   (or  uv sync  if using uv)
+# Update with:  pip-compile > requirements.txt   (CI uses requirements.txt)
+
+[project]
+name = "outrena-backend"
+version = "1.0.0"
+description = "OUTRENA — AI-Powered Outreach Operating System (FastAPI backend, multitenant)"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "OUTRENA Engineering" }]
+license = { text = "Proprietary" }
+
+dependencies = [
+    # ── Web framework ───────────────────────────────────────────────────────
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "gunicorn==23.0.0",
+    "starlette>=0.41.3",
+
+    # ── Validation / settings ───────────────────────────────────────────────
+    "pydantic==2.10.4",
+    "pydantic-settings==2.7.1",
+    "email-validator==2.2.0",
+
+    # ── Database ─────────────────────────────────────────────────────────────
+    "sqlalchemy[asyncio]==2.0.36",
+    "asyncpg==0.30.0",
+    "alembic==1.14.0",
+    "greenlet==3.1.1",  # async SQLAlchemy dependency
+
+    # ── Cache / queue ─────────────────────────────────────────────────────────
+    "redis[hiredis]==5.2.1",
+    "celery[redis]==5.4.0",  # Phase 5 — autopilot.run_pipeline task (migration doc §6.3)
+
+    # ── Auth ───────────────────────────────────────────────────────────────
+    "python-jose[cryptography]==3.3.0",
+    "python-multipart==0.0.20",
+    "cryptography==44.0.0",
+
+    # ── HTTP client (LLM gateway, platform-search integrations) ─────────────
+    "httpx==0.28.1",
+
+    # ── DNS resolution (MX/TXT/SPF/DKIM/DMARC lookups for domain_service ─────
+    # and prospect email validation; replaces stdlib socket-based fallbacks).
+    "dnspython==2.7.1",
+
+    # ── Scheduler (Phase 6) ──────────────────────────────────────────────────
+    "apscheduler==3.11.0",
+
+    # ── Logging ──────────────────────────────────────────────────────────────
+    "structlog==24.4.0",
+    "rich==13.9.4",
+
+    # ── Metrics (Prometheus /metrics endpoint) ──────────────────────────────
+    "prometheus-client==0.21.1",
+
+    # ── Utilities ────────────────────────────────────────────────────────────
+    "python-dotenv==1.0.1",
+    "tenacity==9.0.0",  # retry decorators
+    "orjson==3.10.12",  # fast JSON
+    "uvloop==0.21.0; sys_platform != 'win32'",  # perf
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.2",
+    "pytest-cov==6.0.0",
+    "httpx==0.28.1",  # for ASGI test client
+    "ruff==0.8.4",
+    "mypy==1.14.0",
+    "types-python-jose==3.3.4.20240106",
+    "types-redis==4.6.0.20241004",
+    "pip-audit==2.7.3",
+    "safety==3.2.9",
+]
+
+[project.urls]
+Documentation = "https://github.com/outrena/outrena-backend/blob/main/README.md"
+
+# ── Build system ──────────────────────────────────────────────────────────────
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["tests*"]
+
+# ── ruff (lint + format) ─────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+    "S",   # bandit (security)
+    "T20", # flake8-print (no print() — use structlog)
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501",   # line too long — handled by formatter
+    "S101",   # use of assert — needed in tests
+    "B008",   # function call in default argument — FastAPI Depends() pattern
+    "S104",   # 0.0.0.0 binding — needed for containers
+    "S608",   # SQL injection — SQLAlchemy text() with bound params is safe
+    "N815",   # mixed-case variable in class scope — Prisma parity (camelCase columns)
+    "N806",   # variable in function should be lowercase — Prisma parity
+    "UP037",  # quoted annotation — Python 3.11 forward-ref style preserved
+    "UP007",  # use X | Y for optional — already doing this; ruff is overly aggressive
+    "RUF100", # unused noqa — false positive with our config
+    "RUF012", # Mutable class attr should be ClassVar — SQLAlchemy table args
+    "S311",   # suspicious non-crypto random — CUID generator uses random by design
+    "S603",   # subprocess without shell — alembic subprocess is intentional
+    "B904",   # raise from — already handled; some re-raises lose context intentionally
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105", "S106", "N801", "S110", "F401"]
+"alembic/versions/**/*.py" = ["F401", "E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+# ── mypy (typecheck) ──────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = false  # FastAPI decorators
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["apscheduler.*", "celery.*", "dns.*"]
+ignore_missing_imports = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+# ── pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--tb=short",
+]
+markers = [
+    "integration: requires PostgreSQL + Redis (skipped automatically if unavailable)",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:apscheduler.*",
+    "ignore::DeprecationWarning:httpx.*",
+    "ignore::DeprecationWarning:celery.*",
+]

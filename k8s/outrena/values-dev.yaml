@@ -1,0 +1,126 @@
+# values-dev.yaml — OUTRENA dev cluster overrides.
+#
+# Usage:
+#   helm install outrena ./k8s/outrena \
+#     -f k8s/outrena/values.yaml \
+#     -f k8s/outrena/values-dev.yaml \
+#     -n outrena-dev --create-namespace
+#
+# Targets a local cluster (minikube / kind / k3d) or a small cloud dev cluster.
+# Key differences from staging/prod:
+#   - 1 replica per component (cost)
+#   - No HPA (single replica can't scale below 1)
+#   - No PDB (single replica can't be disrupted)
+#   - SKIP_JWT_VERIFICATION=true (so you can hit /api without a Keycloak token)
+#   - LOG_LEVEL=DEBUG
+#   - In-memory postgres + redis enabled via bitnami subcharts (or external)
+#   - Ingress host = app.dev.outrena.com (or use sslip.io for local)
+
+global:
+  environment: development
+  imageTag: dev-latest
+  imagePullPolicy: Always             # always re-pull for dev-latest tag
+  baseDomain: dev.outrena.com
+  storageProvider: local              # /tmp in dev — no S3 needed
+
+backend:
+  replicas: 1
+  autoscaling:
+    enabled: false
+  pdb:
+    enabled: false
+  migration:
+    enabled: true                     # auto-run alembic on dev startup
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  env:
+    SKIP_JWT_VERIFICATION: "true"     # dev-only — NEVER in staging/prod
+    VERIFY_JWT_ISSUER: "false"
+    LOG_LEVEL: "DEBUG"
+    SCHEDULER_TICK_SECONDS: "60"      # faster ticks in dev
+
+frontend:
+  replicas: 1
+  autoscaling:
+    enabled: false
+  pdb:
+    enabled: false
+  env:
+    VITE_DEV_BYPASS_AUTH: "true"
+
+worker:
+  replicas: 1
+  autoscaling:
+    enabled: false
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+keycloak:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  env:
+    KC_LOG_LEVEL: DEBUG
+
+# Enable in-cluster Postgres + Redis for dev (operators running against
+# external managed services should leave these disabled).
+postgres:
+  enabled: true
+  auth:
+    postgresPassword: dev_only_insecure
+    username: outrena
+    password: dev_only_insecure
+    database: outrena
+
+redis:
+  enabled: true
+  auth:
+    enabled: false                    # simpler dev UX
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: selfsigned-issuer   # dev only
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+  hosts:
+    - host: app.dev.outrena.com
+      paths:
+        - path: /api(/|$)(.*)
+          pathType: Prefix
+          serviceName: backend
+          servicePort: 8000
+        - path: /auth(/|$)(.*)
+          pathType: Prefix
+          serviceName: keycloak
+          servicePort: 8080
+        - path: /
+          pathType: Prefix
+          serviceName: frontend
+          servicePort: 80
+  tls:
+    - secretName: outrena-dev-tls
+      hosts:
+        - app.dev.outrena.com
+
+# Relaxed network policy — dev clusters often have postgres in another namespace.
+networkPolicy:
+  enabled: false
+
+podAnnotations:
+  prometheus.io/scrape: "false"       # disable in dev to save resources

@@ -1,0 +1,122 @@
+{
+  "dashboardName": "OUTRENA-Cost",
+  "description": "OUTRENA Phase 6 — cloud-cost telemetry. Tracks the storage-growth + egress signals that drive monthly bill surprises (§14 Risk #22 cost overrun). Augments AWS Cost Explorer (separate tool) with operational resource-level metrics. Refresh: 1h. Time range: 7d default.",
+  "start": "-PT168H",
+  "periodOverride": "PT1H",
+  "widgets": [
+    {
+      "type": "metric",
+      "x": 0, "y": 0, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "RDS Storage — Free vs Allocated (Bytes)",
+        "region": "us-east-1",
+        "metrics": [
+          [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "outrena-pg", { "label": "free (Bytes)", "stat": "Average", "period": 3600, "color": "#2ca02c" } ],
+          [ ".", "VolumeBytesUsed", ".", ".", { "label": "used (Bytes)", "stat": "Average", "period": 3600, "color": "#1f77b4" } ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 0, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "RDS Storage Growth Rate (Bytes/hour) — projection",
+        "region": "us-east-1",
+        "metrics": [
+          [ { "expression": "RATE(m1)", "label": "growth Bytes/hr", "color": "#d62728" } ],
+          [ "AWS/RDS", "VolumeBytesUsed", "DBInstanceIdentifier", "outrena-pg", { "id": "m1", "visible": false, "period": 3600 } ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 6, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "S3 Bucket Size — csv + collateral (Bytes)",
+        "region": "us-east-1",
+        "metrics": [
+          [ "AWS/S3", "BucketSizeBytes", "BucketName", "outrena-csv-prod", "StorageType", "StandardStorage", { "label": "csv bucket", "stat": "Average", "period": 86400, "color": "#1f77b4" } ],
+          [ ".", "BucketSizeBytes", "BucketName", "outrena-collateral-prod", "StorageType", "StandardStorage", { "label": "collateral bucket", "stat": "Average", "period": 86400, "color": "#ff7f0e" } ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 6, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "ElastiCache — Bytes Used for Cache",
+        "region": "us-east-1",
+        "metrics": [
+          [ "AWS/ElastiCache", "BytesUsedForCache", "CacheClusterId", "outrena-redis", { "label": "redis bytes", "stat": "Average", "period": 3600, "color": "#e377c2" } ],
+          [ ".", "DatabaseMemoryUsagePercentage", "CacheClusterId", "outrena-redis", { "label": "mem usage %", "stat": "Average", "period": 3600, "color": "#d62728", "yAxis": "right" } ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 12, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "ECS Task Count Over Time",
+        "region": "us-east-1",
+        "metrics": [
+          [ "AWS/ECS", "RunningTaskCount", "ClusterName", "outrena-cluster", "ServiceName", "outrena-backend", { "label": "backend tasks", "stat": "Average", "period": 3600, "color": "#1f77b4" } ],
+          [ ".", "RunningTaskCount", "ClusterName", "outrena-cluster", "ServiceName", "outrena-worker", { "label": "worker tasks", "stat": "Average", "period": 3600, "color": "#2ca02c" } ],
+          [ ".", "RunningTaskCount", "ClusterName", "outrena-cluster", "ServiceName", "outrena-frontend", { "label": "frontend tasks", "stat": "Average", "period": 3600, "color": "#17becf" } ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 12, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "NAT Gateway — Data Processed (Bytes)",
+        "region": "us-east-1",
+        "metrics": [
+          [ "AWS/NATGateway", "BytesInToDestination", "NatGatewayId", "nat-0abc123", { "label": "in (egress to internet)", "stat": "Sum", "period": 3600, "color": "#d62728" } ],
+          [ ".", "BytesOutFromSource", "NatGatewayId", "nat-0abc123", { "label": "out (response from internet)", "stat": "Sum", "period": 3600, "color": "#ff7f0e" } ]
+        ],
+        "annotations": { "horizontal": [ { "label": "cost spike threshold (1GB/hr)", "value": 1000000000, "color": "#d62728" } ] }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 18, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "LLM — Daily Token Cost (USD) per Tenant — top 10",
+        "region": "us-east-1",
+        "metrics": [
+          [ { "expression": "SEARCH('{OUTRENA/LLM,tenant_slug} cost.usd MetricName=\"cost.usd\"', 'Sum', 86400)", "label": "tenant cost USD", "color": "#d62728" } ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 18, "width": 12, "height": 6,
+      "properties": {
+        "view": "timeSeries",
+        "stacked": false,
+        "title": "CloudWatch Logs — Ingested Bytes per Log Group",
+        "region": "us-east-1",
+        "metrics": [
+          [ "AWS/Logs", "IncomingBytes", "LogGroupName", "outrena-backend", { "label": "backend", "stat": "Sum", "period": 3600, "color": "#1f77b4" } ],
+          [ ".", "IncomingBytes", "LogGroupName", "outrena-worker", { "label": "worker", "stat": "Sum", "period": 3600, "color": "#2ca02c" } ],
+          [ ".", "IncomingBytes", "LogGroupName", "outrena-scheduler", { "label": "scheduler", "stat": "Sum", "period": 3600, "color": "#9467bd" } ]
+        ]
+      }
+    }
+  ]
+}

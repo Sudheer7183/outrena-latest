@@ -1,0 +1,202 @@
+# schema_baseline.yml — Drift-detection subset for OUTRENA tenant schemas.
+#
+# Purpose:
+#   Consumed by verify_schema_health.py (§14 Risk #17 — tenant schema drift).
+#   For each active tenant in public.tenants, verify_schema_health.py checks
+#   every table listed below:
+#     1. the table exists in the tenant's schema, AND
+#     2. its column set matches the columns listed here.
+#
+#   Drift = any of:
+#     - table missing entirely
+#     - expected column missing (likely a failed/incomplete Alembic migration)
+#     - unexpected column present (likely a rogue DDL or schema-creation bug)
+#
+# This is NOT the full 29-model schema — it is a curated subset of the
+# tables + columns whose presence/shape is critical for tenant isolation,
+# the autopilot scheduler, sequence tracking, and LLM audit. Adding a new
+# table or column to this baseline MUST be paired with a corresponding
+# Alembic migration that creates it across all tenant schemas (see
+# db-migrate-all-tenants.sh).
+#
+# Maintenance contract:
+#   - When you add a new column to a tenant-scoped model in the codebase:
+#       1. Write the Alembic migration (alembic revision --autogenerate).
+#       2. Add the column to the relevant table entry below.
+#       3. Run db-migrate-all-tenants.sh on staging.
+#       4. Run verify_schema_health.py on staging — must report 0 drift.
+#   - When you remove a column: write a drop migration, remove from this file.
+#   - When you add a new table: add a full entry here with at least the
+#     critical columns (id, tenant_id if applicable, created_at).
+#
+# Critical columns per table = the columns the application code unconditionally
+# SELECTs/INSERTs in the hot path. Drift on these = guaranteed runtime error.
+# ----------------------------------------------------------------------------
+
+tables:
+  # ----- Identity / tenancy -----
+  - name: tenants
+    columns:
+      - id
+      - slug
+      - schema_name
+      - status
+      - plan
+      - created_at
+      - updated_at
+
+  - name: tenant_settings
+    columns:
+      - tenant_id
+      - key
+      - value
+      - updated_at
+
+  # ----- Users / RBAC -----
+  - name: users
+    columns:
+      - id
+      - tenant_id
+      - email
+      - keycloak_user_id
+      - role
+      - status
+      - created_at
+      - updated_at
+
+  - name: api_keys
+    columns:
+      - id
+      - tenant_id
+      - user_id
+      - key_hash
+      - label
+      - last_used_at
+      - revoked_at
+      - created_at
+
+  # ----- Conversations / messages -----
+  - name: conversations
+    columns:
+      - id
+      - tenant_id
+      - user_id
+      - channel
+      - status
+      - last_message_at
+      - created_at
+      - updated_at
+
+  - name: messages
+    columns:
+      - id
+      - tenant_id
+      - conversation_id
+      - role
+      - content
+      - token_count
+      - created_at
+
+  # ----- Autopilot scheduler (§4 — Risk #4 SCHEDULER_TICK_SECONDS) -----
+  - name: autopilot_runs
+    columns:
+      - id
+      - tenant_id
+      - conversation_id
+      - status
+      - started_at
+      - completed_at
+      - error_code
+      - partial_cap_hits
+
+  - name: autopilot_steps
+    columns:
+      - id
+      - run_id
+      - step_type
+      - sequence_id
+      - scheduled_for
+      - executed_at
+      - status
+
+  # ----- Sequences (multi-step outreach flows) -----
+  - name: sequences
+    columns:
+      - id
+      - tenant_id
+      - name
+      - status
+      - created_at
+      - updated_at
+
+  - name: sequence_steps
+    columns:
+      - id
+      - sequence_id
+      - ord
+      - channel
+      - delay_seconds
+      - template_id
+
+  - name: sequence_enrollments
+    columns:
+      - id
+      - sequence_id
+      - tenant_id
+      - user_id
+      - current_step
+      - status
+      - enrolled_at
+      - completed_at
+
+  # ----- LLM audit + cost tracking (§14 Risk #22 — cost overrun) -----
+  - name: llm_calls
+    columns:
+      - id
+      - tenant_id
+      - run_id
+      - model
+      - prompt_tokens
+      - completion_tokens
+      - cost_usd
+      - latency_ms
+      - status
+      - created_at
+
+  # ----- MailBridge outbound (§14 Risk #15) -----
+  - name: outbound_messages
+    columns:
+      - id
+      - tenant_id
+      - conversation_id
+      - channel
+      - provider_message_id
+      - status
+      - error_code
+      - sent_at
+      - delivered_at
+      - created_at
+
+  # ----- Tenant isolation invariants (§14 Risk #17) -----
+  # Every tenant-scoped table MUST have a tenant_id column with NOT NULL + a
+  # CHECK constraint. verify_schema_health.py checks column presence; the
+  # CHECK constraint is verified separately by a one-shot migration test.
+  - name: audit_log
+    columns:
+      - id
+      - tenant_id
+      - actor_user_id
+      - action
+      - resource_type
+      - resource_id
+      - payload
+      - created_at
+
+  # ----- Cache invalidation ledger (§15.1 testing) -----
+  - name: cache_invalidation_log
+    columns:
+      - id
+      - tenant_id
+      - cache_key
+      - reason
+      - invalidated_at

@@ -1,0 +1,13 @@
+# requirements.txt — schemathesis contract-test dependencies (spec §15.3).
+#
+# Install with:
+#     pip install -r tests/contract/requirements.txt
+#
+# Pinned to the exact versions validated against the OUTRENA OpenAPI spec.
+# schemathesis 3.39.x is the last 3.x line before the 4.x API rework; the
+# test suite uses the 3.x `@schema.parametrize()` + `case.validate_response()`
+# API which is stable across 3.x patch releases.
+
+schemathesis==3.39.5
+pytest==8.3.4
+hypothesis==6.122.3

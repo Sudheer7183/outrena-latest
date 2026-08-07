@@ -1,0 +1,10 @@
+# envs/dev/backend.tfbackend — Terraform remote-state config for dev.
+# Usage:
+#   terraform init -backend-config=envs/dev/backend.tfbackend
+#
+# State is stored in a dedicated storage account shared across all envs;
+# the `key` differentiates per-env state files inside the same container.
+resource_group_name  = "outrena-tfstate-rg"
+storage_account_name = "outrenatfstate"
+container_name       = "tfstate"
+key                  = "azure/dev.terraform.tfstate"

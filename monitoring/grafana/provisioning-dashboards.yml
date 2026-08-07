@@ -1,0 +1,25 @@
+# OUTRENA Phase 6 — Grafana dashboard provisioning
+#
+# Drop into /etc/grafana/provisioning/dashboards/dashboards.yml inside the Grafana
+# container. Grafana scans the `path` recursively every `updateIntervalSeconds`
+# and imports / updates any *.json dashboard files found there.
+#
+# The docker-compose-loki.yml binds the repo's `grafana/dashboards/` directory
+# to /var/lib/grafana/dashboards (read-only), so this config sees the 3
+# dashboards (outrena-overview, outrena-tenant-isolation, outrena-cutover).
+
+apiVersion: 1
+
+providers:
+  - name: outrena-dashboards
+    orgId: 1
+    folder: OUTRENA  # all imported dashboards land under this folder in Grafana
+    type: file
+    disableDeletion: false  # set true in prod to lock dashboards from UI deletion
+    updateIntervalSeconds: 30  # rescan directory every 30s for new/updated JSON
+    allowUiUpdates: true  # let users edit dashboards in the UI (changes are NOT
+                          # persisted back to the repo — for prod, set false and
+                          # require dashboards to be checked into Git only)
+    options:
+      path: /var/lib/grafana/dashboards  # bind-mount target in docker-compose-loki.yml
+      foldersFromFilesStructure: false  # flatten — all dashboards go under OUTRENA/

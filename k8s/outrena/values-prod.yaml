@@ -1,0 +1,249 @@
+# values-prod.yaml — OUTRENA production cluster overrides.
+#
+# Usage:
+#   helm install outrena ./k8s/outrena \
+#     -f k8s/outrena/values.yaml \
+#     -f k8s/outrena/values-prod.yaml \
+#     -n outrena-prod --create-namespace
+#
+# Targets a multi-AZ cloud cluster (EKS/GKE/AKS) with external HA Postgres +
+# Redis. Sized for ~50 tenants + 500k autopilot runs/day per the Phase 1 SRS.
+# Key differences from staging:
+#   - 3 replicas per stateful component (quorum for rolling deploys)
+#   - HPA min=3 max=20 (handles bursts from autopilot queue)
+#   - PDB minAvailable=2 (zero-downtime during node drain)
+#   - SKIP_JWT_VERIFICATION=false (must always be false — code validates)
+#   - LOG_LEVEL=INFO (DEBUG only on-demand via kubectl)
+#   - Strict securityContext + nodeAffinity for spot/on-demand split
+#   - External Secrets via SecretProviderClass (recommended) OR sealed-secrets
+#
+# §16.3 (blue/green cutover) — 3 replicas + PDB minAvailable=2 enables
+# rolling update without losing quorum during the cutover window.
+
+global:
+  environment: production
+  imageTag: "1.0.0"                    # pinned — never use latest in prod
+  imagePullPolicy: IfNotPresent
+  baseDomain: outrena.com
+  storageProvider: s3
+  imagePullSecrets:
+    - name: regcred
+
+# ── Backend ────────────────────────────────────────────────────────────────
+backend:
+  replicas: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3                     # PDB floor — never below 3 in prod
+    maxReplicas: 20                    # handles 5x burst (autopilot queue)
+    targetCPUUtilizationPercentage: 60
+    targetMemoryUtilizationPercentage: 75
+  pdb:
+    enabled: true
+    minAvailable: 2                    # tolerate 1 node drain without outage
+  migration:
+    enabled: false                     # run via separate Job (see NOTES.txt)
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m                       # burst for LLM calls + CSV import
+      memory: 2Gi
+  env:
+    SKIP_JWT_VERIFICATION: "false"     # MUST be false in prod
+    VERIFY_JWT_ISSUER: "true"
+    LOG_LEVEL: "INFO"
+    SCHEDULER_TICK_SECONDS: "300"
+    SCHEDULER_PARTIAL_CAP: "10"        # higher cap in prod (more headroom)
+    S3_BUCKET: outrena-prod-csv
+    S3_REGION: us-east-1
+    S3_PUBLIC_URL: "https://outrena-prod-csv.s3.us-east-1.amazonaws.com"
+
+# ── Frontend ───────────────────────────────────────────────────────────────
+frontend:
+  replicas: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    enabled: true
+    minAvailable: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# ── Worker ─────────────────────────────────────────────────────────────────
+worker:
+  replicas: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 15
+    targetCPUUtilizationPercentage: 70
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 2Gi
+    limits:
+      cpu: 4000m
+      memory: 4Gi
+
+# ── Keycloak ──────────────────────────────────────────────────────────────
+keycloak:
+  replicas: 2                          # HA for the auth path
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  env:
+    KC_LOG_LEVEL: INFO
+
+# ── External Postgres / Redis (managed services) ──────────────────────────
+postgres:
+  enabled: false
+  existingSecret: outrena-postgres-secret
+redis:
+  enabled: false
+  existingSecret: outrena-redis-secret
+
+# ── Ingress ───────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    # Rate-limit per-IP to mitigate brute-force (§14 Risk #2 supplement).
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+    nginx.ingress.kubernetes.io/limit-burst: "100"
+    # HSTS — 1 year, include subdomains, preload.
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "Strict-Transport-Security: max-age=31536000; includeSubDomains; preload";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
+  hosts:
+    - host: app.outrena.com
+      paths:
+        - path: /api(/|$)(.*)
+          pathType: Prefix
+          serviceName: backend
+          servicePort: 8000
+        - path: /auth(/|$)(.*)
+          pathType: Prefix
+          serviceName: keycloak
+          servicePort: 8080
+        - path: /
+          pathType: Prefix
+          serviceName: frontend
+          servicePort: 80
+  tls:
+    - secretName: outrena-tls
+      hosts:
+        - app.outrena.com
+
+# ── Network Policy (§14 Risk #17 — tenant isolation) ──────────────────────
+networkPolicy:
+  enabled: true
+  ingressNamespace: ingress-nginx
+  postgresNamespace: database
+  postgresPodLabels:
+    app.kubernetes.io/name: postgresql
+  redisNamespace: database
+  redisPodLabels:
+    app.kubernetes.io/name: redis
+
+# ── Strict security context (already the default; re-stated for clarity) ──
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  privileged: false
+  capabilities:
+    drop:
+      - ALL
+
+# ── Secret Store CSI (AWS Secrets Manager) ────────────────────────────────
+# Recommended for prod — syncs secrets from Secrets Manager into a K8s Secret
+# consumed by envFrom. Requires the secrets-store-csi-driver + aws-provider.
+secretProvider:
+  enabled: true
+  provider: aws
+  aws:
+    region: us-east-1
+    objects: |
+      - objectName: "outrena/prod/database-url"
+        objectAlias: "DATABASE_URL"
+      - objectName: "outrena/prod/redis-auth-token"
+        objectAlias: "REDIS_AUTH_TOKEN"
+      - objectName: "outrena/prod/keycloak-admin-password"
+        objectAlias: "KEYCLOAK_ADMIN_PASSWORD"
+      - objectName: "outrena/prod/mailbridge-url"
+        objectAlias: "MAILBRIDGE_DEFAULT_URL"
+
+# ── Scheduling: spot/on-demand split + pod anti-affinity for HA ───────────
+# Backend + frontend + worker run on spot (cheap, stateless, replaceable).
+# Keycloak runs on on-demand (must not be evicted — auth path is critical).
+nodeSelector:
+  kubernetes.io/arch: amd64
+  kubernetes.io/os: linux
+
+tolerations:
+  - key: spot
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+  - key: on-demand
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+
+affinity:
+  # Spread across AZs for HA.
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/part-of
+                operator: In
+                values:
+                  - outrena
+          topologyKey: topology.kubernetes.io/zone
+  # Backend/frontend/worker → spot; keycloak → on-demand (override in
+  # keycloak's deployment if needed via a separate values file).
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 90
+        preference:
+          matchExpressions:
+            - key: node-role.kubernetes.io/spot
+              operator: In
+              values:
+                - "true"

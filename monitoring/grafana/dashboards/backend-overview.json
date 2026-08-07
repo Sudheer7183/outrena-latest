@@ -1,0 +1,261 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "OUTRENA — backend overview (Prometheus-backed). Replaces the CloudWatch-namespace outrena-overview.json (which queried OUTRENA/Backend — a namespace the backend never populated, per SURVEY-OBS). All panels here scrape the backend /metrics endpoint via Prometheus.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "API Request Rate (req/s) by endpoint",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 0, "w": 8, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (endpoint) (rate(outrena_http_requests_total[5m]))",
+          "legendFormat": "{{endpoint}}",
+          "interval": "",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Error Rate (5xx %)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 8, "y": 0, "w": 8, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum(rate(outrena_http_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(outrena_http_requests_total[5m])), 1) * 100",
+          "legendFormat": "5xx %",
+          "interval": "",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.5}, {"color": "red", "value": 5}]}
+        },
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single", "sort": "none"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "p50 / p95 / p99 Latency (seconds)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 16, "y": 0, "w": 8, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(outrena_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "interval": "",
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(outrena_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "interval": "",
+          "format": "time_series"
+        },
+        {
+          "refId": "C",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(outrena_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "interval": "",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {"mode": "palette-classic"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.5}, {"color": "red", "value": 1}]}
+        },
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Active HTTP Requests (in-flight)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 8, "w": 8, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "outrena_http_requests_active",
+          "legendFormat": "active",
+          "interval": "",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single", "sort": "none"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM Call Rate (calls/min) by provider",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 8, "y": 8, "w": 8, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (provider) (rate(outrena_llm_calls_total[5m])) * 60",
+          "legendFormat": "{{provider}}",
+          "interval": "",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ops", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "sum"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM Cost (cents/min) by tenant",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 16, "y": 8, "w": 8, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (tenant) (rate(outrena_llm_cost_cents_total[5m])) * 60",
+          "legendFormat": "{{tenant}}",
+          "interval": "",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "cent", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "sum"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Email Send Rate (sends/min) by tenant",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (tenant) (rate(outrena_emails_sent_total[5m])) * 60",
+          "legendFormat": "{{tenant}}",
+          "interval": "",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ops", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "sum"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Email Bounces + Complaints (per tenant)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (tenant) (rate(outrena_email_bounces_total[5m])) * 60",
+          "legendFormat": "bounces {{tenant}}",
+          "interval": "",
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (tenant) (rate(outrena_email_complaints_total[5m])) * 60",
+          "legendFormat": "complaints {{tenant}}",
+          "interval": "",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ops", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "type": "logs",
+      "title": "Backend ERROR logs (Loki)",
+      "datasource": {"type": "loki", "uid": "loki"},
+      "gridPos": {"x": 0, "y": 24, "w": 24, "h": 10},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "loki", "uid": "loki"},
+          "expr": "{service=\"outrena-backend\"} |= \"ERROR\" | json | line_format \"{{.level}} [{{.tenant_slug}}] {{.request_id}} {{.message}}\""
+        }
+      ],
+      "options": {"showTime": true, "showLabels": false, "showCommonLabels": false, "wrapLogMessage": true, "prettifyLogMessage": false, "enableLogDetails": true, "dedupStrategy": "none", "sortOrder": "Descending"}
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["outrena", "phase8", "overview", "prometheus"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {"text": "Prometheus", "value": "prometheus"},
+        "hide": 0,
+        "label": "Prometheus datasource"
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {"refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "1h"]},
+  "timezone": "browser",
+  "title": "OUTRENA Backend Overview (Prometheus)",
+  "uid": "outrena-backend-overview",
+  "version": 1,
+  "weekStart": ""
+}
