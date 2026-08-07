@@ -56,7 +56,7 @@ dependencies = [
     "apscheduler==3.11.0",
 
     # ── Logging ──────────────────────────────────────────────────────────────
-    "structlog==24.4.0",
+    "structlog==26.1.0",
     "rich==13.9.4",
 
     # ── Metrics (Prometheus /metrics endpoint) ──────────────────────────────
