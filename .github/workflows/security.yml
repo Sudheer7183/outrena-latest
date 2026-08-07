@@ -282,7 +282,7 @@ jobs:
           npm sbom --sbom-format cyclonedx --sbom-type application > ../sbom/frontend.cdx.json
 
       - name: Upload SBOM artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-cyclonedx
           path: sbom/*.cdx.json
@@ -339,7 +339,7 @@ jobs:
 
       - name: Upload license reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: license-reports
           path: |
