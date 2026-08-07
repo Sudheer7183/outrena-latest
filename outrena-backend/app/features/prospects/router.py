@@ -101,6 +101,8 @@ async def create_prospect(
     db: AsyncSession = Depends(get_db),
     _: TokenPayload = Depends(require_role(Role.REP)),
 ) -> ProspectResponse:
+    # item = await _service.create(db, body)
+    # return ProspectResponse.model_validate(item)
     item = await _service.create(db, body)
     return ProspectResponse.model_validate(item)
 

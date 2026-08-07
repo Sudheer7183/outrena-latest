@@ -143,8 +143,10 @@ class ProspectService:
         item = Prospect(**data)
         db.add(item)
         await db.commit()
-        item = await db.get(Prospect, item.id)
-        # Decrypt in-memory so the returned object shows cleartext.
+        # With eager_defaults=True on Base, asyncpg uses RETURNING on INSERT
+        # so server-generated columns (createdAt, updatedAt) are populated
+        # immediately — no db.refresh() needed and no MissingGreenlet risk.
+        # expire_on_commit=False (AsyncSessionLocal) keeps all other attrs alive.
         self._decrypt_prospect_pii(item)
         # FIX-BE-1 / CRITICAL 3: score the prospect if an IcpProfile is
         # linked. Best-effort — never block prospect creation on scoring.
@@ -165,7 +167,7 @@ class ProspectService:
         for key, value in updates.items():
             setattr(item, key, value)
         await db.commit()
-        item = await db.get(Prospect, item.id)
+        await db.refresh(item)
         # Decrypt in-memory for the response.
         self._decrypt_prospect_pii(item)
         # FIX-BE-1 / CRITICAL 3: re-score if the ICP linkage or scoring-
@@ -305,7 +307,7 @@ class ProspectService:
             fields["domain"] = domain
         prospect.enrichmentTier = "ENRICHED"  # type: ignore[assignment]
         await db.commit()
-        prospect = await db.get(Prospect, prospect.id)
+        await db.refresh(prospect)
         # FIX-BE-1 / HIGH 8 (re-verification): record one usage_event
         # (prospect_enrich) for per-tenant cost roll-ups. Best-effort —
         # never blocks the enrich call. We use the local stub provider

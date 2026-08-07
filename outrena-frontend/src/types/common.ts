@@ -86,6 +86,7 @@ export interface Prospect {
   intentSignals: string | null;
   createdAt: string;
   updatedAt: string;
+  domain:string | null;
 }
 
 export interface Campaign {

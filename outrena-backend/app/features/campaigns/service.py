@@ -183,14 +183,26 @@ class CampaignService:
     async def link_prospect(
         self, db: AsyncSession, body: CampaignProspectLinkRequest
     ) -> CampaignProspect:
-        link = CampaignProspect(
-            campaignId=body.campaignId,
-            prospectId=body.prospectId,
-            status="pending",
+        # Upsert: return the existing link if (campaignId, prospectId) already
+        # exists rather than crashing on the unique constraint
+        # "uq_CampaignProspect_campaign_prospect".
+        existing = await db.execute(
+            select(CampaignProspect).where(
+                CampaignProspect.campaignId == body.campaignId,
+                CampaignProspect.prospectId == body.prospectId,
+            )
         )
-        db.add(link)
-        await db.commit()
-        link = await db.get(CampaignProspect, link.id)
+        link = existing.scalar_one_or_none()
+        if link is None:
+            link = CampaignProspect(
+                campaignId=body.campaignId,
+                prospectId=body.prospectId,
+                status="pending",
+            )
+            db.add(link)
+            await db.commit()
+            link = await db.get(CampaignProspect, link.id)
+
         # FIX-BE-1 / MEDIUM 10 (re-verification): auto-generate the 7-touch
         # cadence Sequence rows for this (campaign, prospect) pair. The
         # Sequence model requires prospectId (NOT NULL + FK to Prospect),
@@ -199,21 +211,39 @@ class CampaignService:
         # prospectId, touchNumber) are skipped. Best-effort — failures are
         # logged + swallowed so a SequenceService hiccup never blocks the
         # link operation.
-        try:
-            from app.features.sequences.service import SequenceService
+        #
+        # IMPORTANT: verify the campaign row is visible in this session
+        # before handing the session to SequenceService. If it's not found
+        # (e.g. the campaign was deleted mid-request) we skip generation
+        # rather than letting SequenceService produce a FK violation that
+        # poisons the session with a PendingRollbackError.
+        campaign = await self.get(db, body.campaignId)
+        if campaign is not None:
+            try:
+                from app.features.sequences.service import SequenceService
 
-            await SequenceService().auto_generate_for_campaign(
-                db,
-                campaign_id=body.campaignId,
-                prospect_id=body.prospectId,
-                owner_user_id=None,  # falls back to "system" in the helper
-            )
-        except Exception as exc:  # noqa: BLE001
+                await SequenceService().auto_generate_for_campaign(
+                    db,
+                    campaign_id=body.campaignId,
+                    prospect_id=body.prospectId,
+                    owner_user_id=None,  # falls back to "system" in the helper
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Roll back the failed sequence INSERT so the session is
+                # returned to a clean state. The link itself was already
+                # committed above, so the prospect is still linked.
+                await db.rollback()
+                logger.warning(
+                    "campaign.link_prospect.cadence_auto_gen_failed",
+                    campaign_id=body.campaignId,
+                    prospect_id=body.prospectId,
+                    error=str(exc),
+                )
+        else:
             logger.warning(
-                "campaign.link_prospect.cadence_auto_gen_failed",
+                "campaign.link_prospect.campaign_not_found_for_sequence_gen",
                 campaign_id=body.campaignId,
                 prospect_id=body.prospectId,
-                error=str(exc),
             )
         return link
 

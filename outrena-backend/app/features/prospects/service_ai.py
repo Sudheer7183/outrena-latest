@@ -267,13 +267,19 @@ class ProspectAiService:
                 self._decrypt_pii(seed)
         if seed is None:
             # Fallback: find a prospect from a won deal (status='won')
+            # result = await db.execute(
+            #     select(Prospect)
+            #     .where(Prospect.status == "won")
+            #     .where(Prospect.deleted_at.is_(None))
+            #     .order_by(Prospect.createdAt.desc())
+            #     .limit(1)
+            # )
             result = await db.execute(
-                select(Prospect)
-                .where(Prospect.status == "won")
-                .where(Prospect.deleted_at.is_(None))
-                .order_by(Prospect.createdAt.desc())
-                .limit(1)
-            )
+            select(Prospect)
+            .where(Prospect.deleted_at.is_(None))
+            .order_by(Prospect.icpFitScore.desc().nulls_last(), Prospect.createdAt.desc())
+            .limit(1)
+        )
             seed = result.scalar_one_or_none()
             if seed:
                 self._decrypt_pii(seed)

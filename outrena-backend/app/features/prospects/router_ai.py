@@ -30,6 +30,8 @@ from app.schemas.prospect_ai import (
     UltimateProfileRequest,
     UltimateProfileResponse,
 )
+from pydantic import BaseModel as _BaseModel
+from typing import Any as _Any
 from app.features.prospects.service_ai import ProspectAiService
 
 router = APIRouter(prefix="/prospects", tags=["Prospects AI"])
@@ -119,6 +121,55 @@ async def prospect_brief(
         )
     return result
 
+
+
+
+# ── 5.5 Competitor Radar ─────────────────────────────────────────────────────
+
+
+class CompetitorRadarRequest(_BaseModel):
+    """Body for POST /prospects/competitor-radar."""
+    prospect_id: str
+    llm_config_id: int | None = None
+
+
+class CompetitorRadarResponse(_BaseModel):
+    """Response for POST /prospects/competitor-radar."""
+    success: bool
+    prospect_id: str
+    company: str = ""
+    competitors: list[_Any] = []
+    count: int = 0
+
+
+@router.post("/competitor-radar", response_model=CompetitorRadarResponse)
+async def competitor_radar(
+    body: CompetitorRadarRequest,
+    db: AsyncSession = Depends(get_db),
+    _: TokenPayload = Depends(require_role(Role.REP)),
+) -> CompetitorRadarResponse:
+    """Research a prospect company's competitors via web search + LLM (Competitor Radar)."""
+    result = await _service.ultimate_profile(
+        db, prospect_id=body.prospect_id, llm_config_id=body.llm_config_id
+    )
+    if not result.success:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "Prospect not found."
+        )
+    competitors_raw = result.profile.competitors or []
+    # Normalise to list of dicts for the frontend
+    competitors = [
+        {"name": c, "domain": None, "description": None, "overlapScore": None}
+        if isinstance(c, str) else c
+        for c in competitors_raw
+    ]
+    return CompetitorRadarResponse(
+        success=True,
+        prospect_id=body.prospect_id,
+        company=result.company,
+        competitors=competitors,
+        count=len(competitors),
+    )
 
 # ── 5. NL Prospect Search ────────────────────────────────────────────────────
 

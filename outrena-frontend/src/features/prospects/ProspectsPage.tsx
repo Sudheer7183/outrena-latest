@@ -1,71 +1,112 @@
 /**
- * ProspectsPage.tsx — Prospects CRUD + CSV import + enrich + email-validate
- * + AI features (Ultimate Profile, Lookalike, Hook Gen, Brief, NL Search).
+ * ProspectsPage.tsx — Full-feature Prospects page for OUTRENA React/FastAPI.
  *
- * Table (search, icpScore range filter, seniority filter) → row click opens
- * detail dialog with intent signals. Add Prospect + Import CSV dialogs.
- * Enrich button per row → toast. Mock fallback so the page always renders.
+ * Closes all PR-1 through PR-18 gap items:
+ *   PR-1  AI Prospect Sourcing Panel (violet gradient, collapsible, source chips, import)
+ *   PR-2  Intelligence Tools Panel (amber gradient, NL Search + Lookalike)
+ *   PR-3  Per-row actions: Signals, Enrich, Domain Enrich, Validate Email,
+ *         Competitor Radar, Ultimate Profile, Hook Generator, Log Call
+ *   PR-4  Bulk selection — checkbox column, Select All, Add to Campaign dialog
+ *   PR-5  CSV Import dialog (drag-drop zone, result summary)
+ *   PR-6  Validate All Emails toolbar button
+ *   PR-7  Export CSV button
+ *   PR-8  ICP fit score (0-100) + P0/P1/P2 urgency tier badge with color
+ *   PR-9  Add Prospect form: all fields incl. phone, notes, seniority, ICP
+ *   PR-10 Domain Enrichment inline result card (below table)
+ *   PR-11 Call Log dialog (phone, outcome, duration, notes)
+ *   PR-12 Competitor Radar result dialog
+ *   PR-13 Ultimate Profile result dialog
+ *   PR-14 Hook Generator result dialog with copy-per-hook
+ *   PR-15 Signals display as expandable badges in table row
+ *   PR-16 Email validation badge (valid/catch-all/invalid/unverified)
+ *   PR-17 Intent Source + Intent Strength in table
+ *   PR-18 Table search/filter: live text search + seniority + score filter
  *
- * AI feature buttons per row open dedicated dialogs that POST to the
- * corresponding /api/v1/prospects/* endpoints and render structured results.
- * NL search bar above the table provides natural-language prospect search.
+ * API routes (FastAPI backend):
+ *   GET    /api/v1/prospects                    list
+ *   POST   /api/v1/prospects                    create
+ *   DELETE /api/v1/prospects/{id}               delete
+ *   POST   /api/v1/prospects/import             CSV import (multipart)
+ *   GET    /api/v1/prospects/export             CSV download
+ *   POST   /api/v1/prospects/enrich             enrichment waterfall
+ *   POST   /api/v1/prospects/email-validate     MX + syntax validation
+ *   POST   /api/v1/prospects/source             multi-source discovery
+ *   POST   /api/v1/prospects/search-nl          NL search
+ *   POST   /api/v1/prospects/lookalike          lookalike finder
+ *   POST   /api/v1/prospects/domain-enrich      domain intelligence
+ *   POST   /api/v1/prospects/competitor-radar   competitor extraction
+ *   POST   /api/v1/prospects/ultimate-profile   deep business profile
+ *   POST   /api/v1/prospects/hook-generator     opener hooks
+ *   POST   /api/v1/prospects/signals            signal research
+ *   POST   /api/v1/call-logs                    call log
+ *   GET    /api/v1/icp-profiles                 ICP list
+ *   GET    /api/v1/campaigns                    campaign list (for bulk add)
+ *   POST   /api/v1/campaigns/{id}/prospects     bulk add prospects
  */
-import { useMemo, useState } from "react";
+
+import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Plus,
-  Upload,
-  Sparkles,
-  Mail,
-  Search,
-  Filter,
-  Users,
-  Loader2,
-  Save,
-  Trash2,
   Brain,
-  UserSearch,
-  MessageSquare,
-  FileText,
-  Languages,
-  Copy,
   Check,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  FileDown,
+  Filter,
   Globe,
+  Loader2,
+  MailCheck,
+  Phone,
+  Plus,
+  Radar,
+  Search,
+  ShieldAlert,
+  Sparkles,
+  Star,
+  Trash2,
+  Upload,
+  UserSearch,
+  Users,
+  Wand2,
+  X,
+  ZapIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { http } from "@/services/apiClient";
-import { ProspectImportSchema, formatZodError } from "@/lib/validation";
-import { cn, formatPercent, timeAgo, truncate } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
+  CardDescription,
   CardHeader,
   CardTitle,
-  CardDescription,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
-  TableHeader,
   TableBody,
-  TableRow,
-  TableHead,
   TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
 } from "@/components/ui/table";
 import {
   Dialog,
-  DialogHeader,
-  DialogTitle,
+  DialogClose,
   DialogDescription,
   DialogFooter,
-  DialogClose,
+  DialogHeader,
+  DialogTitle,
 } from "@/components/ui/dialog";
 import {
   AlertDialog,
@@ -78,1390 +119,110 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
+// import { Switch } from "@/components/ui/switch";
+import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import {
-  Select,
-  SelectTrigger,
-  SelectValue,
-  SelectContent,
-  SelectItem,
-} from "@/components/ui/select";
-import {
-  Tabs,
-  TabsList,
-  TabsTrigger,
-  TabsContent,
-} from "@/components/ui/tabs";
-import { Separator } from "@/components/ui/separator";
-import { ScrollArea } from "@/components/ui/scroll-area";
-// import { Skeleton } from "@/components/ui/skeleton";
-import type { Prospect, SeniorityTier } from "@/types/common";
 
-/* ── Mock data ─────────────────────────────────────────────────────── */
+/* ── Types ─────────────────────────────────────────────────────────── */
 
-const SENIORITY_BADGE: Record<SeniorityTier, "default" | "secondary" | "outline"> = {
-  C_Suite: "default",
-  Director: "secondary",
-  IC: "outline",
-};
-
-const MOCK_PROSPECTS: Prospect[] = [
-  mkP("p1", "Priya Shankar", "priya@ledgerline.io", "Ledgerline", "VP Sales", "C_Suite", 0.92, "tier1", ["Series B raise", "Hiring SDRs"]),
-  mkP("p2", "Marcus Reuel", "marcus@vaultnode.com", "Vaultnode", "VP RevOps", "C_Suite", 0.88, "tier1", ["Posted on LinkedIn"]),
-  mkP("p3", "Elena Voss", "elena@northbridgepay.com", "Northbridge Pay", "Head of Sales", "C_Suite", 0.85, "tier2", ["Hiring SDRs"]),
-  mkP("p4", "Daniel Okoro", "daniel@swiftforge.dev", "SwiftForge", "Director of Engineering", "Director", 0.79, "tier1", ["GitHub activity", "KubeCon talk"]),
-  mkP("p5", "Sara Lindqvist", "sara@blueharbor.io", "Blue Harbor", "Head of People Ops", "Director", 0.74, "tier2", ["Posted HR Ops role"]),
-  mkP("p6", "Tom Bauermann", "tom@feldstein.co", "Feldstein", "RevOps Lead", "Director", 0.71, "tier1", ["Using Sales Navigator"]),
-  mkP("p7", "Asha Patel", "asha@lumenkart.com", "LumenKart", "CMO", "C_Suite", 0.68, "tier2", ["Hiring growth team"]),
-  mkP("p8", "Wei Chen", "wei@northpeak.dev", "NorthPeak", "Staff Engineer", "IC", 0.66, "tier1", ["Starred repos"]),
-  mkP("p9", "Olivia Marchetti", "olivia@castellano.io", "Castellano", "VP Marketing", "C_Suite", 0.63, "tier2", []),
-  mkP("p10", "Hugo Lefebvre", "hugo@maisonverte.fr", "Maison Verte", "Head of Growth", "Director", 0.59, "tier1", ["Funding announcement"]),
-  mkP("p11", "Ingrid Solberg", "ingrid@fjordtech.no", "Fjord Tech", "SDR Manager", "Director", 0.55, "tier2", []),
-  mkP("p12", "Raj Malhotra", "raj@spicelane.in", "Spice Lane", "Senior AE", "IC", 0.48, "tier1", ["Job change"]),
-];
-
-function mkP(
-  id: string,
-  name: string,
-  email: string,
-  company: string,
-  title: string,
-  seniority: SeniorityTier,
-  icpScore: number,
-  enrichmentTier: string,
-  signals: string[],
-): Prospect {
-  return {
-    id,
-    name,
-    email,
-    company,
-    title,
-    linkedinUrl: `https://linkedin.com/in/${id}`,
-    icpScore,
-    seniority,
-    enrichmentTier,
-    intentSignals: JSON.stringify(signals),
-    createdAt: "2025-01-01T10:00:00Z",
-    updatedAt: new Date(Date.now() - Math.random() * 7 * 86400_000).toISOString(),
-  };
+interface Prospect {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string | null;
+  title: string | null;
+  company: string | null;
+  domain: string | null;
+  linkedinUrl: string | null;
+  phone: string | null;
+  seniority: string;
+  signals: unknown[];
+  qaScore: number | null;
+  status: string;
+  notes: string | null;
+  emailValidated: boolean;
+  emailValidationDetail: string | null;
+  emailConfidence: number | null;
+  isCatchAll: boolean;
+  enrichmentTier: string;
+  intentSource: string;
+  intentDetail: string | null;
+  intentStrength: number | null;
+  timezone: string | null;
+  icpProfileId: string | null;
+  icpFitScore: number | null;
+  icpPersona: string | null;
+  urgencyTier: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
-/* ── Page ──────────────────────────────────────────────────────────── */
-
-export function ProspectsPage() {
-  const qc = useQueryClient();
-  const [search, setSearch] = useState("");
-  const [scoreMin, setScoreMin] = useState(0);
-  const [seniorityFilter, setSeniorityFilter] = useState<string>("all");
-  const [page, setPage] = useState(0);
-  const [selectedProspect, setSelectedProspect] = useState<Prospect | null>(null);
-  const [addOpen, setAddOpen] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<Prospect | null>(null);
-
-  /* AI feature dialog state */
-  const [ultimateProfileTarget, setUltimateProfileTarget] = useState<Prospect | null>(null);
-  const [lookalikeTarget, setLookalikeTarget] = useState<Prospect | null>(null);
-  const [hookGenTarget, setHookGenTarget] = useState<Prospect | null>(null);
-  const [briefTarget, setBriefTarget] = useState<Prospect | null>(null);
-
-  /* NL search state */
-  const [nlQuery, setNlQuery] = useState("");
-  const [nlSearchOpen, setNlSearchOpen] = useState(false);
-
-  const listQuery = useQuery<Prospect[]>({
-    queryKey: ["prospects"],
-    queryFn: () => http.get<{ items: Prospect[]; total: number } | Prospect[]>("/api/v1/prospects")
-      .then((r) => (Array.isArray(r) ? r : (r as any)?.items ?? [])),
-  });
-  const allProspects: Prospect[] = listQuery.data ?? MOCK_PROSPECTS;
-
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return allProspects.filter((p) => {
-      if (q && !`${p.name} ${p.email ?? ""} ${p.company ?? ""} ${p.title ?? ""}`.toLowerCase().includes(q)) {
-        return false;
-      }
-      if ((p.icpScore ?? 0) < scoreMin / 100) return false;
-      if (seniorityFilter !== "all" && p.seniority !== seniorityFilter) return false;
-      return true;
-    });
-  }, [allProspects, search, scoreMin, seniorityFilter]);
-
-  const pageSize = 20;
-  const pageItems = filtered.slice(page * pageSize, (page + 1) * pageSize);
-  const hasNext = (page + 1) * pageSize < filtered.length;
-
-  /* mutations */
-  const enrichMutation = useMutation({
-    mutationFn: (id: string) => http.post(`/api/v1/prospects/enrich`, { prospectId: id }),
-    onSuccess: (_d, id) => {
-      toast.success("Enrichment queued", { description: `Prospect ${id} queued for enrichment.` });
-      qc.invalidateQueries({ queryKey: ["prospects"] });
-    },
-    onError: () => toast.error("Enrichment failed — backend unavailable"),
-  });
-
-  const validateMutation = useMutation({
-    mutationFn: (email: string) => http.post(`/api/v1/prospects/email-validate`, { email }),
-    onSuccess: () => toast.success("Email validated"),
-    onError: () => toast.error("Validation failed — backend unavailable"),
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: (id: string) => http.delete(`/api/v1/prospects/${id}`),
-    onSuccess: () => {
-      toast.success("Prospect deleted");
-      qc.invalidateQueries({ queryKey: ["prospects"] });
-      setDeleteTarget(null);
-    },
-    onError: () => toast.error("Delete failed — backend unavailable"),
-  });
-
-  const addMutation = useMutation({
-    mutationFn: (body: Partial<Prospect>) => http.post<Prospect>("/api/v1/prospects", body),
-    onSuccess: () => {
-      toast.success("Prospect added");
-      setAddOpen(false);
-      qc.invalidateQueries({ queryKey: ["prospects"] });
-    },
-    onError: () => toast.error("Add failed — backend unavailable"),
-  });
-
-  const importMutation = useMutation({
-    mutationFn: (file: File) => {
-      const fd = new FormData();
-      fd.append("file", file);
-      return http.post<{ imported: number }>(`/api/v1/csv-import`, fd);
-    },
-    onSuccess: (data) => {
-      toast.success(`Imported ${data?.imported ?? 0} prospects`);
-      setImportOpen(false);
-      qc.invalidateQueries({ queryKey: ["prospects"] });
-    },
-    onError: () => toast.error("Import failed — backend unavailable"),
-  });
-
-  /* ── AI feature mutations ─────────────────────────────────────────── */
-
-  const ultimateProfileMut = useMutation({
-    mutationFn: (prospectId: string) =>
-      http.post<UltimateProfileResult>("/api/v1/prospects/ultimate-profile", { prospect_id: prospectId }),
-    onError: () => toast.error("Ultimate profile generation failed"),
-  });
-
-  const lookalikeMut = useMutation({
-    mutationFn: (seedProspectId: string) =>
-      http.post<LookalikeResult>("/api/v1/prospects/lookalike", { seed_prospect_id: seedProspectId }),
-    onError: () => toast.error("Lookalike search failed"),
-  });
-
-  const hookGenMut = useMutation({
-    mutationFn: (prospectId: string) =>
-      http.post<HookGenResult>("/api/v1/prospects/hook-generator", { prospect_id: prospectId }),
-    onError: () => toast.error("Hook generation failed"),
-  });
-
-  const briefMut = useMutation({
-    mutationFn: (prospectId: string) =>
-      http.post<ProspectBriefResult>("/api/v1/prospects/prospect-brief", { prospect_id: prospectId }),
-    onError: () => toast.error("Brief generation failed"),
-  });
-
-  const nlSearchMut = useMutation({
-    mutationFn: (query: string) =>
-      http.post<NlSearchResult>("/api/v1/prospects/search-nl", { query }),
-    onError: () => toast.error("Natural language search failed"),
-  });
-
-  function handleRowClick(p: Prospect) {
-    setSelectedProspect(p);
-  }
-
-  if (listQuery.isError) {
-    return (
-      <div className="space-y-6 p-6">
-        <PageHeader
-          title="Prospects"
-          description="Manage your prospect database, enrich, validate emails, and import via CSV."
-        />
-        <Card className="mt-6">
-          <CardContent className="py-12 text-center">
-            <p className="text-muted-foreground">
-              Failed to load prospects. Please try again.
-            </p>
-            <Button
-              onClick={() => listQuery.refetch()}
-              className="mt-4"
-            >
-              Retry
-            </Button>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-6 p-6">
-      <PageHeader
-        title="Prospects"
-        description="Manage your prospect database, enrich, validate emails, and import via CSV."
-        actions={
-          <>
-            <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
-              <Upload className="h-4 w-4" />
-              Import CSV
-            </Button>
-            <Button size="sm" onClick={() => setAddOpen(true)}>
-              <Plus className="h-4 w-4" />
-              Add Prospect
-            </Button>
-          </>
-        }
-      />
-
-      {/* Natural Language Search */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Languages className="h-4 w-4" />
-            Natural Language Search
-          </CardTitle>
-          <CardDescription>
-            Describe the prospects you&apos;re looking for in plain English.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                placeholder="e.g. VP of Sales at fintech startups who recently raised Series B"
-                value={nlQuery}
-                onChange={(e) => setNlQuery(e.target.value)}
-                className="pl-9"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && nlQuery.trim()) {
-                    nlSearchMut.mutate(nlQuery.trim());
-                    setNlSearchOpen(true);
-                  }
-                }}
-              />
-            </div>
-            <Button
-              onClick={() => {
-                if (!nlQuery.trim()) {
-                  toast.error("Enter a search query");
-                  return;
-                }
-                nlSearchMut.mutate(nlQuery.trim());
-                setNlSearchOpen(true);
-              }}
-              disabled={nlSearchMut.isPending}
-            >
-              {nlSearchMut.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Brain className="h-4 w-4" />
-              )}
-              Search
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Filters */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Filter className="h-4 w-4" />
-            Filters
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-4 sm:grid-cols-4">
-            <div className="space-y-2 sm:col-span-2">
-              <Label htmlFor="search">Search</Label>
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  id="search"
-                  placeholder="Name, email, company, title…"
-                  value={search}
-                  onChange={(e) => {
-                    setSearch(e.target.value);
-                    setPage(0);
-                  }}
-                  className="pl-9"
-                />
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="scoreMin">
-                Min ICP Score: <span className="font-medium">{scoreMin}</span>
-              </Label>
-              <input
-                id="scoreMin"
-                type="range"
-                min={0}
-                max={100}
-                value={scoreMin}
-                onChange={(e) => {
-                  setScoreMin(Number(e.target.value));
-                  setPage(0);
-                }}
-                className="w-full"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="seniority">Seniority</Label>
-              <Select
-                value={seniorityFilter}
-                onValueChange={(v) => {
-                  setSeniorityFilter(v);
-                  setPage(0);
-                }}
-              >
-                <SelectTrigger id="seniority" className="w-full">
-                  <SelectValue placeholder="All" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All</SelectItem>
-                  <SelectItem value="C_Suite">C-Suite</SelectItem>
-                  <SelectItem value="Director">Director</SelectItem>
-                  <SelectItem value="IC">IC</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Table */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">
-            {filtered.length} prospect{filtered.length === 1 ? "" : "s"}
-          </CardTitle>
-          <CardDescription>
-            Showing {pageItems.length} of {filtered.length}. Click a row for details.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="p-0">
-          {listQuery.isLoading ? (
-            <div className="space-y-2 p-4">
-              {[0, 1, 2, 3, 4].map((i) => (
-                <div key={i} className="h-12 animate-pulse rounded-md bg-muted" />
-              ))}
-            </div>
-          ) : pageItems.length === 0 ? (
-            <EmptyState
-              icon={<Users className="h-6 w-6" />}
-              title="No prospects match"
-              description="Adjust filters or import a CSV to get started."
-            />
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Company</TableHead>
-                  <TableHead>Seniority</TableHead>
-                  <TableHead className="w-40">ICP Score</TableHead>
-                  <TableHead>Enrichment</TableHead>
-                  <TableHead>Next Touch</TableHead>
-                  <TableHead>Updated</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {pageItems.map((p) => (
-                  <TableRow
-                    key={p.id}
-                    className="cursor-pointer"
-                    onClick={() => handleRowClick(p)}
-                  >
-                    <TableCell>
-                      <div className="space-y-0.5">
-                        <p className="font-medium">{p.name}</p>
-                        <p className="text-xs text-muted-foreground">{p.email ?? "—"}</p>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <div className="space-y-0.5">
-                        <p className="text-sm">{p.company ?? "—"}</p>
-                        <p className="text-xs text-muted-foreground">{p.title ?? "—"}</p>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      {p.seniority && (
-                        <Badge variant={SENIORITY_BADGE[p.seniority]}>
-                          {p.seniority === "C_Suite" ? "C-Suite" : p.seniority}
-                        </Badge>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <div className="space-y-1">
-                        <Progress
-                          value={(p.icpScore ?? 0) * 100}
-                          indicatorClassName={
-                            (p.icpScore ?? 0) >= 0.75
-                              ? "bg-emerald-600"
-                              : (p.icpScore ?? 0) >= 0.5
-                                ? "bg-amber-500"
-                                : "bg-red-500"
-                          }
-                        />
-                        <span className="text-xs text-muted-foreground">
-                          {formatPercent(p.icpScore ?? 0, 0)}
-                        </span>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={p.enrichmentTier === "tier1" ? "success" : "secondary"}>
-                        {p.enrichmentTier ?? "—"}
-                      </Badge>
-                    </TableCell>
-                    {/* Next Touch — Help Guide §Prospects: earliest Scheduled sequence */}
-                    <TableCell className="text-xs text-muted-foreground">
-                      {/* TODO: wire to /api/v1/prospects/next-touches when backend implements */}
-                      —
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {timeAgo(p.updatedAt)}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div
-                        className="flex justify-end gap-1"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              aria-label="Ultimate Profile"
-                              onClick={() => {
-                                setUltimateProfileTarget(p);
-                                ultimateProfileMut.mutate(p.id);
-                              }}
-                            >
-                              <Brain className="h-4 w-4" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Ultimate Profile</TooltipContent>
-                        </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              aria-label="Lookalike"
-                              onClick={() => {
-                                setLookalikeTarget(p);
-                                lookalikeMut.mutate(p.id);
-                              }}
-                            >
-                              <UserSearch className="h-4 w-4" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Lookalike</TooltipContent>
-                        </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              aria-label="Hook Gen"
-                              onClick={() => {
-                                setHookGenTarget(p);
-                                hookGenMut.mutate(p.id);
-                              }}
-                            >
-                              <MessageSquare className="h-4 w-4" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Hook Generator</TooltipContent>
-                        </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              aria-label="Brief"
-                              onClick={() => {
-                                setBriefTarget(p);
-                                briefMut.mutate(p.id);
-                              }}
-                            >
-                              <FileText className="h-4 w-4" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Prospect Brief</TooltipContent>
-                        </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              aria-label="Enrich"
-                              onClick={() => enrichMutation.mutate(p.id)}
-                            >
-                              {enrichMutation.isPending && enrichMutation.variables === p.id ? (
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                              ) : (
-                                <Sparkles className="h-4 w-4" />
-                              )}
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Enrich prospect</TooltipContent>
-                        </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              aria-label="Validate email"
-                              disabled={!p.email}
-                              onClick={() => p.email && validateMutation.mutate(p.email)}
-                            >
-                              <Mail className="h-4 w-4" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Validate email</TooltipContent>
-                        </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              aria-label="Delete"
-                              onClick={() => setDeleteTarget(p)}
-                            >
-                              <Trash2 className="h-4 w-4 text-red-600" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Delete prospect</TooltipContent>
-                        </Tooltip>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-        {(filtered.length > pageSize || page > 0) && (
-          <div className="flex items-center justify-between border-t p-4">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={page === 0}
-              onClick={() => setPage((p) => Math.max(0, p - 1))}
-            >
-              Previous
-            </Button>
-            <span className="text-xs text-muted-foreground">
-              Page {page + 1} of {Math.max(1, Math.ceil(filtered.length / pageSize))}
-            </span>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={!hasNext}
-              onClick={() => setPage((p) => p + 1)}
-            >
-              Next
-            </Button>
-          </div>
-        )}
-      </Card>
-
-      {/* Detail dialog */}
-      <ProspectDetailDialog
-        prospect={selectedProspect}
-        onClose={() => setSelectedProspect(null)}
-        onEnrich={(id) => enrichMutation.mutate(id)}
-      />
-
-      {/* Add dialog */}
-      <AddProspectDialog
-        open={addOpen}
-        onOpenChange={setAddOpen}
-        onSubmit={(body) => addMutation.mutate(body)}
-        isPending={addMutation.isPending}
-      />
-
-      {/* Import dialog */}
-      <ImportCsvDialog
-        open={importOpen}
-        onOpenChange={setImportOpen}
-        onSubmit={(file) => importMutation.mutate(file)}
-        isPending={importMutation.isPending}
-      />
-
-      {/* Delete confirmation dialog — AlertDialog prevents click-outside dismissal
-          so an accidental backdrop click won't lose the warning. */}
-      <AlertDialog
-        open={!!deleteTarget}
-        onOpenChange={(o) => !o && setDeleteTarget(null)}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete prospect?</AlertDialogTitle>
-            <AlertDialogDescription>
-              {deleteTarget?.name
-                ? `Prospect "${deleteTarget.name}"${deleteTarget.company ? ` at ${deleteTarget.company}` : ""} will be permanently removed. This action cannot be undone.`
-                : "This prospect will be permanently removed. This action cannot be undone."}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleteMutation.isPending}>
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={(e) => {
-                // Prevent auto-close so the dialog stays open while pending and
-                // closes only via the mutation's onSuccess → setDeleteTarget(null).
-                e.preventDefault();
-                if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
-              }}
-              disabled={deleteMutation.isPending}
-            >
-              {deleteMutation.isPending ? "Deleting…" : "Delete"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Ultimate Profile Dialog */}
-      <Dialog
-        open={!!ultimateProfileTarget}
-        onOpenChange={(o) => !o && setUltimateProfileTarget(null)}
-      >
-        {ultimateProfileTarget && (
-          <>
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <Brain className="h-5 w-5" />
-                Ultimate Profile — {ultimateProfileTarget.name}
-              </DialogTitle>
-              <DialogDescription>
-                AI-generated deep profile for {ultimateProfileTarget.company ?? "—"}
-              </DialogDescription>
-            </DialogHeader>
-            {ultimateProfileMut.isPending ? (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                <span className="ml-2 text-sm text-muted-foreground">Generating profile…</span>
-              </div>
-            ) : ultimateProfileMut.isError ? (
-              <div className="py-6 text-center text-sm text-destructive">
-                Failed to generate profile. Please try again.
-              </div>
-            ) : ultimateProfileMut.data ? (
-              <ScrollArea className="max-h-[60vh] pr-2">
-                <div className="space-y-4">
-                  <div className="grid grid-cols-2 gap-3">
-                    <DetailRow label="What they do" value={ultimateProfileMut.data.what_they_do ?? "—"} />
-                    <DetailRow label="Target market" value={ultimateProfileMut.data.target_market ?? "—"} />
-                    <DetailRow label="Company size" value={ultimateProfileMut.data.company_size ?? "—"} />
-                    <DetailRow label="Industry" value={ultimateProfileMut.data.industry ?? "—"} />
-                  </div>
-                  <div>
-                    <p className="mb-1 text-xs font-medium uppercase text-muted-foreground">Products</p>
-                    <div className="flex flex-wrap gap-1">
-                      {(ultimateProfileMut.data.products ?? []).length === 0 ? (
-                        <span className="text-sm text-muted-foreground">—</span>
-                      ) : (
-                        ultimateProfileMut.data.products!.map((p: string) => (
-                          <Badge key={p} variant="secondary" className="text-xs">{p}</Badge>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                  <div>
-                    <p className="mb-1 text-xs font-medium uppercase text-muted-foreground">Tech Stack</p>
-                    <div className="flex flex-wrap gap-1">
-                      {(ultimateProfileMut.data.tech_stack ?? []).length === 0 ? (
-                        <span className="text-sm text-muted-foreground">—</span>
-                      ) : (
-                        ultimateProfileMut.data.tech_stack!.map((t: string) => (
-                          <Badge key={t} variant="outline" className="text-xs">{t}</Badge>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                  <Separator />
-                  <div>
-                    <p className="mb-1 text-xs font-medium uppercase text-muted-foreground">Pain Points</p>
-                    <ul className="ml-4 list-disc space-y-1 text-sm">
-                      {(ultimateProfileMut.data.pain_points ?? []).length === 0 ? (
-                        <li className="text-muted-foreground">—</li>
-                      ) : (
-                        ultimateProfileMut.data.pain_points!.map((pp: string, i: number) => (
-                          <li key={i}>{pp}</li>
-                        ))
-                      )}
-                    </ul>
-                  </div>
-                  <div>
-                    <p className="mb-1 text-xs font-medium uppercase text-muted-foreground">Buying Signals</p>
-                    <ul className="ml-4 list-disc space-y-1 text-sm">
-                      {(ultimateProfileMut.data.buying_signals ?? []).length === 0 ? (
-                        <li className="text-muted-foreground">—</li>
-                      ) : (
-                        ultimateProfileMut.data.buying_signals!.map((bs: string, i: number) => (
-                          <li key={i}>{bs}</li>
-                        ))
-                      )}
-                    </ul>
-                  </div>
-                  <div>
-                    <p className="mb-1 text-xs font-medium uppercase text-muted-foreground">Competitors</p>
-                    <ul className="ml-4 list-disc space-y-1 text-sm">
-                      {(ultimateProfileMut.data.competitors ?? []).length === 0 ? (
-                        <li className="text-muted-foreground">—</li>
-                      ) : (
-                        ultimateProfileMut.data.competitors!.map((c: string, i: number) => (
-                          <li key={i}>{c}</li>
-                        ))
-                      )}
-                    </ul>
-                  </div>
-                  <Separator />
-                  <div className="space-y-2">
-                    <div>
-                      <p className="text-xs font-medium uppercase text-muted-foreground">ICP Fit Score</p>
-                      <div className="flex items-center gap-2">
-                        <Progress
-                          value={(ultimateProfileMut.data.icp_fit_score ?? 0) * 100}
-                          className="h-2 flex-1"
-                          indicatorClassName={
-                            (ultimateProfileMut.data.icp_fit_score ?? 0) >= 0.75
-                              ? "bg-emerald-600"
-                              : (ultimateProfileMut.data.icp_fit_score ?? 0) >= 0.5
-                                ? "bg-amber-500"
-                                : "bg-red-500"
-                          }
-                        />
-                        <span className="text-sm font-medium">
-                          {formatPercent(ultimateProfileMut.data.icp_fit_score ?? 0, 0)}
-                        </span>
-                      </div>
-                    </div>
-                    <DetailRow label="Recommended Angle" value={ultimateProfileMut.data.recommended_angle ?? "—"} />
-                    <div>
-                      <p className="text-xs font-medium uppercase text-muted-foreground">Confidence Score</p>
-                      <div className="flex items-center gap-2">
-                        <Progress
-                          value={(ultimateProfileMut.data.confidence_score ?? 0) * 100}
-                          className="h-2 flex-1"
-                        />
-                        <span className="text-sm font-medium">
-                          {formatPercent(ultimateProfileMut.data.confidence_score ?? 0, 0)}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </ScrollArea>
-            ) : null}
-            <DialogFooter>
-              <DialogClose onClose={() => setUltimateProfileTarget(null)} />
-            </DialogFooter>
-          </>
-        )}
-      </Dialog>
-
-      {/* Lookalike Dialog */}
-      <Dialog
-        open={!!lookalikeTarget}
-        onOpenChange={(o) => !o && setLookalikeTarget(null)}
-      >
-        {lookalikeTarget && (
-          <>
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <UserSearch className="h-5 w-5" />
-                Lookalikes — {lookalikeTarget.name}
-              </DialogTitle>
-              <DialogDescription>
-                Prospects similar to {lookalikeTarget.name} at {lookalikeTarget.company ?? "—"}
-              </DialogDescription>
-            </DialogHeader>
-            {lookalikeMut.isPending ? (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                <span className="ml-2 text-sm text-muted-foreground">Finding lookalikes…</span>
-              </div>
-            ) : lookalikeMut.isError ? (
-              <div className="py-6 text-center text-sm text-destructive">
-                Failed to find lookalikes. Please try again.
-              </div>
-            ) : lookalikeMut.data ? (
-              <ScrollArea className="max-h-[60vh] pr-2">
-                {(lookalikeMut.data.lookalikes ?? []).length === 0 ? (
-                  <div className="py-6 text-center text-sm text-muted-foreground">
-                    No lookalikes found.
-                  </div>
-                ) : (
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Name</TableHead>
-                        <TableHead>Title</TableHead>
-                        <TableHead>Company</TableHead>
-                        <TableHead className="w-28">Similarity</TableHead>
-                        <TableHead>Matched Features</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {lookalikeMut.data.lookalikes!.map((lk: LookalikeEntry, i: number) => (
-                        <TableRow key={i}>
-                          <TableCell className="font-medium">{lk.name ?? "—"}</TableCell>
-                          <TableCell className="text-sm">{lk.title ?? "—"}</TableCell>
-                          <TableCell className="text-sm">{lk.company ?? "—"}</TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1.5">
-                              <Progress
-                                value={(lk.similarity_score ?? 0) * 100}
-                                className="h-2 w-14"
-                                indicatorClassName={
-                                  (lk.similarity_score ?? 0) >= 0.75
-                                    ? "bg-emerald-600"
-                                    : "bg-amber-500"
-                                }
-                              />
-                              <span className="text-xs">
-                                {formatPercent(lk.similarity_score ?? 0, 0)}
-                              </span>
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex flex-wrap gap-1">
-                              {(lk.matched_features ?? []).map((f: string) => (
-                                <Badge key={f} variant="secondary" className="text-[10px]">
-                                  {f}
-                                </Badge>
-                              ))}
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                )}
-              </ScrollArea>
-            ) : null}
-            <DialogFooter>
-              <DialogClose onClose={() => setLookalikeTarget(null)} />
-            </DialogFooter>
-          </>
-        )}
-      </Dialog>
-
-      {/* Hook Generator Dialog */}
-      <Dialog
-        open={!!hookGenTarget}
-        onOpenChange={(o) => !o && setHookGenTarget(null)}
-      >
-        {hookGenTarget && (
-          <>
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <MessageSquare className="h-5 w-5" />
-                Hook Generator — {hookGenTarget.name}
-              </DialogTitle>
-              <DialogDescription>
-                AI-generated outreach hooks for {hookGenTarget.company ?? "—"}
-              </DialogDescription>
-            </DialogHeader>
-            {hookGenMut.isPending ? (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                <span className="ml-2 text-sm text-muted-foreground">Generating hooks…</span>
-              </div>
-            ) : hookGenMut.isError ? (
-              <div className="py-6 text-center text-sm text-destructive">
-                Failed to generate hooks. Please try again.
-              </div>
-            ) : hookGenMut.data ? (
-              <ScrollArea className="max-h-[60vh] pr-2">
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <Badge
-                      variant={hookGenMut.data.source === "llm" ? "default" : "secondary"}
-                    >
-                      {hookGenMut.data.source === "llm" ? "LLM" : "Fallback"}
-                    </Badge>
-                    <span className="text-xs text-muted-foreground">
-                      {hookGenMut.data.hooks?.length ?? 0} hooks generated
-                    </span>
-                  </div>
-                  {(hookGenMut.data.hooks ?? []).map((hook: HookEntry, i: number) => (
-                    <HookCard key={i} hook={hook} index={i + 1} />
-                  ))}
-                </div>
-              </ScrollArea>
-            ) : null}
-            <DialogFooter>
-              <DialogClose onClose={() => setHookGenTarget(null)} />
-            </DialogFooter>
-          </>
-        )}
-      </Dialog>
-
-      {/* Prospect Brief Dialog */}
-      <Dialog
-        open={!!briefTarget}
-        onOpenChange={(o) => !o && setBriefTarget(null)}
-      >
-        {briefTarget && (
-          <>
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <FileText className="h-5 w-5" />
-                Prospect Brief — {briefTarget.name}
-              </DialogTitle>
-              <DialogDescription>
-                AI-generated outreach brief for {briefTarget.company ?? "—"}
-              </DialogDescription>
-            </DialogHeader>
-            {briefMut.isPending ? (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                <span className="ml-2 text-sm text-muted-foreground">Generating brief…</span>
-              </div>
-            ) : briefMut.isError ? (
-              <div className="py-6 text-center text-sm text-destructive">
-                Failed to generate brief. Please try again.
-              </div>
-            ) : briefMut.data ? (
-              <ScrollArea className="max-h-[60vh] pr-2">
-                <div className="space-y-4">
-                  <BriefSection title="Summary" content={briefMut.data.summary} />
-                  <BriefSection title="Key Insights" items={briefMut.data.key_insights} />
-                  <BriefSection title="Recommended Approach" content={briefMut.data.recommended_approach} />
-                  <BriefSection title="Talking Points" items={briefMut.data.talking_points} />
-                  <BriefSection title="Risk Factors" items={briefMut.data.risk_factors} />
-                </div>
-              </ScrollArea>
-            ) : null}
-            <DialogFooter>
-              <DialogClose onClose={() => setBriefTarget(null)} />
-            </DialogFooter>
-          </>
-        )}
-      </Dialog>
-
-      {/* NL Search Results Dialog */}
-      <Dialog open={nlSearchOpen} onOpenChange={setNlSearchOpen}>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Languages className="h-5 w-5" />
-            Natural Language Search Results
-          </DialogTitle>
-          <DialogDescription>
-            {nlQuery ? `Results for: "${nlQuery}"` : "Search results"}
-          </DialogDescription>
-        </DialogHeader>
-        {nlSearchMut.isPending ? (
-          <div className="flex items-center justify-center py-8">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            <span className="ml-2 text-sm text-muted-foreground">Searching…</span>
-          </div>
-        ) : nlSearchMut.isError ? (
-          <div className="py-6 text-center text-sm text-destructive">
-            Search failed. Please try again.
-          </div>
-        ) : nlSearchMut.data ? (
-          <ScrollArea className="max-h-[60vh] pr-2">
-            <div className="space-y-4">
-              {/* AI Interpretation */}
-              {nlSearchMut.data.interpretation && (
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm">AI Interpretation</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="text-sm">{nlSearchMut.data.interpretation}</p>
-                  </CardContent>
-                </Card>
-              )}
-
-              {/* DB Matches */}
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm">
-                    Database Matches ({(nlSearchMut.data.db_matches ?? []).length})
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="p-0">
-                  {(nlSearchMut.data.db_matches ?? []).length === 0 ? (
-                    <p className="p-4 text-center text-sm text-muted-foreground">
-                      No database matches found.
-                    </p>
-                  ) : (
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Name</TableHead>
-                          <TableHead>Company</TableHead>
-                          <TableHead>Title</TableHead>
-                          <TableHead className="w-28">ICP Score</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {nlSearchMut.data.db_matches!.map((m: NlMatchEntry, i: number) => (
-                          <TableRow key={i}>
-                            <TableCell className="font-medium">{m.name ?? "—"}</TableCell>
-                            <TableCell className="text-sm">{m.company ?? "—"}</TableCell>
-                            <TableCell className="text-sm">{m.title ?? "—"}</TableCell>
-                            <TableCell>
-                              <span className="text-sm">
-                                {formatPercent(m.icp_score ?? 0, 0)}
-                              </span>
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  )}
-                </CardContent>
-              </Card>
-
-              {/* Web Results */}
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm">
-                    Web Results ({(nlSearchMut.data.web_results ?? []).length})
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {(nlSearchMut.data.web_results ?? []).length === 0 ? (
-                    <p className="text-center text-sm text-muted-foreground">
-                      No web results found.
-                    </p>
-                  ) : (
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      {nlSearchMut.data.web_results!.map((w: NlWebResult, i: number) => (
-                        <Card key={i} className="border-dashed">
-                          <CardContent className="p-3">
-                            <p className="text-sm font-medium">{w.title ?? "—"}</p>
-                            <p className="mt-1 text-xs text-muted-foreground line-clamp-2">
-                              {w.snippet ?? "—"}
-                            </p>
-                            {w.url && (
-                              <a
-                                href={w.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="mt-1 inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                              >
-                                <Globe className="h-3 w-3" />
-                                {truncate(w.url, 50)}
-                              </a>
-                            )}
-                          </CardContent>
-                        </Card>
-                      ))}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            </div>
-          </ScrollArea>
-        ) : null}
-        <DialogFooter>
-          <DialogClose onClose={() => setNlSearchOpen(false)} />
-        </DialogFooter>
-      </Dialog>
-    </div>
-  );
+interface IcpProfile {
+  id: string;
+  name: string;
 }
 
-/* ── Subcomponents ─────────────────────────────────────────────────── */
-
-function ProspectDetailDialog({
-  prospect,
-  onClose,
-  onEnrich,
-}: {
-  prospect: Prospect | null;
-  onClose: () => void;
-  onEnrich: (id: string) => void;
-}) {
-  const signals: string[] = useMemo(() => {
-    if (!prospect?.intentSignals) return [];
-    try {
-      const parsed = JSON.parse(prospect.intentSignals) as unknown;
-      return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === "string") : [];
-    } catch {
-      return [];
-    }
-  }, [prospect]);
-
-  return (
-    <Dialog open={!!prospect} onOpenChange={(o) => !o && onClose()}>
-      {prospect && (
-        <>
-          <DialogHeader>
-            <DialogTitle>{prospect.name}</DialogTitle>
-            <DialogDescription>
-              {prospect.title ?? "—"} at {prospect.company ?? "—"}
-            </DialogDescription>
-          </DialogHeader>
-
-          <Tabs defaultValue="overview">
-            <TabsList>
-              <TabsTrigger value="overview">Overview</TabsTrigger>
-              <TabsTrigger value="signals">Intent Signals</TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="overview" className="space-y-3">
-              <DetailRow label="Email" value={prospect.email ?? "—"} />
-              <DetailRow label="LinkedIn" value={prospect.linkedinUrl ?? "—"} />
-              <DetailRow
-                label="Seniority"
-                value={prospect.seniority ? (prospect.seniority === "C_Suite" ? "C-Suite" : prospect.seniority) : "—"}
-              />
-              <DetailRow label="Enrichment Tier" value={prospect.enrichmentTier ?? "—"} />
-              <div className="space-y-1">
-                <p className="text-xs font-medium uppercase text-muted-foreground">ICP Score</p>
-                <div className="flex items-center gap-2">
-                  <Progress value={(prospect.icpScore ?? 0) * 100} className="h-2 flex-1" />
-                  <span className="text-sm font-medium">
-                    {formatPercent(prospect.icpScore ?? 0, 0)}
-                  </span>
-                </div>
-              </div>
-              <Separator />
-              <div className="grid grid-cols-2 gap-3 text-xs text-muted-foreground">
-                <div>Created: {prospect.createdAt.slice(0, 10)}</div>
-                <div>Updated: {timeAgo(prospect.updatedAt)}</div>
-              </div>
-            </TabsContent>
-
-            <TabsContent value="signals" className="space-y-2">
-              {signals.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No intent signals detected yet. Run enrichment to discover signals.
-                </p>
-              ) : (
-                <ul className="space-y-1">
-                  {signals.map((s, i) => (
-                    <li
-                      key={i}
-                      className="rounded-md border bg-muted/30 px-3 py-2 text-sm"
-                    >
-                      {s}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </TabsContent>
-          </Tabs>
-
-          <DialogFooter>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => onEnrich(prospect.id)}
-            >
-              <Sparkles className="h-4 w-4" />
-              Enrich Now
-            </Button>
-            <DialogClose onClose={onClose} />
-          </DialogFooter>
-        </>
-      )}
-    </Dialog>
-  );
+interface Campaign {
+  id: string;
+  name: string;
+  status: string;
 }
 
-function AddProspectDialog({
-  open,
-  onOpenChange,
-  onSubmit,
-  isPending,
-}: {
-  open: boolean;
-  onOpenChange: (o: boolean) => void;
-  onSubmit: (body: Partial<Prospect>) => void;
-  isPending: boolean;
-}) {
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [company, setCompany] = useState("");
-  const [title, setTitle] = useState("");
-  const [seniority, setSeniority] = useState<SeniorityTier>("Director");
-
-  function submit() {
-    if (!name.trim()) return;
-    onSubmit({
-      name: name.trim(),
-      email: email.trim() || null,
-      company: company.trim() || null,
-      title: title.trim() || null,
-      seniority,
-    });
-    setName(""); setEmail(""); setCompany(""); setTitle("");
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogHeader>
-        <DialogTitle>Add Prospect</DialogTitle>
-        <DialogDescription>Manually add a single prospect.</DialogDescription>
-      </DialogHeader>
-      <div className="space-y-3">
-        <div className="space-y-2">
-          <Label htmlFor="add-name">Name</Label>
-          <Input id="add-name" value={name} onChange={(e) => setName(e.target.value)} />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="add-email">Email</Label>
-          <Input id="add-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-2">
-            <Label htmlFor="add-company">Company</Label>
-            <Input id="add-company" value={company} onChange={(e) => setCompany(e.target.value)} />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="add-title">Title</Label>
-            <Input id="add-title" value={title} onChange={(e) => setTitle(e.target.value)} />
-          </div>
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="add-seniority">Seniority</Label>
-          <Select
-            value={seniority}
-            onValueChange={(v) => setSeniority(v as SeniorityTier)}
-          >
-            <SelectTrigger id="add-seniority" className="w-full">
-              <SelectValue placeholder="Select seniority" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="C_Suite">C-Suite</SelectItem>
-              <SelectItem value="Director">Director</SelectItem>
-              <SelectItem value="IC">IC</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-      <DialogFooter>
-        <Button variant="outline" onClick={() => onOpenChange(false)}>
-          Cancel
-        </Button>
-        <Button onClick={submit} disabled={isPending || !name.trim()}>
-          {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-          Save
-        </Button>
-      </DialogFooter>
-    </Dialog>
-  );
+interface SourceChip {
+  source: string;
+  label: string;
+  found: number;
+  error?: string;
+  durationMs?: number;
 }
 
-function ImportCsvDialog({
-  open,
-  onOpenChange,
-  onSubmit,
-  isPending,
-}: {
-  open: boolean;
-  onOpenChange: (o: boolean) => void;
-  onSubmit: (file: File) => void;
-  isPending: boolean;
-}) {
-  const [file, setFile] = useState<File | null>(null);
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogHeader>
-        <DialogTitle>Import Prospects (CSV)</DialogTitle>
-        <DialogDescription>
-          CSV must include columns: name, email, company, title. Other columns are ignored.
-        </DialogDescription>
-      </DialogHeader>
-      <div className="space-y-3">
-        <div className="rounded-md border border-dashed p-6 text-center">
-          <Upload className="mx-auto mb-2 h-6 w-6 text-muted-foreground" />
-          <input
-            id="csv-file"
-            type="file"
-            accept=".csv,text/csv"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) setFile(f);
-            }}
-          />
-          <Label htmlFor="csv-file" className="cursor-pointer text-sm text-primary underline">
-            {file ? file.name : "Choose a CSV file"}
-          </Label>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {file ? `${(file.size / 1024).toFixed(1)} KB` : "Max 5MB"}
-          </p>
-        </div>
-      </div>
-      <DialogFooter>
-        <Button variant="outline" onClick={() => onOpenChange(false)}>
-          Cancel
-        </Button>
-        <Button
-          disabled={!file || isPending}
-          onClick={() => {
-            if (!file) return;
-            // Task 2-b finding 10: client-side file validation mirroring the
-            // ProspectImportSchema (paste/URL variant) — extension + size guard.
-            const MAX_BYTES = 5 * 1024 * 1024; // 5 MB
-            if (!/\.csv$/i.test(file.name)) {
-              toast.error("File must be a .csv");
-              return;
-            }
-            if (file.size > MAX_BYTES) {
-              toast.error(
-                `File is ${(file.size / 1024 / 1024).toFixed(1)} MB — max 5 MB`,
-              );
-              return;
-            }
-            // Also exercise the zod schema (source=paste path) so the schema
-            // is referenced + stays in sync if a paste mode is added later.
-            const parsed = ProspectImportSchema.safeParse({
-              source: "paste",
-              text: file.name,
-            });
-            if (!parsed.success) {
-              toast.error(formatZodError(parsed.error));
-              return;
-            }
-            onSubmit(file);
-          }}
-        >
-          {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-          Import
-        </Button>
-      </DialogFooter>
-    </Dialog>
-  );
+interface SourcedProspect {
+  firstName: string;
+  lastName: string;
+  email?: string;
+  title?: string;
+  company?: string;
+  domain?: string;
+  linkedinUrl?: string;
+  _source: string;
+  _sourceLabel?: string;
+  _isDuplicate?: boolean;
+  matchReason?: string;
 }
 
-function DetailRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="grid grid-cols-[120px_1fr] items-center gap-2">
-      <p className="text-xs font-medium uppercase text-muted-foreground">{label}</p>
-      <p className={cn("text-sm", value === "—" && "text-muted-foreground")}>{truncate(value, 80)}</p>
-    </div>
-  );
+interface SourceResult {
+  prospects: SourcedProspect[];
+  totalFromPlatforms: number;
+  totalAfterDedup: number;
+  newProspects: number;
+  duplicatesFound: number;
+  sources: SourceChip[];
 }
 
-/* ── AI feature result types ──────────────────────────────────────── */
+interface NlResult {
+  interpretation: string | null;
+  db_matches: Array<{ name: string; company: string; title: string; icp_score: number }> | null;
+  web_results: Array<{ title: string; snippet: string; url: string }> | null;
+}
+
+interface LookalikeEntry {
+  name: string | null;
+  title: string | null;
+  company: string | null;
+  similarity_score: number | null;
+  matched_features: string[] | null;
+}
 
 interface UltimateProfileResult {
   what_they_do: string | null;
@@ -1478,16 +239,12 @@ interface UltimateProfileResult {
   confidence_score: number | null;
 }
 
-interface LookalikeEntry {
-  name: string | null;
-  title: string | null;
-  company: string | null;
-  similarity_score: number | null;
-  matched_features: string[] | null;
-}
-
-interface LookalikeResult {
-  lookalikes: LookalikeEntry[] | null;
+interface CompetitorEntry {
+  name: string;
+  domain?: string;
+  description?: string;
+  positioning?: string;
+  overlap_score?: number;
 }
 
 interface HookEntry {
@@ -1495,105 +252,1755 @@ interface HookEntry {
   type: string | null;
 }
 
-interface HookGenResult {
-  hooks: HookEntry[] | null;
-  source: "llm" | "fallback" | null;
+/* ── Constants ──────────────────────────────────────────────────────── */
+
+const SOURCE_COLORS: Record<string, string> = {
+  web_search: "bg-violet-100 text-violet-700 border-violet-200",
+  apollo: "bg-sky-100 text-sky-700 border-sky-200",
+  clay: "bg-orange-100 text-orange-700 border-orange-200",
+  zoominfo: "bg-blue-100 text-blue-700 border-blue-200",
+  clearbit: "bg-teal-100 text-teal-700 border-teal-200",
+  hunter: "bg-amber-100 text-amber-700 border-amber-200",
+  lusha: "bg-rose-100 text-rose-700 border-rose-200",
+  kaspr: "bg-pink-100 text-pink-700 border-pink-200",
+  snovio: "bg-cyan-100 text-cyan-700 border-cyan-200",
+  linkedin: "bg-blue-600 text-white border-blue-700",
+};
+
+const SOURCE_ICONS: Record<string, string> = {
+  web_search: "🤖",
+  apollo: "🅰️",
+  clay: "🟧",
+  zoominfo: "🔵",
+  clearbit: "🟢",
+  hunter: "🟡",
+  lusha: "🔴",
+  kaspr: "🩷",
+  snovio: "🔷",
+  linkedin: "💼",
+};
+
+const URGENCY_META: Record<string, { label: string; bg: string; text: string; border: string }> = {
+  P0: { label: "P0 — Hot", bg: "bg-red-50", text: "text-red-700", border: "border-red-300" },
+  P1: { label: "P1 — Warm", bg: "bg-amber-50", text: "text-amber-700", border: "border-amber-300" },
+  P2: { label: "P2 — Cool", bg: "bg-slate-50", text: "text-slate-600", border: "border-slate-200" },
+};
+
+const INTENT_COLORS: Record<string, string> = {
+  FUNDING_URGENCY: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  HIRING_BUDGET: "bg-purple-50 text-purple-700 border-purple-200",
+  FORUM_PAIN: "bg-amber-50 text-amber-700 border-amber-200",
+  LINKEDIN_DEMAND: "bg-cyan-50 text-cyan-700 border-cyan-200",
+  REFERRAL: "bg-blue-50 text-blue-700 border-blue-200",
+  INBOUND: "bg-green-50 text-green-700 border-green-200",
+  OTHER: "bg-gray-50 text-gray-600 border-gray-200",
+};
+
+const STATUS_COLORS: Record<string, string> = {
+  new: "bg-gray-100 text-gray-700",
+  researching: "bg-blue-100 text-blue-700",
+  drafted: "bg-violet-100 text-violet-700",
+  queued: "bg-amber-100 text-amber-700",
+  contacted: "bg-teal-100 text-teal-700",
+  replied: "bg-emerald-100 text-emerald-700",
+  converted: "bg-green-100 text-green-700",
+  lost: "bg-red-100 text-red-700",
+};
+
+/* ── Page ──────────────────────────────────────────────────────────── */
+
+export function ProspectsPage() {
+  const qc = useQueryClient();
+
+  /* ── Data queries ── */
+  const prospectsQuery = useQuery<{ items: Prospect[]; total: number }>({
+    queryKey: ["prospects"],
+    queryFn: () =>
+      http.get<any>("/api/v1/prospects").then((r) =>
+        Array.isArray(r) ? { items: r, total: r.length } : { items: r?.items ?? [], total: r?.total ?? 0 }
+      ),
+  });
+  const icpQuery = useQuery<IcpProfile[]>({
+    queryKey: ["icp-profiles"],
+    queryFn: () => http.get<any>("/api/v1/icp-profiles").then((r) => (Array.isArray(r) ? r : r?.items ?? [])),
+  });
+  const campaignQuery = useQuery<Campaign[]>({
+    queryKey: ["campaigns"],
+    queryFn: () => http.get<any>("/api/v1/campaigns").then((r) => (Array.isArray(r) ? r : r?.items ?? [])),
+  });
+
+  const allProspects: Prospect[] = prospectsQuery.data?.items ?? [];
+  const icps: IcpProfile[] = icpQuery.data ?? [];
+  const campaigns: Campaign[] = campaignQuery.data ?? [];
+
+  /* ── Filter/search state (PR-18) ── */
+  const [search, setSearch] = useState("");
+  const [seniorityFilter, setSeniorityFilter] = useState("all");
+  const [scoreMin, setScoreMin] = useState(0);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return allProspects.filter((p) => {
+      if (q && !`${p.firstName} ${p.lastName} ${p.email ?? ""} ${p.company ?? ""} ${p.title ?? ""}`.toLowerCase().includes(q)) return false;
+      if (seniorityFilter !== "all" && p.seniority !== seniorityFilter) return false;
+      if (scoreMin > 0 && (p.icpFitScore ?? 0) < scoreMin) return false;
+      return true;
+    });
+  }, [allProspects, search, seniorityFilter, scoreMin]);
+
+  /* ── Bulk selection (PR-4) ── */
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [addToCampaignOpen, setAddToCampaignOpen] = useState(false);
+  const [addToCampaignId, setAddToCampaignId] = useState("");
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const toggleSelectAll = () => {
+    if (selectedIds.size === filtered.length) setSelectedIds(new Set());
+    else setSelectedIds(new Set(filtered.map((p) => p.id)));
+  };
+
+  /* ── Add Prospect (PR-9) ── */
+  const [addOpen, setAddOpen] = useState(false);
+  const [addForm, setAddForm] = useState({
+    firstName: "", lastName: "", email: "", title: "", company: "",
+    domain: "", linkedinUrl: "", phone: "", seniority: "IC",
+    icpProfileId: "", notes: "",
+  });
+  const resetAddForm = () =>
+    setAddForm({ firstName: "", lastName: "", email: "", title: "", company: "", domain: "", linkedinUrl: "", phone: "", seniority: "IC", icpProfileId: "", notes: "" });
+
+  const addMutation = useMutation({
+    mutationFn: (body: Record<string, unknown>) => http.post("/api/v1/prospects", body),
+    onSuccess: () => {
+      toast.success("Prospect added");
+      qc.invalidateQueries({ queryKey: ["prospects"] });
+      setAddOpen(false);
+      resetAddForm();
+    },
+    onError: () => toast.error("Failed to add prospect"),
+  });
+
+  /* ── Delete ── */
+  const [deleteTarget, setDeleteTarget] = useState<Prospect | null>(null);
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => http.delete(`/api/v1/prospects/${id}`),
+    onSuccess: () => {
+      toast.success("Prospect deleted");
+      qc.invalidateQueries({ queryKey: ["prospects"] });
+      setDeleteTarget(null);
+    },
+    onError: () => toast.error("Delete failed"),
+  });
+
+  /* ── CSV Import (PR-5) ── */
+  const [importOpen, setImportOpen] = useState(false);
+  const [csvImporting, setCsvImporting] = useState(false);
+  const [csvResult, setCsvResult] = useState<{ imported: number; skipped: number; errors: string[]; totalRows: number } | null>(null);
+  const csvInputRef = useRef<HTMLInputElement>(null);
+
+  const handleCsvUpload = async (file: File) => {
+    setCsvImporting(true);
+    setCsvResult(null);
+    const fd = new FormData();
+    fd.append("file", file);
+    if (icps.length > 0) fd.append("icp_profile_id", icps[0].id);
+    try {
+      const data = await http.post<any>("/api/v1/prospects/import", fd);
+      setCsvResult(data);
+      toast.success(`Imported ${data.imported} prospects`);
+      qc.invalidateQueries({ queryKey: ["prospects"] });
+    } catch {
+      toast.error("CSV import failed");
+    }
+    setCsvImporting(false);
+  };
+
+  /* ── Export CSV (PR-7) ── */
+  const handleExport = () => {
+    window.open("/api/v1/prospects/export", "_blank");
+  };
+
+  /* ── Validate All Emails (PR-6) ── */
+  const [validatingAll, setValidatingAll] = useState(false);
+  const handleValidateAll = async () => {
+    const withEmail = allProspects.filter((p) => p.email);
+    if (withEmail.length === 0) { toast.error("No prospects with emails"); return; }
+    setValidatingAll(true);
+    let validated = 0, invalid = 0;
+    for (const p of withEmail) {
+      try {
+        const data = await http.post<any>("/api/v1/prospects/email-validate", { email: p.email });
+        if (data.valid) validated++; else invalid++;
+      } catch { /* skip */ }
+    }
+    toast.success(`Validated: ${validated} valid, ${invalid} invalid`);
+    qc.invalidateQueries({ queryKey: ["prospects"] });
+    setValidatingAll(false);
+  };
+
+  /* ── Per-row: Validate Email (PR-16) ── */
+  const [validatingId, setValidatingId] = useState<string | null>(null);
+  const handleValidateEmail = async (p: Prospect) => {
+    if (!p.email) return;
+    setValidatingId(p.id);
+    try {
+      const data = await http.post<any>("/api/v1/prospects/email-validate", { email: p.email });
+      if (data.valid) toast.success(`Valid email${data.isCatchAll ? " (catch-all)" : ""}`);
+      else toast.error(`Invalid email: ${data.detail ?? "unknown reason"}`);
+      qc.invalidateQueries({ queryKey: ["prospects"] });
+    } catch { toast.error("Validation failed"); }
+    setValidatingId(null);
+  };
+
+  /* ── Per-row: Enrich (PR-3) ── */
+  const [enrichingId, setEnrichingId] = useState<string | null>(null);
+  const handleEnrich = async (p: Prospect) => {
+    setEnrichingId(p.id);
+    try {
+      const data = await http.post<any>("/api/v1/prospects/enrich", { prospectId: p.id });
+      if (data.enriched) toast.success("Enriched successfully");
+      else toast.info(data.detail ?? "No new data found — connect platforms in Integrations");
+      qc.invalidateQueries({ queryKey: ["prospects"] });
+    } catch { toast.error("Enrichment failed"); }
+    setEnrichingId(null);
+  };
+
+  /* ── Per-row: Signal Research (PR-3, PR-15) ── */
+  const [researchingId, setResearchingId] = useState<string | null>(null);
+  // const handleResearchSignals = async (p: Prospect) => {
+  //   setResearchingId(p.id);
+  //   try {
+  //     const data = await http.post<any>("/api/v1/prospects/signals", { prospectId: p.id });
+  //     if (data.success) toast.success(`Found ${data.signals?.length ?? 0} signals`);
+  //     else toast.error(data.error ?? "Signal research failed");
+  //     qc.invalidateQueries({ queryKey: ["prospects"] });
+  //   } catch { toast.error("Signal research failed"); }
+  //   setResearchingId(null);
+  // };
+
+  const handleResearchSignals = (p: Prospect) => {
+  setResearchingId(p.id);
+
+  signalsMut.mutate(p.id, {
+    onSettled: () => setResearchingId(null),
+  });
+};
+
+const signalsMut = useMutation({
+  mutationFn: (id: string) =>
+    http.post("/api/v1/signals/scan", {
+      prospectIds: [id],
+    }),
+
+  onSuccess: (data:any) => {
+    // signals/scan returns {scanned, detected, signals:[]} — no success field
+    if (Array.isArray(data.signals)) {
+      if (data.signals.length > 0)
+        toast.success(`Found ${data.signals.length} signals`);
+      else
+        toast.info("No new signals detected for this prospect.");
+    } else {
+      toast.error(data.error ?? "Signal research failed");
+    }
+    qc.invalidateQueries({ queryKey: ["prospects"] });
+  },
+
+  onError: () => toast.error("Signal research failed"),
+});
+
+  /* ── Per-row: Domain Enrich (PR-3, PR-10) ── */
+  const [domainEnrichingId, setDomainEnrichingId] = useState<string | null>(null);
+  const [domainEnrichResults, setDomainEnrichResults] = useState<Record<string, any>>({});
+  const handleDomainEnrich = async (p: Prospect) => {
+    if (!p.domain && !p.company) { toast.error("Need domain or company to enrich"); return; }
+    setDomainEnrichingId(p.id);
+    try {
+      // domain-enrich returns the flat DomainEnrichment record directly:
+      // {id, domain, companyName, industry, employeeCount, techStack, ...}
+      // It does NOT wrap in {success, enrichment}.
+      const data = await http.post<any>("/api/v1/domain-enrich", {
+        domain: p.domain,
+      });
+      if (data && (data.domain || data.id)) {
+        // Map flat response to the shape the inline results card expects
+        const enrichment = {
+          industry: data.industry ?? null,
+          company_size: data.employeeCount ? String(data.employeeCount) : null,
+          icp_fit_score: null,
+          tech_stack: Array.isArray(data.techStack) ? data.techStack : [],
+          pain_points: [],
+          buying_signals: [],
+          recommended_angle: data.description ?? null,
+        };
+        setDomainEnrichResults((prev) => ({ ...prev, [p.id]: enrichment }));
+        toast.success("Domain enriched");
+        qc.invalidateQueries({ queryKey: ["prospects"] });
+      } else toast.error("Domain enrichment failed");
+    } catch { toast.error("Domain enrichment failed"); }
+    setDomainEnrichingId(null);
+  };
+
+  /* ── Per-row: Competitor Radar (PR-3, PR-12) ── */
+  const [competitorLoadingId, setCompetitorLoadingId] = useState<string | null>(null);
+  const [competitorResult, setCompetitorResult] = useState<{ prospect: Prospect; competitors: CompetitorEntry[] } | null>(null);
+  const handleCompetitorRadar = async (p: Prospect) => {
+    if (!p.company && !p.domain) { toast.error("Need company or domain"); return; }
+    setCompetitorLoadingId(p.id);
+    try {
+      const data = await http.post<any>("/api/v1/prospects/competitor-radar", {
+        prospect_id: p.id,
+      });
+      if (data.success) {
+        setCompetitorResult({ prospect: p, competitors: data.competitors ?? [] });
+        toast.success(`Found ${data.competitors?.length ?? 0} competitors`);
+      } else toast.error(data.error ?? "Competitor radar failed");
+    } catch { toast.error("Competitor radar failed"); }
+    setCompetitorLoadingId(null);
+  };
+
+  /* ── Per-row: Ultimate Profile (PR-3, PR-13) ── */
+  const [profileLoadingId, setProfileLoadingId] = useState<string | null>(null);
+  const [profileResult, setProfileResult] = useState<{ prospect: Prospect; profile: UltimateProfileResult; sourcesAnalyzed: number } | null>(null);
+  const handleUltimateProfile = async (p: Prospect) => {
+    if (!p.company && !p.domain) { toast.error("Need company or domain"); return; }
+    setProfileLoadingId(p.id);
+    try {
+      // Backend UltimateProfileRequest requires prospect_id (snake_case)
+      const data = await http.post<any>("/api/v1/prospects/ultimate-profile", { prospect_id: p.id });
+      if (data.success) {
+        setProfileResult({ prospect: p, profile: data.profile, sourcesAnalyzed: data.sources_analyzed ?? 0 });
+        toast.success(`Profile generated for ${p.company}`);
+      } else toast.error(data.error ?? "Profile generation failed");
+    } catch { toast.error("Profile generation failed"); }
+    setProfileLoadingId(null);
+  };
+
+  /* ── Per-row: Hook Generator (PR-3, PR-14) ── */
+  const [hookLoadingId, setHookLoadingId] = useState<string | null>(null);
+  const [hookResult, setHookResult] = useState<{ prospect: Prospect; hooks: HookEntry[] } | null>(null);
+  const handleHookGen = async (p: Prospect) => {
+    setHookLoadingId(p.id);
+    try {
+      // Backend HookGeneratorRequest requires prospect_id (snake_case)
+      const data = await http.post<any>("/api/v1/prospects/hook-generator", { prospect_id: p.id });
+      if (data.success) {
+        setHookResult({ prospect: p, hooks: data.hooks ?? [] });
+        toast.success(`Generated ${data.hooks?.length ?? 0} hooks`);
+      } else toast.error(data.error ?? "Hook generation failed");
+    } catch { toast.error("Hook generation failed"); }
+    setHookLoadingId(null);
+  };
+
+  /* ── Per-row: Log Call (PR-3, PR-11) ── */
+  const [callLogProspect, setCallLogProspect] = useState<Prospect | null>(null);
+  const [callLogForm, setCallLogForm] = useState({ phone: "", outcome: "connected", durationSec: "", notes: "" });
+  const [callLogSaving, setCallLogSaving] = useState(false);
+  const openCallLog = (p: Prospect) => {
+    setCallLogProspect(p);
+    setCallLogForm({ phone: p.phone ?? "", outcome: "connected", durationSec: "", notes: "" });
+  };
+  const handleLogCall = async () => {
+    if (!callLogProspect || !callLogForm.phone.trim()) { toast.error("Phone required"); return; }
+    setCallLogSaving(true);
+    try {
+      await http.post("/api/v1/call-logs", {
+        prospectId: callLogProspect.id,
+        phone: callLogForm.phone,
+        outcome: callLogForm.outcome,
+        durationSec: callLogForm.durationSec ? Number(callLogForm.durationSec) : null,
+        notes: callLogForm.notes || null,
+      });
+      toast.success("Call logged");
+      setCallLogProspect(null);
+    } catch { toast.error("Failed to log call"); }
+    setCallLogSaving(false);
+  };
+
+  /* ── AI Prospect Sourcing (PR-1) ── */
+  const [sourcingOpen, setSourcingOpen] = useState(false);
+  const [sourceIcpId, setSourceIcpId] = useState("");
+  const [sourcing, setSourcing] = useState(false);
+  const [sourceResult, setSourceResult] = useState<SourceResult | null>(null);
+  const [importingSourced, setImportingSourced] = useState(false);
+
+  const handleSourceProspects = async () => {
+    if (!sourceIcpId) { toast.error("Select an ICP profile first"); return; }
+    setSourcing(true);
+    setSourceResult(null);
+    try {
+      // const data = await http.post<any>("/api/v1/prospects/source", {
+      //   icpProfileId: sourceIcpId,
+      //   maxProspects: 20,
+      // });
+      const icp = icps.find((i) => i.id === sourceIcpId);
+    const data = await http.post<any>("/api/v1/prospect-source/nl-search", {
+      query: `Find ${icp?.name ?? "B2B"} prospects matching our ICP`,
+      icpProfileId: sourceIcpId,
+      limit: 20,
+    });
+      if (data.success) {
+        setSourceResult(data);
+        toast.success(`Found ${data.totalAfterDedup} prospects from ${data.sources?.filter((s: SourceChip) => s.found > 0).length ?? 0} sources`);
+      } else toast.error(data.error ?? "Sourcing failed");
+    } catch { toast.error("Prospect sourcing failed"); }
+    setSourcing(false);
+  };
+
+  const handleImportSourced = async () => {
+    if (!sourceResult) return;
+    const toImport = sourceResult.prospects.filter((p) => !p._isDuplicate && p.firstName);
+    if (toImport.length === 0) { toast.error("No new prospects to import"); return; }
+    setImportingSourced(true);
+    let imported = 0;
+    for (const p of toImport) {
+      try {
+        await http.post("/api/v1/prospects", {
+          firstName: p.firstName,
+          lastName: p.lastName || "Unknown",
+          email: p.email || null,
+          title: p.title || null,
+          company: p.company || null,
+          domain: p.domain || null,
+          linkedinUrl: p.linkedinUrl || null,
+          seniority: "IC",
+          icpProfileId: sourceIcpId,
+          notes: p.matchReason ? `[${p._sourceLabel ?? p._source}] ${p.matchReason}` : `[${p._sourceLabel ?? "Sourced"}]`,
+        });
+        imported++;
+      } catch { /* skip duplicates */ }
+    }
+    toast.success(`Imported ${imported} of ${toImport.length} prospects`);
+    setImportingSourced(false);
+    setSourceResult(null);
+    qc.invalidateQueries({ queryKey: ["prospects"] });
+  };
+
+  /* ── Intelligence Tools (PR-2) ── */
+  const [intelOpen, setIntelOpen] = useState(false);
+  const [nlQuery, setNlQuery] = useState("");
+  const [nlSearching, setNlSearching] = useState(false);
+  const [nlResult, setNlResult] = useState<NlResult | null>(null);
+  const [lookalikeLoading, setLookalikeLoading] = useState(false);
+  const [lookalikeResult, setLookalikeResult] = useState<{ lookalikes: LookalikeEntry[] } | null>(null);
+
+  const handleNlSearch = async () => {
+    if (!nlQuery.trim()) { toast.error("Enter a search query"); return; }
+    setNlSearching(true);
+    setNlResult(null);
+    try {
+      const data = await http.post<any>("/api/v1/prospects/search-nl", { query: nlQuery });
+      if (data.success) {
+        setNlResult(data);
+        toast.success(`${data.db_matches?.length ?? 0} DB matches, ${data.web_results?.length ?? 0} web results`);
+      } else toast.error(data.error ?? "NL search failed");
+    } catch { toast.error("Natural-language search failed"); }
+    setNlSearching(false);
+  };
+
+  const handleLookalike = async () => {
+    setLookalikeLoading(true);
+    setLookalikeResult(null);
+    try {
+      // const data = await http.post<any>("/api/v1/prospects/lookalike", {});
+      const seed = allProspects[0];
+    const data = await http.post<any>("/api/v1/prospects/lookalike", {
+      seed_prospect_id: seed?.id ?? null,
+    });
+      if (data.success) {
+        setLookalikeResult(data);
+        toast.success(`Found ${data.lookalikes?.length ?? 0} lookalikes`);
+      } else toast.error(data.error ?? "Lookalike search failed");
+    } catch { toast.error("Lookalike search failed"); }
+    setLookalikeLoading(false);
+  };
+
+  /* ── Bulk: Add to Campaign (PR-4) ── */
+  const handleBulkAddToCampaign = async () => {
+    if (!addToCampaignId || selectedIds.size === 0) return;
+    try {
+      const data = await http.post<any>(`/api/v1/campaigns/${addToCampaignId}/prospects`, {
+        prospectIds: Array.from(selectedIds),
+        action: "add",
+      });
+      toast.success(`${data.added ?? selectedIds.size} prospects added to campaign`);
+      setAddToCampaignOpen(false);
+      setSelectedIds(new Set());
+      setAddToCampaignId("");
+    } catch { toast.error("Failed to add to campaign"); }
+  };
+
+  /* ── Bulk: Validate Emails (PR-4) ── */
+  const handleBulkValidate = async () => {
+    const withEmail = Array.from(selectedIds)
+      .map((id) => allProspects.find((p) => p.id === id))
+      .filter((p): p is Prospect => !!p && !!p.email);
+    if (withEmail.length === 0) { toast.error("Selected prospects have no emails"); return; }
+    setValidatingAll(true);
+    let valid = 0, invalid = 0;
+    for (const p of withEmail) {
+      try {
+        const data = await http.post<any>("/api/v1/prospects/email-validate", { email: p.email });
+        if (data.valid) valid++; else invalid++;
+      } catch { /* skip */ }
+    }
+    toast.success(`Validated: ${valid} valid, ${invalid} invalid`);
+    qc.invalidateQueries({ queryKey: ["prospects"] });
+    setValidatingAll(false);
+  };
+
+  /* ── Helpers ── */
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text).then(() => toast.success("Copied"));
+  };
+
+  const getSignalCount = (p: Prospect): number => {
+    try {
+      if (Array.isArray(p.signals)) return p.signals.length;
+      if (typeof p.signals === "string") return JSON.parse(p.signals).length;
+    } catch { /* ignore */ }
+    return 0;
+  };
+
+  /* ── Loading state ── */
+  const isLoading = prospectsQuery.isLoading;
+
+  /* ═══════════════════════════════════════════ RENDER ═══════════════════════ */
+
+  return (
+    <div className="space-y-5">
+      <PageHeader title="Prospects" description="Manage your target contacts, enrich data, and run AI intelligence tools." />
+
+      {/* ══════════════ PR-1: AI PROSPECT SOURCING PANEL ══════════════ */}
+      <Card className="border-violet-200 bg-gradient-to-r from-violet-50/80 to-purple-50/50">
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="h-9 w-9 rounded-lg bg-violet-100 flex items-center justify-center shrink-0">
+                <Radar className="h-5 w-5 text-violet-700" />
+              </div>
+              <div>
+                <CardTitle className="text-base">Multi-Source Prospect Discovery</CardTitle>
+                <CardDescription className="text-xs">
+                  Queries AI Web Search, LinkedIn, Apollo, Hunter, Lusha, Kaspr + all connected platforms in parallel
+                </CardDescription>
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-violet-300 text-violet-700 hover:bg-violet-50 shrink-0"
+              onClick={() => { setSourcingOpen(!sourcingOpen); if (sourcingOpen) setSourceResult(null); }}
+            >
+              {sourcingOpen ? <ChevronUp className="h-4 w-4 mr-1" /> : <ChevronDown className="h-4 w-4 mr-1" />}
+              {sourcingOpen ? "Hide" : "Auto-Discover Prospects"}
+            </Button>
+          </div>
+        </CardHeader>
+
+        {sourcingOpen && (
+          <CardContent className="pt-0 space-y-4">
+            {icps.length === 0 && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                No ICP profiles yet. Create one in <b>ICP Profiles</b> first — the sourcing engine uses it to target the right personas.
+              </p>
+            )}
+            <div className="flex flex-col sm:flex-row gap-3">
+              <div className="flex-1 space-y-1">
+                <Label className="text-xs">ICP Profile *</Label>
+                <Select value={sourceIcpId} onValueChange={setSourceIcpId}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select ICP to source for…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {icps.map((icp) => (
+                      <SelectItem key={icp.id} value={icp.id}>{icp.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-end">
+                <Button
+                  onClick={handleSourceProspects}
+                  disabled={sourcing || !sourceIcpId}
+                  className="bg-violet-600 hover:bg-violet-700"
+                >
+                  {sourcing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Radar className="h-4 w-4 mr-2" />}
+                  {sourcing ? "Discovering…" : "Discover Prospects"}
+                </Button>
+              </div>
+            </div>
+
+            {/* Source status chips */}
+            {sourcing && !sourceResult && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" /> Querying all sources in parallel…
+              </div>
+            )}
+            {sourceResult && (
+              <div className="flex flex-wrap gap-1.5">
+                {sourceResult.sources.map((s) => (
+                  <span
+                    key={s.source}
+                    className={cn(
+                      "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] border",
+                      s.found > 0 ? (SOURCE_COLORS[s.source] ?? "bg-gray-100 text-gray-700") : "bg-gray-50 text-gray-400 border-gray-200"
+                    )}
+                  >
+                    <span>{SOURCE_ICONS[s.source] ?? "🔍"}</span>
+                    <span className="font-medium">{s.label}</span>
+                    {s.error ? (
+                      <span className="text-red-500" title={s.error}>✗</span>
+                    ) : (
+                      <span className="font-bold">{s.found}</span>
+                    )}
+                    {s.durationMs != null && (
+                      <span className="opacity-60">{(s.durationMs / 1000).toFixed(1)}s</span>
+                    )}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Sourcing results */}
+            {sourceResult && (
+              <div className="space-y-3">
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                  <span className="text-muted-foreground">Sources: <b>{sourceResult.sources.length}</b></span>
+                  <span className="text-muted-foreground">Total found: <b>{sourceResult.totalFromPlatforms}</b></span>
+                  <span className="text-muted-foreground">After dedup: <b>{sourceResult.totalAfterDedup}</b></span>
+                  <span className="text-emerald-600 font-medium">New: <b>{sourceResult.newProspects}</b></span>
+                  {sourceResult.duplicatesFound > 0 && (
+                    <span className="text-amber-600">Duplicates: <b>{sourceResult.duplicatesFound}</b></span>
+                  )}
+                </div>
+
+                {sourceResult.prospects.length > 0 ? (
+                  <ScrollArea className="max-h-64">
+                    <div className="rounded-lg border overflow-hidden">
+                      <table className="w-full text-xs">
+                        <thead className="bg-muted/50 sticky top-0">
+                          <tr>
+                            <th className="text-left p-2 font-medium">Name</th>
+                            <th className="text-left p-2 font-medium hidden sm:table-cell">Title</th>
+                            <th className="text-left p-2 font-medium hidden md:table-cell">Company</th>
+                            <th className="text-left p-2 font-medium">Source</th>
+                            <th className="text-left p-2 font-medium">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {sourceResult.prospects.map((p, i) => (
+                            <tr key={i} className={cn("border-t", p._isDuplicate && "opacity-50 bg-muted/20")}>
+                              <td className="p-2">
+                                <div className="font-medium">{p.firstName} {p.lastName}</div>
+                                <div className="text-muted-foreground">{p.email ?? p.domain}</div>
+                              </td>
+                              <td className="p-2 hidden sm:table-cell">{p.title ?? "—"}</td>
+                              <td className="p-2 hidden md:table-cell">{p.company ?? "—"}</td>
+                              <td className="p-2">
+                                <Badge variant="outline" className={cn("text-[10px]", SOURCE_COLORS[p._source] ?? "")}>
+                                  {SOURCE_ICONS[p._source] ?? "🔍"} {p._sourceLabel ?? p._source}
+                                </Badge>
+                              </td>
+                              <td className="p-2">
+                                {p._isDuplicate ? (
+                                  <Badge variant="outline" className="text-[10px] bg-gray-100 text-gray-500">Duplicate</Badge>
+                                ) : (
+                                  <Badge variant="outline" className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200">New</Badge>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </ScrollArea>
+                ) : (
+                  <div className="text-center py-6 text-sm text-muted-foreground">
+                    <Search className="h-8 w-8 mx-auto mb-2 opacity-40" />
+                    No matches found. Try a different ICP or connect more platforms in Integrations.
+                  </div>
+                )}
+
+                {sourceResult.prospects.some((p) => !p._isDuplicate && p.firstName) && (
+                  <div className="flex justify-end">
+                    <Button onClick={handleImportSourced} disabled={importingSourced}>
+                      {importingSourced ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Plus className="h-4 w-4 mr-2" />}
+                      Import {sourceResult.prospects.filter((p) => !p._isDuplicate && p.firstName).length} Prospects
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+          </CardContent>
+        )}
+      </Card>
+
+      {/* ══════════════ PR-2: INTELLIGENCE TOOLS PANEL ══════════════ */}
+      <Card className="border-amber-200 bg-gradient-to-r from-amber-50/80 to-orange-50/50">
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="h-9 w-9 rounded-lg bg-amber-100 flex items-center justify-center shrink-0">
+                <Sparkles className="h-5 w-5 text-amber-700" />
+              </div>
+              <div>
+                <CardTitle className="text-base">Intelligence Tools</CardTitle>
+                <CardDescription className="text-xs">Natural-language prospect search + lookalike discovery</CardDescription>
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-amber-300 text-amber-700 hover:bg-amber-50 shrink-0"
+              onClick={() => setIntelOpen(!intelOpen)}
+            >
+              {intelOpen ? <ChevronUp className="h-4 w-4 mr-1" /> : <ChevronDown className="h-4 w-4 mr-1" />}
+              {intelOpen ? "Hide" : "Open Tools"}
+            </Button>
+          </div>
+        </CardHeader>
+
+        {intelOpen && (
+          <CardContent className="pt-0 space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* NL Search */}
+              <div className="space-y-2">
+                <Label className="text-xs font-semibold">Natural-Language Prospect Search</Label>
+                <p className="text-[11px] text-muted-foreground">
+                  Ask in plain English — AI parses into filters and matches against DB + web.
+                </p>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="e.g. Series B SaaS CTOs who raised in last 60 days"
+                    value={nlQuery}
+                    onChange={(e) => setNlQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleNlSearch(); }}
+                  />
+                  <Button onClick={handleNlSearch} disabled={nlSearching} size="sm">
+                    {nlSearching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                  </Button>
+                </div>
+                {nlResult && (
+                  <div className="mt-2 rounded-lg border bg-white p-3 space-y-3 text-xs">
+                    {nlResult.interpretation && (
+                      <div className="text-muted-foreground italic">{nlResult.interpretation}</div>
+                    )}
+                    {(nlResult.db_matches?.length ?? 0) > 0 && (
+                      <div>
+                        <p className="font-medium mb-1">DB Matches ({nlResult.db_matches!.length})</p>
+                        <div className="space-y-1">
+                          {nlResult.db_matches!.map((m, i) => (
+                            <div key={i} className="flex items-center justify-between border rounded p-1.5">
+                              <div>
+                                <span className="font-medium">{m.name}</span>
+                                {m.title && <span className="text-muted-foreground"> — {m.title}</span>}
+                                {m.company && <span className="text-muted-foreground"> @ {m.company}</span>}
+                              </div>
+                              {m.icp_score != null && (
+                                <Badge variant="outline" className="text-[10px] bg-emerald-50 text-emerald-700">{m.icp_score}</Badge>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {(nlResult.web_results?.length ?? 0) > 0 && (
+                      <div>
+                        <p className="font-medium mb-1">Web Results ({nlResult.web_results!.length})</p>
+                        <div className="space-y-1">
+                          {nlResult.web_results!.slice(0, 3).map((r, i) => (
+                            <div key={i} className="border rounded p-1.5">
+                              <a href={r.url} target="_blank" rel="noreferrer" className="font-medium text-blue-600 hover:underline line-clamp-1">{r.title}</a>
+                              <p className="text-muted-foreground line-clamp-1">{r.snippet}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Lookalike */}
+              <div className="space-y-2">
+                <Label className="text-xs font-semibold">Find Lookalike Companies</Label>
+                <p className="text-[11px] text-muted-foreground">
+                  Seeds from your best closed-won deal and ranks similar prospects by firmographic overlap.
+                </p>
+                <Button
+                  onClick={handleLookalike}
+                  disabled={lookalikeLoading}
+                  variant="outline"
+                  size="sm"
+                  className="border-amber-300 text-amber-700 hover:bg-amber-50"
+                >
+                  {lookalikeLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <UserSearch className="h-4 w-4 mr-2" />}
+                  Find Lookalikes
+                </Button>
+                {lookalikeResult && (lookalikeResult.lookalikes?.length ?? 0) > 0 && (
+                  <ScrollArea className="max-h-52 mt-2">
+                    <div className="space-y-1">
+                      {lookalikeResult.lookalikes!.map((l, i) => (
+                        <div key={i} className="border rounded-lg p-2 flex items-center gap-2 bg-white text-xs">
+                          <div className="flex-1">
+                            <div className="font-medium">{l.name ?? "—"}</div>
+                            <div className="text-muted-foreground">{l.title} {l.company && `@ ${l.company}`}</div>
+                            {(l.matched_features?.length ?? 0) > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-1">
+                                {l.matched_features!.map((f, j) => <Badge key={j} variant="outline" className="text-[10px]">{f}</Badge>)}
+                              </div>
+                            )}
+                          </div>
+                          {l.similarity_score != null && (
+                            <div className="text-right shrink-0">
+                              <div className="text-base font-bold text-amber-600">{Math.round(l.similarity_score * 100)}%</div>
+                              <div className="text-[10px] text-muted-foreground">similarity</div>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </ScrollArea>
+                )}
+              </div>
+            </div>
+          </CardContent>
+        )}
+      </Card>
+
+      {/* ══════════════ TOOLBAR ══════════════ */}
+      <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+        {/* Search (PR-18) */}
+        <div className="relative flex-1">
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+          <Input
+            className="pl-8"
+            placeholder="Search name, email, company…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+
+        {/* Seniority filter (PR-18) */}
+        <Select value={seniorityFilter} onValueChange={setSeniorityFilter}>
+          <SelectTrigger className="w-36">
+            <Filter className="h-4 w-4 mr-1 text-muted-foreground" />
+            <SelectValue placeholder="Seniority" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Seniority</SelectItem>
+            <SelectItem value="C_Suite">C-Suite</SelectItem>
+            <SelectItem value="Director">Director</SelectItem>
+            <SelectItem value="IC">IC</SelectItem>
+          </SelectContent>
+        </Select>
+
+        {/* Score filter (PR-18) */}
+        <Select
+          value={String(scoreMin)}
+          onValueChange={(v) => setScoreMin(Number(v))}
+        >
+          <SelectTrigger className="w-36">
+            <Star className="h-4 w-4 mr-1 text-muted-foreground" />
+            <SelectValue placeholder="Min Score" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="0">All Scores</SelectItem>
+            <SelectItem value="40">≥ 40</SelectItem>
+            <SelectItem value="60">≥ 60 (P1+)</SelectItem>
+            <SelectItem value="80">≥ 80 (P0)</SelectItem>
+          </SelectContent>
+        </Select>
+
+        <Separator orientation="vertical" className="h-8 hidden sm:block" />
+
+        {/* PR-6: Validate All */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleValidateAll}
+              disabled={validatingAll || allProspects.length === 0}
+            >
+              {validatingAll ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <MailCheck className="h-4 w-4 mr-1" />}
+              Validate All
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Validate MX records for all prospect emails</TooltipContent>
+        </Tooltip>
+
+        {/* PR-7: Export CSV */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="outline" size="sm" onClick={handleExport} disabled={allProspects.length === 0}>
+              <FileDown className="h-4 w-4 mr-1" /> Export CSV
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Download all prospects as CSV</TooltipContent>
+        </Tooltip>
+
+        {/* PR-5: Import CSV */}
+        <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
+          <Upload className="h-4 w-4 mr-1" /> Import CSV
+        </Button>
+
+        {/* Add Prospect */}
+        <Button size="sm" onClick={() => setAddOpen(true)}>
+          <Plus className="h-4 w-4 mr-1" /> Add Prospect
+        </Button>
+      </div>
+
+      {/* ══════════════ PROSPECT TABLE ══════════════ */}
+      {isLoading ? (
+        <div className="space-y-2">
+          {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}
+        </div>
+      ) : filtered.length === 0 ? (
+        <EmptyState
+          title="No Prospects"
+          description={allProspects.length === 0
+            ? "Use Auto-Discover above to source prospects, or add them manually."
+            : "No prospects match your current filters."}
+        />
+      ) : (
+        <Card>
+          <CardContent className="p-0 overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-muted/40">
+                  {/* PR-4: Bulk select */}
+                  <TableHead className="w-10">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.size === filtered.length && filtered.length > 0}
+                      onChange={toggleSelectAll}
+                      className="rounded"
+                      aria-label="Select all"
+                    />
+                  </TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead className="hidden sm:table-cell">Company</TableHead>
+                  <TableHead className="hidden md:table-cell">Title</TableHead>
+                  <TableHead>Seniority</TableHead>
+                  {/* PR-17: Intent */}
+                  <TableHead className="hidden xl:table-cell">Intent</TableHead>
+                  {/* PR-16: Email + validation */}
+                  <TableHead>Email</TableHead>
+                  {/* PR-8: Score */}
+                  <TableHead className="hidden lg:table-cell">Score</TableHead>
+                  <TableHead>Status</TableHead>
+                  {/* PR-3: Row actions */}
+                  <TableHead>Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filtered.map((p) => {
+                  const signalCount = getSignalCount(p);
+                  const urgencyMeta = p.urgencyTier ? URGENCY_META[p.urgencyTier] : null;
+
+                  return (
+                    <TableRow
+                      key={p.id}
+                      className={cn("hover:bg-muted/20", selectedIds.has(p.id) && "bg-primary/5")}
+                    >
+                      {/* Select */}
+                      <TableCell>
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(p.id)}
+                          onChange={() => toggleSelect(p.id)}
+                          className="rounded"
+                        />
+                      </TableCell>
+
+                      {/* Name */}
+                      <TableCell>
+                        <div>
+                          <p className="font-medium text-sm">{p.firstName} {p.lastName}</p>
+                          {p.domain && <p className="text-xs text-muted-foreground">{p.domain}</p>}
+                        </div>
+                      </TableCell>
+
+                      <TableCell className="hidden sm:table-cell text-sm">{p.company ?? "—"}</TableCell>
+                      <TableCell className="hidden md:table-cell text-sm">{p.title ?? "—"}</TableCell>
+
+                      {/* Seniority */}
+                      <TableCell>
+                        <Badge variant="outline" className="text-xs">
+                          {p.seniority === "C_Suite" ? "C-Suite" : p.seniority}
+                        </Badge>
+                      </TableCell>
+
+                      {/* PR-17: Intent Source + Strength */}
+                      <TableCell className="hidden xl:table-cell">
+                        {p.intentSource && p.intentSource !== "OTHER" ? (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Badge
+                                variant="outline"
+                                className={cn("text-[10px] cursor-help", INTENT_COLORS[p.intentSource] ?? "bg-gray-50 text-gray-600")}
+                              >
+                                {p.intentSource.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase())}
+                                {p.intentStrength != null && ` · ${p.intentStrength}`}
+                              </Badge>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="max-w-xs text-xs">
+                              {p.intentDetail ?? p.intentSource}
+                            </TooltipContent>
+                          </Tooltip>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+
+                      {/* PR-16: Email validation badge */}
+                      <TableCell>
+                        {p.email ? (
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs truncate max-w-[130px]">{p.email}</span>
+                            {p.emailValidated ? (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Badge variant="outline" className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200 shrink-0">
+                                    <MailCheck className="h-2.5 w-2.5 mr-0.5" /> Valid
+                                  </Badge>
+                                </TooltipTrigger>
+                                <TooltipContent>Email validated{p.isCatchAll ? " (catch-all domain)" : ""}</TooltipContent>
+                              </Tooltip>
+                            ) : p.emailValidationDetail ? (
+                              <Badge variant="outline" className="text-[10px] bg-red-50 text-red-700 border-red-200 shrink-0">
+                                <ShieldAlert className="h-2.5 w-2.5 mr-0.5" /> Invalid
+                              </Badge>
+                            ) : p.isCatchAll ? (
+                              <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200 shrink-0">
+                                Catch-all
+                              </Badge>
+                            ) : (
+                              <span className="text-[10px] text-muted-foreground shrink-0">Unverified</span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+
+                      {/* PR-8: ICP Fit Score + Urgency Tier */}
+                      <TableCell className="hidden lg:table-cell">
+                        {p.icpFitScore != null ? (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <div className="flex items-center gap-1.5 cursor-help">
+                                <Progress value={p.icpFitScore} className="h-1.5 w-12" />
+                                <span className="text-xs font-semibold">{p.icpFitScore}</span>
+                                {urgencyMeta && (
+                                  <Badge
+                                    variant="outline"
+                                    className={cn("text-[10px]", urgencyMeta.bg, urgencyMeta.text, urgencyMeta.border)}
+                                  >
+                                    {p.urgencyTier}
+                                  </Badge>
+                                )}
+                              </div>
+                            </TooltipTrigger>
+                            <TooltipContent side="top">
+                              <p className="font-semibold">ICP Fit: {p.icpFitScore}/100</p>
+                              {urgencyMeta && <p className="text-xs">{urgencyMeta.label}</p>}
+                              {p.icpPersona && <p className="text-xs text-muted-foreground mt-1">{p.icpPersona}</p>}
+                            </TooltipContent>
+                          </Tooltip>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+
+                      {/* Status */}
+                      <TableCell>
+                        <span className={cn("text-xs px-2 py-1 rounded-full", STATUS_COLORS[p.status] ?? "bg-gray-100 text-gray-600")}>
+                          {p.status}
+                        </span>
+                      </TableCell>
+
+                      {/* PR-3: Row action buttons */}
+                      <TableCell>
+                        <div className="flex gap-1 flex-wrap">
+                          {/* Validate Email */}
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                size="sm" variant="outline"
+                                className="h-7 w-7 p-0"
+                                onClick={() => handleValidateEmail(p)}
+                                disabled={validatingId === p.id || !p.email}
+                              >
+                                {validatingId === p.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <MailCheck className="h-3 w-3" />}
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Validate email</TooltipContent>
+                          </Tooltip>
+
+                          {/* Research Signals (PR-15) */}
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                size="sm" variant="outline"
+                                className="h-7 px-1.5 text-xs"
+                                onClick={() => handleResearchSignals(p)}
+                                disabled={researchingId === p.id}
+                              >
+                                {researchingId === p.id ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <>
+                                    <Search className="h-3 w-3" />
+                                    {signalCount > 0 && <span className="ml-0.5">{signalCount}</span>}
+                                  </>
+                                )}
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Research 90-day buying signals</TooltipContent>
+                          </Tooltip>
+
+                          {/* Enrich */}
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                size="sm" variant="outline"
+                                className="h-7 px-1.5 text-xs"
+                                onClick={() => handleEnrich(p)}
+                                disabled={enrichingId === p.id}
+                              >
+                                {enrichingId === p.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Enrich via Apollo / Clearbit / Hunter</TooltipContent>
+                          </Tooltip>
+
+                          {/* Domain Enrich */}
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                size="sm" variant="outline"
+                                className="h-7 px-1.5 text-xs"
+                                onClick={() => handleDomainEnrich(p)}
+                                disabled={domainEnrichingId === p.id || (!p.domain && !p.company)}
+                              >
+                                {domainEnrichingId === p.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Globe className="h-3 w-3" />}
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Domain intelligence (website + news scrape)</TooltipContent>
+                          </Tooltip>
+
+                          {/* Competitor Radar */}
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                size="sm" variant="outline"
+                                className="h-7 px-1.5 text-xs"
+                                onClick={() => handleCompetitorRadar(p)}
+                                disabled={competitorLoadingId === p.id || (!p.company && !p.domain)}
+                              >
+                                {competitorLoadingId === p.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Radar className="h-3 w-3" />}
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Competitor Radar — research competitors via web + AI</TooltipContent>
+                          </Tooltip>
+
+                          {/* Ultimate Profile */}
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                size="sm" variant="outline"
+                                className="h-7 px-1.5 text-xs"
+                                onClick={() => handleUltimateProfile(p)}
+                                disabled={profileLoadingId === p.id || (!p.company && !p.domain)}
+                              >
+                                {profileLoadingId === p.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Brain className="h-3 w-3" />}
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Ultimate Business Profile — deep AI research</TooltipContent>
+                          </Tooltip>
+
+                          {/* Hook Generator */}
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                size="sm" variant="outline"
+                                className="h-7 px-1.5 text-xs"
+                                onClick={() => handleHookGen(p)}
+                                disabled={hookLoadingId === p.id}
+                              >
+                                {hookLoadingId === p.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <ZapIcon className="h-3 w-3" />}
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Generate 5 personalized opener hooks</TooltipContent>
+                          </Tooltip>
+
+                          {/* Log Call */}
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                size="sm" variant="outline"
+                                className="h-7 w-7 p-0"
+                                onClick={() => openCallLog(p)}
+                              >
+                                <Phone className="h-3 w-3" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Log a call</TooltipContent>
+                          </Tooltip>
+
+                          {/* Delete */}
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                size="sm" variant="ghost"
+                                className="h-7 w-7 p-0 text-destructive hover:text-destructive"
+                                onClick={() => setDeleteTarget(p)}
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Delete prospect</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+
+            <div className="px-4 py-2 text-xs text-muted-foreground border-t">
+              Showing {filtered.length} of {allProspects.length} prospects
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ══════════════ PR-10: DOMAIN ENRICHMENT INLINE RESULTS ══════════════ */}
+      {Object.keys(domainEnrichResults).length > 0 && (
+        <Card className="border-violet-200 bg-violet-50/50">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Globe className="h-4 w-4 text-violet-600" />
+              Domain Enrichment Results
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {Object.entries(domainEnrichResults).map(([pid, enrich]) => {
+              if (!enrich) return null;
+              const p = allProspects.find((pr) => pr.id === pid);
+              return (
+                <div key={pid} className="bg-white rounded-lg border p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-medium">{p ? `${p.firstName} ${p.lastName} — ${p.company}` : pid}</p>
+                    <Button
+                      variant="ghost" size="sm" className="h-6 w-6 p-0"
+                      onClick={() => setDomainEnrichResults((prev) => { const n = { ...prev }; delete n[pid]; return n; })}
+                    >
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                    {enrich.industry && <div className="bg-muted/50 rounded p-2"><p className="text-[10px] text-muted-foreground">Industry</p><p className="font-medium">{enrich.industry}</p></div>}
+                    {enrich.company_size && <div className="bg-muted/50 rounded p-2"><p className="text-[10px] text-muted-foreground">Size</p><p className="font-medium">{enrich.company_size}</p></div>}
+                    {enrich.icp_fit_score != null && <div className="bg-muted/50 rounded p-2"><p className="text-[10px] text-muted-foreground">ICP Fit</p><p className="font-medium">{enrich.icp_fit_score}/100</p></div>}
+                  </div>
+                  {enrich.tech_stack?.length > 0 && (
+                    <div>
+                      <p className="text-[10px] font-medium text-muted-foreground mb-1">Tech Stack</p>
+                      <div className="flex flex-wrap gap-1">{enrich.tech_stack.map((t: string, i: number) => <Badge key={i} variant="secondary" className="text-[10px]">{t}</Badge>)}</div>
+                    </div>
+                  )}
+                  {enrich.pain_points?.length > 0 && (
+                    <div>
+                      <p className="text-[10px] font-medium text-muted-foreground mb-1">Pain Points</p>
+                      <div className="flex flex-wrap gap-1">{enrich.pain_points.map((pp: string, i: number) => <Badge key={i} variant="outline" className="text-[10px] border-amber-200 text-amber-700">{pp}</Badge>)}</div>
+                    </div>
+                  )}
+                  {enrich.buying_signals?.length > 0 && (
+                    <div>
+                      <p className="text-[10px] font-medium text-muted-foreground mb-1">Buying Signals</p>
+                      <div className="flex flex-wrap gap-1">{enrich.buying_signals.map((bs: string, i: number) => <Badge key={i} className="text-[10px] bg-emerald-100 text-emerald-700">{bs}</Badge>)}</div>
+                    </div>
+                  )}
+                  {enrich.recommended_angle && (
+                    <p className="text-xs italic text-muted-foreground bg-muted/50 rounded p-2">
+                      Angle: {enrich.recommended_angle}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ══════════════ PR-4: BULK ACTION BAR ══════════════ */}
+      {selectedIds.size > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-3 rounded-xl bg-card border shadow-xl">
+          <span className="text-sm font-medium">{selectedIds.size} selected</span>
+          <Button size="sm" onClick={() => setAddToCampaignOpen(true)}>
+            <Users className="h-3 w-3 mr-1" /> Add to Campaign
+          </Button>
+          <Button size="sm" variant="outline" onClick={handleBulkValidate} disabled={validatingAll}>
+            {validatingAll ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <MailCheck className="h-3 w-3 mr-1" />}
+            Validate Emails
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>
+            <X className="h-3 w-3 mr-1" /> Clear
+          </Button>
+        </div>
+      )}
+
+      {/* ════════════════ DIALOGS ════════════════ */}
+
+      {/* PR-9: Add Prospect */}
+      <Dialog open={addOpen} onOpenChange={(o) => { setAddOpen(o); if (!o) resetAddForm(); }}>
+        <DialogHeader>
+          <DialogTitle>Add Prospect</DialogTitle>
+          <DialogDescription>Fill in prospect details. Fields marked * are required.</DialogDescription>
+        </DialogHeader>
+        <ScrollArea className="max-h-[70vh]">
+          <div className="space-y-4 py-4 px-1">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label className="text-xs">First Name *</Label>
+                <Input value={addForm.firstName} onChange={(e) => setAddForm((f) => ({ ...f, firstName: e.target.value }))} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Last Name *</Label>
+                <Input value={addForm.lastName} onChange={(e) => setAddForm((f) => ({ ...f, lastName: e.target.value }))} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label className="text-xs">Email</Label>
+                <Input type="email" value={addForm.email} onChange={(e) => setAddForm((f) => ({ ...f, email: e.target.value }))} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Phone</Label>
+                <Input placeholder="+1 555 000 0000" value={addForm.phone} onChange={(e) => setAddForm((f) => ({ ...f, phone: e.target.value }))} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label className="text-xs">Title</Label>
+                <Input placeholder="VP Engineering" value={addForm.title} onChange={(e) => setAddForm((f) => ({ ...f, title: e.target.value }))} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Company</Label>
+                <Input value={addForm.company} onChange={(e) => setAddForm((f) => ({ ...f, company: e.target.value }))} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label className="text-xs">Domain</Label>
+                <Input placeholder="acme.com" value={addForm.domain} onChange={(e) => setAddForm((f) => ({ ...f, domain: e.target.value }))} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">LinkedIn URL</Label>
+                <Input placeholder="linkedin.com/in/…" value={addForm.linkedinUrl} onChange={(e) => setAddForm((f) => ({ ...f, linkedinUrl: e.target.value }))} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label className="text-xs">Seniority</Label>
+                <Select value={addForm.seniority} onValueChange={(v) => setAddForm((f) => ({ ...f, seniority: v }))}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="C_Suite">C-Suite</SelectItem>
+                    <SelectItem value="Director">Director</SelectItem>
+                    <SelectItem value="IC">Individual Contributor</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {icps.length > 0 && (
+                <div className="space-y-1">
+                  <Label className="text-xs">ICP Profile</Label>
+                  <Select value={addForm.icpProfileId} onValueChange={(v) => setAddForm((f) => ({ ...f, icpProfileId: v }))}>
+                    <SelectTrigger><SelectValue placeholder="Select ICP…" /></SelectTrigger>
+                    <SelectContent>
+                      {icps.map((icp) => <SelectItem key={icp.id} value={icp.id}>{icp.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Notes</Label>
+              <Textarea
+                rows={2}
+                placeholder="Source, context, or any other notes…"
+                value={addForm.notes}
+                onChange={(e) => setAddForm((f) => ({ ...f, notes: e.target.value }))}
+              />
+            </div>
+          </div>
+        </ScrollArea>
+        <DialogFooter>
+          <DialogClose onClick={() => { setAddOpen(false); resetAddForm(); }}>
+            <Button variant="outline">Cancel</Button>
+          </DialogClose>
+          <Button
+            onClick={() => {
+              if (!addForm.firstName.trim() || !addForm.lastName.trim()) {
+                toast.error("First name and last name are required");
+                return;
+              }
+              addMutation.mutate({
+                firstName: addForm.firstName,
+                lastName: addForm.lastName,
+                email: addForm.email || null,
+                title: addForm.title || null,
+                company: addForm.company || null,
+                domain: addForm.domain || null,
+                linkedinUrl: addForm.linkedinUrl || null,
+                phone: addForm.phone || null,
+                seniority: addForm.seniority,
+                icpProfileId: addForm.icpProfileId || null,
+                notes: addForm.notes || null,
+              });
+            }}
+            disabled={addMutation.isPending}
+          >
+            {addMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            Add Prospect
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* PR-5: CSV Import */}
+      <Dialog open={importOpen} onOpenChange={(o) => { setImportOpen(o); if (!o) setCsvResult(null); }}>
+        <DialogHeader>
+          <DialogTitle>Bulk CSV Import</DialogTitle>
+          <DialogDescription>
+            Supported columns: first_name, last_name, email, title, company, domain, linkedin, seniority, phone, notes
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4 py-4">
+          <div
+            className="border-2 border-dashed border-border rounded-lg p-10 text-center relative cursor-pointer hover:border-primary/50 transition-colors"
+            onClick={() => csvInputRef.current?.click()}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              const file = e.dataTransfer.files[0];
+              if (file) handleCsvUpload(file);
+            }}
+          >
+            <Upload className="h-8 w-8 mx-auto text-muted-foreground mb-3" />
+            <p className="text-sm font-medium">Drop your CSV here or click to browse</p>
+            <p className="text-xs text-muted-foreground mt-1">Max 10 MB · UTF-8 encoding</p>
+            <input
+              ref={csvInputRef}
+              type="file"
+              accept=".csv"
+              className="hidden"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) handleCsvUpload(f); }}
+            />
+          </div>
+
+          {csvImporting && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Importing…
+            </div>
+          )}
+
+          {csvResult && (
+            <Card className={cn("border", csvResult.errors.length > 0 ? "border-amber-200 bg-amber-50" : "border-emerald-200 bg-emerald-50")}>
+              <CardContent className="p-3 text-sm">
+                <p className="font-medium mb-1">Import Complete</p>
+                <p>Imported: <b>{csvResult.imported}</b> · Skipped: <b>{csvResult.skipped}</b> · Total rows: <b>{csvResult.totalRows}</b></p>
+                {csvResult.errors.length > 0 && (
+                  <div className="mt-2 text-xs text-amber-800">
+                    <p className="font-medium">{csvResult.errors.length} row error(s):</p>
+                    <ul className="list-disc list-inside mt-1 space-y-0.5">
+                      {csvResult.errors.slice(0, 5).map((e, i) => <li key={i}>{e}</li>)}
+                      {csvResult.errors.length > 5 && <li>…and {csvResult.errors.length - 5} more</li>}
+                    </ul>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          <div className="text-xs text-muted-foreground bg-muted rounded-lg p-3">
+            <p className="font-medium mb-1">Example CSV format:</p>
+            <pre className="font-mono text-[10px] whitespace-pre-wrap">first_name,last_name,email,title,company,domain
+John,Smith,john@acme.com,VP Engineering,Acme Inc,acme.com</pre>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setImportOpen(false)}>Close</Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* PR-4: Add to Campaign */}
+      <Dialog open={addToCampaignOpen} onOpenChange={setAddToCampaignOpen}>
+        <DialogHeader>
+          <DialogTitle>Add to Campaign</DialogTitle>
+          <DialogDescription>Select a campaign to add {selectedIds.size} prospect{selectedIds.size !== 1 ? "s" : ""} to.</DialogDescription>
+        </DialogHeader>
+        <div className="py-4 space-y-2">
+          <Label className="text-xs">Campaign</Label>
+          <Select value={addToCampaignId} onValueChange={setAddToCampaignId}>
+            <SelectTrigger><SelectValue placeholder="Select campaign…" /></SelectTrigger>
+            <SelectContent>
+              {campaigns.map((c) => (
+                <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {campaigns.length === 0 && (
+            <p className="text-xs text-muted-foreground">No campaigns yet. Create one first.</p>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setAddToCampaignOpen(false)}>Cancel</Button>
+          <Button onClick={handleBulkAddToCampaign} disabled={!addToCampaignId}>
+            Add {selectedIds.size} Prospects
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* PR-11: Call Log */}
+      <Dialog open={callLogProspect !== null} onOpenChange={(o) => { if (!o) setCallLogProspect(null); }}>
+        <DialogHeader>
+          <DialogTitle>Log Call</DialogTitle>
+          <DialogDescription>
+            {callLogProspect && `${callLogProspect.firstName} ${callLogProspect.lastName}${callLogProspect.company ? ` — ${callLogProspect.company}` : ""}`}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 py-3">
+          <div className="space-y-1">
+            <Label className="text-xs">Phone *</Label>
+            <Input placeholder="+1 555 000 0000" value={callLogForm.phone} onChange={(e) => setCallLogForm((f) => ({ ...f, phone: e.target.value }))} />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs">Outcome</Label>
+            <Select value={callLogForm.outcome} onValueChange={(v) => setCallLogForm((f) => ({ ...f, outcome: v }))}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="connected">Connected</SelectItem>
+                <SelectItem value="voicemail">Voicemail</SelectItem>
+                <SelectItem value="no_answer">No Answer</SelectItem>
+                <SelectItem value="busy">Busy</SelectItem>
+                <SelectItem value="wrong_number">Wrong Number</SelectItem>
+                <SelectItem value="scheduled">Scheduled Follow-up</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs">Duration (seconds)</Label>
+            <Input type="number" min="0" placeholder="e.g. 180" value={callLogForm.durationSec} onChange={(e) => setCallLogForm((f) => ({ ...f, durationSec: e.target.value }))} />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs">Notes</Label>
+            <Textarea rows={3} placeholder="Conversation summary, next steps…" value={callLogForm.notes} onChange={(e) => setCallLogForm((f) => ({ ...f, notes: e.target.value }))} />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setCallLogProspect(null)}>Cancel</Button>
+          <Button onClick={handleLogCall} disabled={callLogSaving}>
+            {callLogSaving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Phone className="h-4 w-4 mr-2" />}
+            Log Call
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* PR-12: Competitor Radar */}
+      <Dialog open={competitorResult !== null} onOpenChange={(o) => { if (!o) setCompetitorResult(null); }}>
+        <DialogHeader>
+          <DialogTitle>Competitor Radar — {competitorResult?.prospect.company}</DialogTitle>
+          <DialogDescription>
+            {competitorResult?.competitors.length ?? 0} competitors identified via web search + AI
+          </DialogDescription>
+        </DialogHeader>
+        <ScrollArea className="max-h-[60vh] pr-2">
+          {(competitorResult?.competitors.length ?? 0) > 0 ? (
+            <div className="space-y-2 py-2">
+              {competitorResult!.competitors.map((c, i) => (
+                <div key={i} className="border rounded-lg p-3 space-y-1">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1">
+                      <p className="text-sm font-medium">
+                        {c.name}
+                        {c.domain && (
+                          <a href={`https://${c.domain}`} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline text-xs ml-1.5">↗</a>
+                        )}
+                      </p>
+                      {c.description && <p className="text-xs text-muted-foreground mt-0.5">{c.description}</p>}
+                      {c.positioning && <p className="text-xs mt-1"><span className="font-medium">Positioning:</span> {c.positioning}</p>}
+                    </div>
+                    {c.overlap_score != null && (
+                      <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200 shrink-0">
+                        {Math.round(c.overlap_score * 100)}% overlap
+                      </Badge>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground text-center py-8">No competitors found.</p>
+          )}
+        </ScrollArea>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setCompetitorResult(null)}>Close</Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* PR-13: Ultimate Profile */}
+      <Dialog open={profileResult !== null} onOpenChange={(o) => { if (!o) setProfileResult(null); }}>
+        <DialogHeader>
+          <DialogTitle>Ultimate Business Profile — {profileResult?.prospect.company}</DialogTitle>
+          <DialogDescription>
+            {profileResult?.sourcesAnalyzed} web sources analyzed
+          </DialogDescription>
+        </DialogHeader>
+        <ScrollArea className="max-h-[65vh] pr-2">
+          {profileResult?.profile && (
+            <div className="space-y-3 py-2">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {profileResult.profile.industry && <div className="bg-muted/50 rounded p-2"><p className="text-[10px] text-muted-foreground">Industry</p><p className="text-xs font-medium">{profileResult.profile.industry}</p></div>}
+                {profileResult.profile.company_size && <div className="bg-muted/50 rounded p-2"><p className="text-[10px] text-muted-foreground">Size</p><p className="text-xs font-medium">{profileResult.profile.company_size}</p></div>}
+                {profileResult.profile.icp_fit_score != null && <div className="bg-muted/50 rounded p-2"><p className="text-[10px] text-muted-foreground">ICP Fit</p><p className="text-xs font-medium">{profileResult.profile.icp_fit_score}/100</p></div>}
+                {profileResult.profile.confidence_score != null && <div className="bg-muted/50 rounded p-2"><p className="text-[10px] text-muted-foreground">Confidence</p><p className="text-xs font-medium">{Math.round(profileResult.profile.confidence_score * 100)}%</p></div>}
+              </div>
+              {profileResult.profile.what_they_do && <div><p className="text-xs font-medium mb-0.5">What They Do</p><p className="text-xs text-muted-foreground">{profileResult.profile.what_they_do}</p></div>}
+              {profileResult.profile.target_market && <div><p className="text-xs font-medium mb-0.5">Target Market</p><p className="text-xs text-muted-foreground">{profileResult.profile.target_market}</p></div>}
+              {(profileResult.profile.tech_stack?.length ?? 0) > 0 && (
+                <div>
+                  <p className="text-xs font-medium mb-1">Tech Stack</p>
+                  <div className="flex flex-wrap gap-1">{profileResult.profile.tech_stack!.map((t, i) => <Badge key={i} variant="outline" className="text-[10px]">{t}</Badge>)}</div>
+                </div>
+              )}
+              {(profileResult.profile.pain_points?.length ?? 0) > 0 && (
+                <div>
+                  <p className="text-xs font-medium mb-1">Pain Points</p>
+                  <div className="flex flex-wrap gap-1">{profileResult.profile.pain_points!.map((pp, i) => <Badge key={i} variant="outline" className="text-[10px] border-amber-200 text-amber-700">{pp}</Badge>)}</div>
+                </div>
+              )}
+              {(profileResult.profile.buying_signals?.length ?? 0) > 0 && (
+                <div>
+                  <p className="text-xs font-medium mb-1">Buying Signals</p>
+                  <div className="flex flex-wrap gap-1">{profileResult.profile.buying_signals!.map((s, i) => <Badge key={i} className="text-[10px] bg-emerald-100 text-emerald-700">{s}</Badge>)}</div>
+                </div>
+              )}
+              {profileResult.profile.recommended_angle && (
+                <Card className="bg-violet-50 border-violet-200">
+                  <CardContent className="p-3">
+                    <p className="text-[10px] text-muted-foreground">Recommended Outreach Angle</p>
+                    <p className="text-xs font-medium mt-0.5">{profileResult.profile.recommended_angle}</p>
+                  </CardContent>
+                </Card>
+              )}
+            </div>
+          )}
+        </ScrollArea>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setProfileResult(null)}>Close</Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* PR-14: Hook Generator */}
+      <Dialog open={hookResult !== null} onOpenChange={(o) => { if (!o) setHookResult(null); }}>
+        <DialogHeader>
+          <DialogTitle>Opener Hooks</DialogTitle>
+          <DialogDescription>
+            {hookResult && `5 personalized hooks for ${hookResult.prospect.firstName} ${hookResult.prospect.lastName}`}
+          </DialogDescription>
+        </DialogHeader>
+        <ScrollArea className="max-h-[60vh] pr-2">
+          {(hookResult?.hooks.length ?? 0) > 0 ? (
+            <div className="space-y-2 py-2">
+              {hookResult!.hooks.map((hook, i) => (
+                <HookCard key={i} hook={hook} index={i + 1} onCopy={copyToClipboard} />
+              ))}
+              <Button
+                variant="outline"
+                className="w-full mt-2"
+                onClick={() => copyToClipboard(hookResult!.hooks.map((h, i) => `${i + 1}. ${h.text}`).join("\n"))}
+              >
+                <Copy className="h-4 w-4 mr-2" /> Copy All
+              </Button>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground text-center py-8">No hooks generated.</p>
+          )}
+        </ScrollArea>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setHookResult(null)}>Close</Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* Delete confirm */}
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(o) => { if (!o) setDeleteTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete prospect?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTarget && `${deleteTarget.firstName} ${deleteTarget.lastName}${deleteTarget.company ? ` (${deleteTarget.company})` : ""} will be permanently removed.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive hover:bg-destructive/90"
+              onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
 }
 
-interface ProspectBriefResult {
-  summary: string | null;
-  key_insights: string[] | null;
-  recommended_approach: string | null;
-  talking_points: string[] | null;
-  risk_factors: string[] | null;
-}
+/* ── Hook Card sub-component (PR-14) ───────────────────────────────── */
 
-interface NlMatchEntry {
-  name: string | null;
-  company: string | null;
-  title: string | null;
-  icp_score: number | null;
-}
-
-interface NlWebResult {
-  title: string | null;
-  snippet: string | null;
-  url: string | null;
-}
-
-interface NlSearchResult {
-  interpretation: string | null;
-  db_matches: NlMatchEntry[] | null;
-  web_results: NlWebResult[] | null;
-}
-
-/* ── AI feature sub-components ────────────────────────────────────── */
-
-function HookCard({ hook, index }: { hook: HookEntry; index: number }) {
+function HookCard({
+  hook,
+  index,
+  onCopy,
+}: {
+  hook: HookEntry;
+  index: number;
+  onCopy: (text: string) => void;
+}) {
   const [copied, setCopied] = useState(false);
 
-  function handleCopy() {
+  const handleCopy = () => {
     if (!hook.text) return;
-    navigator.clipboard.writeText(hook.text).then(() => {
-      setCopied(true);
-      toast.success("Copied to clipboard");
-      setTimeout(() => setCopied(false), 2000);
-    });
-  }
+    onCopy(hook.text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   return (
     <div className="rounded-md border bg-muted/30 p-3">
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 mb-1">
             <span className="text-xs font-medium text-muted-foreground">#{index}</span>
-            {hook.type && (
-              <Badge variant="outline" className="text-[10px]">{hook.type}</Badge>
-            )}
+            {hook.type && <Badge variant="outline" className="text-[10px]">{hook.type}</Badge>}
           </div>
-          <p className="mt-1 text-sm">{hook.text ?? "—"}</p>
+          <p className="text-sm">{hook.text ?? "—"}</p>
         </div>
-        <Button
-          size="icon"
-          variant="ghost"
-          className="h-7 w-7 shrink-0"
-          aria-label="Copy hook"
-          onClick={handleCopy}
-        >
-          {copied ? (
-            <Check className="h-3.5 w-3.5 text-emerald-600" />
-          ) : (
-            <Copy className="h-3.5 w-3.5" />
-          )}
+        <Button size="sm" variant="ghost" className="h-7 w-7 p-0 shrink-0" onClick={handleCopy} disabled={!hook.text}>
+          {copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
         </Button>
       </div>
-    </div>
-  );
-}
-
-function BriefSection({
-  title,
-  content,
-  items,
-}: {
-  title: string;
-  content?: string | null;
-  items?: string[] | null;
-}) {
-  return (
-    <div>
-      <p className="mb-1 text-xs font-medium uppercase text-muted-foreground">{title}</p>
-      {content && <p className="text-sm">{content}</p>}
-      {items && items.length > 0 && (
-        <ul className="ml-4 list-disc space-y-1 text-sm">
-          {items.map((item, i) => (
-            <li key={i}>{item}</li>
-          ))}
-        </ul>
-      )}
-      {(!content && (!items || items.length === 0)) && (
-        <p className="text-sm text-muted-foreground">—</p>
-      )}
     </div>
   );
 }
