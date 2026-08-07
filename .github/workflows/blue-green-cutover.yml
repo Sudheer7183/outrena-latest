@@ -57,7 +57,7 @@ jobs:
     outputs:
       ok: ${{ steps.health.outputs.ok }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -158,7 +158,7 @@ jobs:
     if: inputs.cloud == 'aws' && needs.validate-health.outputs.ok == 'true'
     environment: ${{ inputs.environment == 'production' && 'production' || 'staging' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -216,7 +216,7 @@ jobs:
     if: inputs.cloud == 'azure' && needs.validate-health.outputs.ok == 'true'
     environment: ${{ inputs.environment == 'production' && 'production-azure' || 'staging-azure' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -291,7 +291,7 @@ jobs:
     outputs:
       ok: ${{ steps.monitor.outputs.ok }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v5
