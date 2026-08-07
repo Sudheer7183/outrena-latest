@@ -71,7 +71,7 @@ jobs:
     outputs:
       old-weight: ${{ steps.calc.outputs.old_weight }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Compute old weight
         id: calc

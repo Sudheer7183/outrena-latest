@@ -55,7 +55,7 @@ jobs:
     name: SAST · CodeQL (python + typescript)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
@@ -85,7 +85,7 @@ jobs:
     name: Dependencies · pip-audit (backend) + npm audit (frontend)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -129,7 +129,7 @@ jobs:
     name: Secrets · gitleaks (full repo scan)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history — gitleaks scans all commits to catch secrets leaked
           # in earlier revisions.
@@ -149,7 +149,7 @@ jobs:
     name: IaC · checkov (terraform/ HIGH+CRITICAL)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run Checkov (AWS + Azure terraform)
         id: checkov
@@ -193,7 +193,7 @@ jobs:
             context: outrena-frontend
             dockerfile: outrena-frontend/Dockerfile
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -241,7 +241,7 @@ jobs:
     name: SBOM · CycloneDX (backend + frontend + GH Dependency Submission)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -301,7 +301,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v5

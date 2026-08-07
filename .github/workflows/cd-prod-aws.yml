@@ -59,7 +59,7 @@ jobs:
     outputs:
       prod-tag: ${{ steps.resolve.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # OWASP A05 gate (Tech Doc §10.7) — verify prod env settings before deploy
       - name: Pre-deploy environment audit
@@ -134,7 +134,7 @@ jobs:
     needs: promote-images
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -177,7 +177,7 @@ jobs:
     outputs:
       ok: ${{ steps.health.outputs.ok }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -275,7 +275,7 @@ jobs:
     needs: manual-gate-25
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -318,7 +318,7 @@ jobs:
     needs: manual-gate-50
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -361,7 +361,7 @@ jobs:
     needs: manual-gate-100
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
