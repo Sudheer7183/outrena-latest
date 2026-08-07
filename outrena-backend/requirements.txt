@@ -64,7 +64,7 @@ opentelemetry-instrumentation-logging==0.48b0
 # app/core/posthog_client.py + app/middleware/exception_logging_middleware.py.
 # When POSTHOG_KEY is empty, the client no-ops (dev-safe) so the app boots
 # fine without a PostHog instance running.
-posthog==3.13.0
+posthog==7.37.0
 
 # ── Optional cloud-provider SDKs (install only if SECRET_BACKEND is set) ──────
 # These are NOT installed by default — uncomment or `pip install` them in
