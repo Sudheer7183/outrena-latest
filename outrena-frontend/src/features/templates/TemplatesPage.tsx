@@ -1,23 +1,38 @@
 /**
- * TemplatesPage.tsx — OUTRENA Phase 4 (Task 3-C)
+ * TemplatesPage.tsx — Local email template CRUD.
  *
- * Email templates CRUD. Grid + edit dialog with variable hints.
+ * Gaps closed:
+ *   TM-1  MailBridge connection warning — shown when no MailBridge config
+ *         is configured (links to Domains > MailBridge)
+ *   TM-2  Template list from real API — GET /api/v1/templates
+ *   TM-3  Create Template dialog: name, category, subject, Jinja2 body
+ *         editor with {{ variable_name }} syntax hint
+ *   TM-4  Preview template (live variable substitution in sidebar)
+ *   TM-5  Delete template — DELETE /api/v1/templates/{id}
+ *
+ * API contract (EmailTemplateResponse):
+ *   { id, name, category, framework, subjectTemplate, bodyTemplate,
+ *     variables, isShared, createdAt, updatedAt }
+ *   POST/PUT accept aliases: body→bodyTemplate, subject→subjectTemplate
  */
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertCircle,
+  BookOpen,
+  Edit3,
+  Eye,
   LayoutTemplate,
-  Pencil,
   Plus,
+  RefreshCw,
   Search,
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { http } from "@/services/apiClient";
-import { ErrorState } from "@/components/ui/error-state";
 import { formatDate, truncate } from "@/lib/utils";
-import type { EmailTemplate } from "@/types/common";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -29,147 +44,154 @@ import {
 } from "@/components/ui/card";
 import {
   Dialog,
-  DialogClose,
+  DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/ui/page-header";
-import { NativeSelect as Select } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { RichContentEditor } from "@/components/RichContentEditor";
+import { Textarea } from "@/components/ui/textarea";
 
-/* ── Types & mocks ──────────────────────────────────────────────────────── */
+/* ── Types ──────────────────────────────────────────────────────────────── */
 
-type TemplateCategory =
-  | "cold_followup"
-  | "introbreakup"
-  | "value"
-  | "invitation";
-
-const CATEGORIES: TemplateCategory[] = [
-  "cold_followup",
-  "introbreakup",
-  "value",
-  "invitation",
-];
-
-const CATEGORY_VARIANT: Record<TemplateCategory, "default" | "secondary" | "outline" | "success"> = {
-  cold_followup: "default",
-  introbreakup: "secondary",
-  value: "success",
-  invitation: "outline",
-};
-
-const MOCK_TEMPLATES: EmailTemplate[] = [
-  {
-    id: "t1",
-    name: "Cold First Touch — Trigger",
-    subject: "{{company}}'s close-cycle SLA — late again?",
-    body: `Hi {{firstName}},\n\nNoticed {{company}} recently expanded the finance team — congrats.\n\nMost ops leaders at Series B fintechs tell me the close cycle keeps slipping past 10 business days. The cost isn't just audit risk — it's the 30+ hours finance spends reconciling multi-entity ledgers every month.\n\nOUTRENA automates reconciliation orchestration so finance teams close 60% faster within 90 days. Worth a 15-min call next Tuesday?\n\n— Alex`,
-    category: "cold_followup",
-    createdAt: "2024-11-01T10:00:00Z",
-    updatedAt: "2024-12-15T14:00:00Z",
-  },
-  {
-    id: "t2",
-    name: "Follow-up #2 — New Evidence",
-    subject: "Re: {{company}} close cycle — new benchmark",
-    body: `Hi {{firstName}},\n\nFollowing up with fresh data: we benchmarked 40 Series B fintechs and {{company}}'s segment averages 11.4-day close cycles. The top quartile closes in 6 days.\n\nHappy to share the benchmark + how OUTRENA gets teams into the top quartile within 90 days.\n\n— Alex`,
-    category: "cold_followup",
-    createdAt: "2024-11-08T09:30:00Z",
-    updatedAt: "2024-12-18T11:00:00Z",
-  },
-  {
-    id: "t3",
-    name: "Breakup Email",
-    subject: "Closing the loop — should I break up with you?",
-    body: `Hi {{firstName}},\n\nI'll stop here — happy to circle back when reconciliation becomes a priority for {{company}}. If timing changes, just reply.\n\n— Alex`,
-    category: "introbreakup",
-    createdAt: "2024-10-22T16:11:00Z",
-    updatedAt: "2024-11-30T08:45:00Z",
-  },
-  {
-    id: "t4",
-    name: "Value Touch — ROI Model",
-    subject: "{{company}} ROI model attached",
-    body: `Hi {{firstName}},\n\nAttached a 1-page ROI model for {{company}} based on a 200-person fintech. Conservative case: 47% close-cycle reduction in 90 days.\n\nWorth a 15-min walkthrough?\n\n— Alex`,
-    category: "value",
-    createdAt: "2024-12-04T13:50:00Z",
-    updatedAt: "2025-01-04T13:50:00Z",
-  },
-  {
-    id: "t5",
-    name: "Meeting Invitation — Discovery",
-    subject: "OUTRENA × {{company}} — 30 min next Tuesday?",
-    body: `Hi {{firstName}},\n\nI'd love to set up a 30-min discovery call. Tuesday at 10am or Wednesday at 2pm PT both work — let me know which fits.\n\nI'll bring a tailored ROI breakdown for {{company}}.\n\n— Alex`,
-    category: "invitation",
-    createdAt: "2024-09-15T07:20:00Z",
-    updatedAt: "2024-12-22T18:30:00Z",
-  },
-  {
-    id: "t6",
-    name: "Intro Touch — Mutual Connection",
-    subject: "Intro: {{company}} × OUTRENA (via {{referrer}})",
-    body: `Hi {{firstName}},\n\n{{referrer}} suggested we connect. Quick context: OUTRENA helps ops leaders at fintechs like {{company}} cut close cycles by 60% within 90 days.\n\nWorth a 15-min intro next week?\n\n— Alex`,
-    category: "introbreakup",
-    createdAt: "2024-07-01T12:00:00Z",
-    updatedAt: "2024-10-15T10:00:00Z",
-  },
-];
-
-interface FormState {
-  id?: string;
+interface EmailTemplateResponse {
+  id: string;
   name: string;
-  category: TemplateCategory;
-  subject: string;
-  body: string;
+  category: string;
+  framework: string | null;
+  subjectTemplate: string | null;
+  bodyTemplate: string;
+  variables: string[];
+  isShared: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
-const EMPTY_FORM: FormState = {
-  name: "",
-  category: "cold_followup",
-  subject: "",
-  body: "",
+interface MailBridgeConfig {
+  id: string;
+  name: string;
+  baseUrl: string;
+  isActive: boolean;
+}
+
+/* ── Constants ──────────────────────────────────────────────────────────── */
+
+const CATEGORIES = [
+  { id: "cold_outreach", label: "Cold Outreach" },
+  { id: "follow_up", label: "Follow-up" },
+  { id: "breakup", label: "Breakup" },
+  { id: "value", label: "Value Touch" },
+  { id: "invitation", label: "Meeting Invitation" },
+  { id: "general", label: "General" },
+] as const;
+
+const CATEGORY_COLORS: Record<string, string> = {
+  cold_outreach: "bg-blue-100 text-blue-700 border-blue-200",
+  follow_up: "bg-violet-100 text-violet-700 border-violet-200",
+  breakup: "bg-rose-100 text-rose-700 border-rose-200",
+  value: "bg-emerald-100 text-emerald-700 border-emerald-200",
+  invitation: "bg-amber-100 text-amber-700 border-amber-200",
+  general: "bg-slate-100 text-slate-700 border-slate-200",
 };
 
-const VARIABLES = ["{{firstName}}", "{{company}}", "{{title}}", "{{referrer}}", "{{campaignName}}"];
+// Standard Jinja2 variables available in OUTRENA templates
+const JINJA_VARIABLES = [
+  "{{ first_name }}",
+  "{{ last_name }}",
+  "{{ company }}",
+  "{{ title }}",
+  "{{ signal }}",
+  "{{ sender_name }}",
+  "{{ sender_company }}",
+  "{{ result_metric }}",
+];
+
+/* ── Form state ─────────────────────────────────────────────────────────── */
+
+interface TemplateForm {
+  id?: string;
+  name: string;
+  category: string;
+  subjectTemplate: string;
+  bodyTemplate: string;
+}
+
+const EMPTY_FORM: TemplateForm = {
+  name: "",
+  category: "cold_outreach",
+  subjectTemplate: "",
+  bodyTemplate: "",
+};
+
+/* ── Preview helper ─────────────────────────────────────────────────────── */
+
+const SAMPLE_VARS: Record<string, string> = {
+  first_name: "Jordan",
+  last_name: "Avery",
+  company: "Acme Corp",
+  title: "VP Revenue",
+  signal: "raised Series B",
+  sender_name: "Alex",
+  sender_company: "OUTRENA",
+  result_metric: "60% faster close",
+};
+
+function applyPreview(template: string): string {
+  return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key: string) =>
+    SAMPLE_VARS[key] ?? `{{${key}}}`
+  );
+}
 
 /* ── Page ───────────────────────────────────────────────────────────────── */
 
 export function TemplatesPage() {
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
   const [editorOpen, setEditorOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<EmailTemplate | null>(null);
-  const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [previewTarget, setPreviewTarget] =
+    useState<EmailTemplateResponse | null>(null);
+  const [deleteTarget, setDeleteTarget] =
+    useState<EmailTemplateResponse | null>(null);
+  const [form, setForm] = useState<TemplateForm>(EMPTY_FORM);
 
-  const { data: apiTemplates, isLoading , isError, error, refetch } = useQuery({
-    queryKey: ["templates"],
-    queryFn: () => http.get<EmailTemplate[]>("/api/v1/templates"),
+  /* ── Queries ── */
+
+  // TM-1 — check if MailBridge is configured
+  const { data: mbConfigs = [] } = useQuery<MailBridgeConfig[]>({
+    queryKey: ["mailbridge-config"],
+    queryFn: () => http.get<MailBridgeConfig[]>("/api/v1/mailbridge/config"),
     retry: false,
   });
-  const templates = apiTemplates ?? MOCK_TEMPLATES;
 
-  const filtered = templates.filter((t) => {
-    const matchesSearch = t.name.toLowerCase().includes(search.toLowerCase());
-    const matchesCat = categoryFilter === "all" || t.category === categoryFilter;
-    return matchesSearch && matchesCat;
-  });
+  const hasMailBridge = mbConfigs.some((c) => c.isActive);
+
+  // TM-2 — template list from real API
+  const { data: templates = [], isLoading } = useQuery<EmailTemplateResponse[]>(
+    {
+      queryKey: ["templates"],
+      queryFn: () => http.get<EmailTemplateResponse[]>("/api/v1/templates"),
+      retry: false,
+    }
+  );
+
+  /* ── Mutations ── */
 
   const createMut = useMutation({
-    mutationFn: (body: { name: string; category: string; subject: string; body: string }) =>
-      http.post<EmailTemplate>("/api/v1/templates", body),
+    mutationFn: (body: Omit<TemplateForm, "id">) =>
+      http.post<EmailTemplateResponse>("/api/v1/templates", body),
     onSuccess: () => {
       toast.success("Template created");
       qc.invalidateQueries({ queryKey: ["templates"] });
@@ -179,8 +201,8 @@ export function TemplatesPage() {
   });
 
   const updateMut = useMutation({
-    mutationFn: ({ id, body }: { id: string; body: Partial<EmailTemplate> }) =>
-      http.put<EmailTemplate>(`/api/v1/templates/${id}`, body),
+    mutationFn: ({ id, body }: { id: string; body: Omit<TemplateForm, "id"> }) =>
+      http.put<EmailTemplateResponse>(`/api/v1/templates/${id}`, body),
     onSuccess: () => {
       toast.success("Template saved");
       qc.invalidateQueries({ queryKey: ["templates"] });
@@ -189,8 +211,9 @@ export function TemplatesPage() {
     onError: () => toast.error("Failed to save template"),
   });
 
+  // TM-5 — delete
   const deleteMut = useMutation({
-    mutationFn: (id: string) => http.delete<{ message: string }>(`/api/v1/templates/${id}`),
+    mutationFn: (id: string) => http.delete(`/api/v1/templates/${id}`),
     onSuccess: () => {
       toast.success("Template deleted");
       qc.invalidateQueries({ queryKey: ["templates"] });
@@ -199,42 +222,69 @@ export function TemplatesPage() {
     onError: () => toast.error("Failed to delete template"),
   });
 
+  /* ── Handlers ── */
+
   function openNew() {
     setForm(EMPTY_FORM);
     setEditorOpen(true);
   }
-  function openEdit(t: EmailTemplate) {
+
+  function openEdit(t: EmailTemplateResponse) {
     setForm({
       id: t.id,
       name: t.name,
-      category: (t.category as TemplateCategory) ?? "cold_followup",
-      subject: t.subject,
-      body: t.body,
+      category: t.category,
+      subjectTemplate: t.subjectTemplate ?? "",
+      bodyTemplate: t.bodyTemplate,
     });
     setEditorOpen(true);
   }
+
   function closeEditor() {
     setEditorOpen(false);
     setForm(EMPTY_FORM);
   }
 
   function handleSave() {
-    if (!form.name.trim() || !form.subject.trim()) {
-      toast.error("Name and subject are required");
+    if (!form.name.trim()) {
+      toast.error("Name is required");
       return;
     }
+    const payload = {
+      name: form.name.trim(),
+      category: form.category,
+      subjectTemplate: form.subjectTemplate.trim(),
+      bodyTemplate: form.bodyTemplate.trim(),
+      variables: JINJA_VARIABLES.filter((v) =>
+        form.bodyTemplate.includes(v.replace(/\s/g, ""))
+      ).map((v) => v.replace(/\{\{\s*|\s*\}\}/g, "")),
+      isShared: true,
+    };
     if (form.id) {
-      updateMut.mutate({ id: form.id, body: form });
+      updateMut.mutate({ id: form.id, body: payload });
     } else {
-      createMut.mutate(form);
+      createMut.mutate(payload);
     }
   }
+
+  /* ── Filter ── */
+
+  const filtered = templates.filter((t) => {
+    const matchSearch =
+      !search || t.name.toLowerCase().includes(search.toLowerCase());
+    const matchCat = categoryFilter === "all" || t.category === categoryFilter;
+    return matchSearch && matchCat;
+  });
+
+  const isSaving = createMut.isPending || updateMut.isPending;
+
+  /* ── Render ── */
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Templates"
-        description="Reusable email templates with variable substitution. Categories: cold_followup, introbreakup, value, invitation."
+        description="Reusable Jinja2 email templates with variable substitution — used by Sequences and Email Studio."
         actions={
           <Button size="sm" onClick={openNew}>
             <Plus className="h-4 w-4" /> New Template
@@ -242,219 +292,380 @@ export function TemplatesPage() {
         }
       />
 
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                placeholder="Search templates…"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="pl-9"
-              />
-            </div>
-            <Select
-              value={categoryFilter}
-              onChange={(e) => setCategoryFilter(e.target.value)}
-              className="sm:w-44"
+      {/* TM-1 — MailBridge warning */}
+      {!hasMailBridge && (
+        <Alert variant="default" className="border-amber-300 bg-amber-50">
+          <AlertCircle className="h-4 w-4 text-amber-600" />
+          <AlertTitle className="text-amber-800">
+            No active MailBridge connection
+          </AlertTitle>
+          <AlertDescription className="text-amber-700">
+            Templates are stored locally and can be used in Sequences. To send
+            via MailBridge, configure a connection in{" "}
+            <a
+              href="/setup/domains"
+              className="underline font-medium hover:no-underline"
             >
-              <option value="all">All categories</option>
-              {CATEGORIES.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </Select>
+              Domains → MailBridge
+            </a>
+            .
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* Info card */}
+      <Card className="border-blue-100 bg-blue-50/50">
+        <CardContent className="p-4">
+          <div className="flex items-start gap-3">
+            <BookOpen className="h-4 w-4 text-blue-600 mt-0.5 shrink-0" />
+            <div className="text-xs space-y-1">
+              <p className="font-medium text-blue-900">
+                Jinja2 Template Syntax
+              </p>
+              <p className="text-blue-800">
+                Use{" "}
+                <code className="bg-blue-100 px-1 rounded">
+                  {"{{ first_name }}"}
+                </code>
+                ,{" "}
+                <code className="bg-blue-100 px-1 rounded">
+                  {"{{ company }}"}
+                </code>
+                , and{" "}
+                <code className="bg-blue-100 px-1 rounded">
+                  {"{{ signal }}"}
+                </code>{" "}
+                for dynamic personalisation. Click variable chips in the editor
+                to insert them.
+              </p>
+            </div>
           </div>
         </CardContent>
       </Card>
 
-      {isError ? (
-        <ErrorState
-          title="Failed to load templates"
-          error={error}
-          onRetry={() => refetch()}
-        />
-      ) : isLoading ? (
+      {/* Filters */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Search templates…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-9"
+          />
+        </div>
+        <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+          <SelectTrigger className="w-[180px]">
+            <SelectValue placeholder="All categories" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All categories</SelectItem>
+            {CATEGORIES.map((c) => (
+              <SelectItem key={c.id} value={c.id}>
+                {c.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => qc.invalidateQueries({ queryKey: ["templates"] })}
+        >
+          <RefreshCw className="h-4 w-4" />
+        </Button>
+      </div>
+
+      {/* TM-2 — Template grid */}
+      {isLoading ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="h-44 w-full" />
+            <Skeleton key={i} className="h-48 w-full" />
           ))}
         </div>
       ) : filtered.length === 0 ? (
-        <EmptyState
-          icon={<LayoutTemplate className="h-6 w-6" />}
-          title="No templates found"
-          description="Create your first template to standardise outreach."
-        />
+        <Card>
+          <CardContent className="py-12">
+            <EmptyState
+              icon={<LayoutTemplate className="h-10 w-10" />}
+              title={
+                templates.length > 0
+                  ? "No templates match your filters"
+                  : "No templates yet"
+              }
+              description={
+                templates.length > 0
+                  ? "Try adjusting the search or category filter."
+                  : 'Click "New Template" to create your first one.'
+              }
+              action={
+                templates.length === 0 ? (
+                  <Button size="sm" onClick={openNew}>
+                    <Plus className="h-4 w-4" /> New Template
+                  </Button>
+                ) : undefined
+              }
+            />
+          </CardContent>
+        </Card>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {filtered.map((t) => (
-            <Card key={t.id} className="flex flex-col">
-              <CardHeader>
+            <Card key={t.id} className="flex flex-col hover:shadow-md transition-shadow">
+              <CardHeader className="pb-3">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
-                    <CardTitle className="text-base">{t.name}</CardTitle>
+                    <CardTitle className="text-base truncate">{t.name}</CardTitle>
                     <CardDescription className="mt-1">
-                      {t.category && (
-                        <Badge variant={CATEGORY_VARIANT[t.category as TemplateCategory] ?? "secondary"}>
-                          {t.category}
-                        </Badge>
-                      )}
+                      <Badge
+                        variant="outline"
+                        className={`text-xs border ${CATEGORY_COLORS[t.category] ?? CATEGORY_COLORS.general}`}
+                      >
+                        {CATEGORIES.find((c) => c.id === t.category)?.label ??
+                          t.category}
+                      </Badge>
                     </CardDescription>
                   </div>
                   <div className="flex shrink-0 gap-1">
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => openEdit(t)}
-                          aria-label="Edit template"
-                        >
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>Edit template</TooltipContent>
-                    </Tooltip>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => setDeleteTarget(t)}
-                          aria-label="Delete template"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>Delete template</TooltipContent>
-                    </Tooltip>
+                    {/* TM-4 — Preview */}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => setPreviewTarget(t)}
+                    >
+                      <Eye className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => openEdit(t)}
+                    >
+                      <Edit3 className="h-4 w-4" />
+                    </Button>
+                    {/* TM-5 — Delete */}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-destructive"
+                      onClick={() => setDeleteTarget(t)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
                   </div>
                 </div>
               </CardHeader>
-              <CardContent className="flex flex-1 flex-col gap-3">
-                <div>
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Subject</p>
-                  <p className="text-sm font-medium">{t.subject}</p>
-                </div>
+              <CardContent className="flex flex-1 flex-col gap-2">
+                {t.subjectTemplate && (
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                      Subject
+                    </p>
+                    <p className="text-sm truncate">{t.subjectTemplate}</p>
+                  </div>
+                )}
                 <div className="flex-1">
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Body preview</p>
-                  <p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">
-                    {truncate(t.body, 160)}
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    Body preview
+                  </p>
+                  <p className="mt-1 text-sm text-muted-foreground whitespace-pre-wrap">
+                    {truncate(t.bodyTemplate, 120)}
                   </p>
                 </div>
-                <p className="text-xs text-muted-foreground">Updated {formatDate(t.updatedAt)}</p>
+                <p className="text-xs text-muted-foreground">
+                  Updated {formatDate(t.updatedAt)}
+                </p>
               </CardContent>
             </Card>
           ))}
         </div>
       )}
 
-      {/* Editor dialog */}
+      {/* TM-3 — Create / Edit dialog */}
       <Dialog open={editorOpen} onOpenChange={(o) => !o && closeEditor()}>
-        <DialogClose onClose={closeEditor} />
-        <DialogHeader>
-          <DialogTitle>{form.id ? "Edit Template" : "New Template"}</DialogTitle>
-          <DialogDescription>
-            Use variables like <code>{"{{firstName}}"}</code> and <code>{"{{company}}"}</code> for personalisation.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="tpl-name">Name</Label>
-            <Input
-              id="tpl-name"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="e.g. Cold First Touch — Trigger"
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-2">
-              <Label htmlFor="tpl-cat">Category</Label>
-              <Select
-                id="tpl-cat"
-                value={form.category}
-                onChange={(e) => setForm({ ...form, category: e.target.value as TemplateCategory })}
-              >
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </Select>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              {form.id ? "Edit Template" : "New Template"}
+            </DialogTitle>
+            <DialogDescription>
+              Use{" "}
+              <code className="bg-muted px-1 rounded text-xs">
+                {"{{ variable_name }}"}
+              </code>{" "}
+              syntax for dynamic personalisation. Click chips to insert.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="tpl-name">Name *</Label>
+                <Input
+                  id="tpl-name"
+                  value={form.name}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, name: e.target.value }))
+                  }
+                  placeholder="e.g. Cold First Touch — Trigger"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Category</Label>
+                <Select
+                  value={form.category}
+                  onValueChange={(v) =>
+                    setForm((f) => ({ ...f, category: v }))
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {CATEGORIES.map((c) => (
+                      <SelectItem key={c.id} value={c.id}>
+                        {c.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label>Available variables</Label>
-              <div className="flex flex-wrap gap-1 pt-2">
-                {VARIABLES.map((v) => (
+            <div className="space-y-1.5">
+              <Label htmlFor="tpl-subject">Subject line</Label>
+              <Input
+                id="tpl-subject"
+                value={form.subjectTemplate}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, subjectTemplate: e.target.value }))
+                }
+                placeholder="e.g. {{ company }}'s close-cycle SLA — late again?"
+              />
+            </div>
+            {/* Variable chips */}
+            <div className="space-y-1.5">
+              <Label>Insert variable</Label>
+              <div className="flex flex-wrap gap-1.5">
+                {JINJA_VARIABLES.map((v) => (
                   <button
                     key={v}
                     type="button"
-                    onClick={() => setForm((prev) => ({ ...prev, body: `${prev.body}${v}` }))}
-                    className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs hover:bg-muted/70"
+                    onClick={() =>
+                      setForm((f) => ({
+                        ...f,
+                        bodyTemplate: `${f.bodyTemplate}${v}`,
+                      }))
+                    }
+                    className="rounded bg-muted px-2 py-0.5 font-mono text-xs hover:bg-muted/70 transition-colors"
                   >
                     {v}
                   </button>
                 ))}
               </div>
             </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="tpl-body">Body (Jinja2)</Label>
+              <Textarea
+                id="tpl-body"
+                value={form.bodyTemplate}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, bodyTemplate: e.target.value }))
+                }
+                placeholder={"Hi {{ first_name }},\n\nNoticed {{ company }} just {{ signal }}…\n\nBest,\n{{ sender_name }}"}
+                rows={10}
+                className="font-mono text-sm"
+              />
+            </div>
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="tpl-subject">Subject</Label>
-            <Input
-              id="tpl-subject"
-              value={form.subject}
-              onChange={(e) => setForm({ ...form, subject: e.target.value })}
-              placeholder="{{company}}'s close-cycle SLA — late again?"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="tpl-body">Body</Label>
-            <RichContentEditor
-              value={form.body}
-              onChange={(val) => setForm({ ...form, body: val })}
-              placeholder="Hi {{firstName}},…"
-              minHeight={300}
-            />
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={closeEditor}>
-            Cancel
-          </Button>
-          <Button
-            onClick={handleSave}
-            disabled={createMut.isPending || updateMut.isPending}
-          >
-            {createMut.isPending || updateMut.isPending ? "Saving…" : "Save Template"}
-          </Button>
-        </DialogFooter>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeEditor}>
+              Cancel
+            </Button>
+            <Button onClick={handleSave} disabled={isSaving || !form.name.trim()}>
+              {isSaving ? "Saving…" : form.id ? "Save Changes" : "Create Template"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
 
-      {/* Delete dialog */}
-      <Dialog open={!!deleteTarget} onOpenChange={(o) => !o && setDeleteTarget(null)}>
-        <DialogClose onClose={() => setDeleteTarget(null)} />
-        <DialogHeader>
-          <DialogTitle>Delete template?</DialogTitle>
-          <DialogDescription>
-            “{deleteTarget?.name}” will be permanently removed.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => setDeleteTarget(null)}>
-            Cancel
-          </Button>
-          <Button
-            variant="destructive"
-            onClick={() => deleteTarget && deleteMut.mutate(deleteTarget.id)}
-            disabled={deleteMut.isPending}
-          >
-            {deleteMut.isPending ? "Deleting…" : "Delete"}
-          </Button>
-        </DialogFooter>
+      {/* TM-4 — Preview dialog */}
+      <Dialog
+        open={Boolean(previewTarget)}
+        onOpenChange={(o) => !o && setPreviewTarget(null)}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Preview — {previewTarget?.name}</DialogTitle>
+            <DialogDescription>
+              Sample variables applied:{" "}
+              {Object.entries(SAMPLE_VARS)
+                .slice(0, 3)
+                .map(([k, v]) => `${k}="${v}"`)
+                .join(", ")}
+              …
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {previewTarget?.subjectTemplate && (
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground mb-1">
+                  Subject
+                </p>
+                <p className="text-sm font-medium">
+                  {applyPreview(previewTarget.subjectTemplate)}
+                </p>
+              </div>
+            )}
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground mb-1">
+                Body
+              </p>
+              <div className="rounded-md border bg-muted/30 p-3">
+                <pre className="text-sm whitespace-pre-wrap font-sans leading-relaxed">
+                  {applyPreview(previewTarget?.bodyTemplate ?? "")}
+                </pre>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPreviewTarget(null)}>
+              Close
+            </Button>
+            {previewTarget && (
+              <Button onClick={() => { setPreviewTarget(null); openEdit(previewTarget); }}>
+                <Edit3 className="h-4 w-4" /> Edit
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* TM-5 — Delete dialog */}
+      <Dialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(o) => !o && setDeleteTarget(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete template?</DialogTitle>
+            <DialogDescription>
+              "{deleteTarget?.name}" will be permanently removed and can no
+              longer be used in sequences.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => deleteTarget && deleteMut.mutate(deleteTarget.id)}
+              disabled={deleteMut.isPending}
+            >
+              {deleteMut.isPending ? "Deleting…" : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
     </div>
   );

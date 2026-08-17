@@ -6,6 +6,10 @@ anti-pattern: rule-based detection of spammy/salesy phrases.
 compliance-check: CAN-SPAM + GDPR rule checks.
 qa-score: 5-dimension LLM-based email quality audit (70 pts total).
 subject-lines-generate: AI-generated subject-line variants.
+
+FIX: All LLM-powered methods now use call_llm(config, messages) with the
+tenant's configured LlmConfig — NOT the legacy get_llm_service() ZAI stub
+that returned [LLM-STUB] placeholders when no ZAI key was set.
 """
 from __future__ import annotations
 
@@ -13,12 +17,14 @@ import asyncio
 import json
 import logging
 import re
+from types import SimpleNamespace
 from typing import Any
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import AsyncSessionLocal
 from app.models.prospect_models import Prospect
 from app.schemas.email_studio import (
     AntiPatternFinding,
@@ -35,7 +41,8 @@ from app.schemas.email_studio import (
     SubjectLinesGenerateRequest,
     SubjectLinesGenerateResponse,
 )
-from app.services.llm_service import get_llm_service, get_default_llm_config
+from app.services.llm_service import call_llm, get_default_llm_config, LlmGatewayError
+from app.models.global_llm_config import GlobalLlmConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -58,60 +65,225 @@ _ANTI_PATTERNS: list[tuple[str, str, str, str]] = [
 _REQUIRED_CAN_SPAM = ["unsubscribe", "physical address"]
 
 
-class EmailStudioService:
-    # ── Shared helpers ───────────────────────────────────────────────────────
+def _parse_llm_json(raw: Any) -> dict:
+    """Parse LLM output that may be a dict or a JSON string."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        text_val = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        try:
+            return json.loads(text_val)
+        except (json.JSONDecodeError, ValueError):
+            return {}
+    return {}
 
-    @staticmethod
-    async def _get_llm_config(db: AsyncSession, llm_config_id: str | None):
-        """Resolve an LlmConfig by ID or fall back to the tenant default."""
-        from app.models.config_models import LlmConfig
-        if llm_config_id is not None:
-            result = await db.execute(
-                select(LlmConfig).where(LlmConfig.id == llm_config_id).limit(1)
-            )
-            return result.scalar_one_or_none()
-        return await get_default_llm_config(db)
 
-    @staticmethod
-    def _parse_llm_json(raw: Any) -> dict:
-        """Parse LLM output that may be a dict or a JSON string."""
-        if isinstance(raw, dict):
-            return raw
-        if isinstance(raw, str):
-            text = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            return json.loads(text)
+async def _resolve_llm_config(db: AsyncSession, llm_config_id: str | None):
+    """
+    Resolve an LlmConfig by explicit ID, tenant default, or platform GlobalLlmConfig.
+
+    Resolution order:
+      1. Explicit llm_config_id → tenant LlmConfig row.
+      2. Tenant default via get_default_llm_config() (isDefault=True, isActive=True).
+      3. Platform-wide GlobalLlmConfig (public.global_llm_config, is_default=True,
+         is_active=True) — used when the tenant has no LlmConfig rows at all
+         (e.g. during onboarding or when tenant_slug is not yet bound).
+
+    FIX: Previously returned None when the tenant had no LlmConfig rows, causing
+    the "no_llm_config" error.  Now falls through to the platform-level config so
+    the configured LLM model (Groq, OpenAI, etc.) is always resolved.
+    """
+    from app.models.config_models import LlmConfig
+
+    if llm_config_id is not None:
+        result = await db.execute(
+            select(LlmConfig).where(LlmConfig.id == llm_config_id).limit(1)
+        )
+        cfg = result.scalar_one_or_none()
+        if cfg is not None:
+            return cfg
+
+    # Fall back to tenant default (queries tenant schema LlmConfig table)
+    tenant_cfg = await get_default_llm_config(db)
+    if tenant_cfg is not None:
+        return tenant_cfg
+
+    # Final fallback: platform-wide GlobalLlmConfig (public schema).
+    # This covers the case where the tenant has no LlmConfig rows but the
+    # platform admin has configured a global default (e.g. Groq key set via
+    # the SUPER_ADMIN LLM Models UI).
+    logger.debug("email_studio.resolve_llm_config.falling_back_to_global")
+    result = await db.execute(
+        select(GlobalLlmConfig)
+        .where(GlobalLlmConfig.is_default.is_(True))
+        .where(GlobalLlmConfig.is_active.is_(True))
+        .limit(1)
+    )
+    global_cfg = result.scalar_one_or_none()
+    if global_cfg is not None:
+        return _adapt_global_llm_config(global_cfg)
+
+    # Try any active global config as last resort
+    result = await db.execute(
+        select(GlobalLlmConfig)
+        .where(GlobalLlmConfig.is_active.is_(True))
+        .order_by(GlobalLlmConfig.created_at.asc())
+        .limit(1)
+    )
+    global_cfg = result.scalar_one_or_none()
+    if global_cfg is not None:
+        return _adapt_global_llm_config(global_cfg)
+
+    return None
+
+
+def _adapt_global_llm_config(global_cfg: GlobalLlmConfig):
+    """
+    Wrap a GlobalLlmConfig row in a SimpleNamespace that looks like a
+    LlmConfig row so call_llm() / cast_llm_config() can consume it unchanged.
+
+    Field mapping:
+      GlobalLlmConfig.provider       → LlmConfig.provider
+      GlobalLlmConfig.model_name     → LlmConfig.modelId
+      GlobalLlmConfig.base_url       → LlmConfig.baseUrl
+      GlobalLlmConfig.api_key_encrypted → resolved at call time via
+                                          IntegrationCredentialsService
+                                          (global_llm_config_id set)
+    """
+    return SimpleNamespace(
+        id=str(global_cfg.id),
+        name=global_cfg.display_name,
+        provider=global_cfg.provider,
+        modelId=global_cfg.model_name,
+        # Leave apiKey empty so call_llm falls through to
+        # _resolve_dual_path_api_key → IntegrationCredentialsService which
+        # will Fernet-decrypt api_key_encrypted from this GlobalLlmConfig row.
+        apiKey=None,
+        baseUrl=global_cfg.base_url,
+        isDefault=global_cfg.is_default,
+        isActive=global_cfg.is_active,
+        settings={},
+        modelTier="standard",
+        global_llm_config_id=global_cfg.id,
+    )
+
+
+async def _llm_generate_json(
+    config: Any,
+    messages: list[dict[str, str]],
+    *,
+    timeout_seconds: float = 60.0,
+) -> dict:
+    """
+    Call the real LLM via call_llm() and parse the response as JSON.
+
+    Returns {} on any failure — callers apply their own defaults.
+    """
+    try:
+        response = await asyncio.wait_for(
+            call_llm(config, messages),
+            timeout=timeout_seconds,
+        )
+        raw = response.content if hasattr(response, "content") else str(response)
+        return _parse_llm_json(raw)
+    except asyncio.TimeoutError:
+        logger.warning("email_studio.llm_timeout")
         return {}
+    except LlmGatewayError as exc:
+        logger.warning("email_studio.llm_gateway_error", error=str(exc))
+        return {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("email_studio.llm_unexpected_error", error=str(exc))
+        return {}
+
+
+class EmailStudioService:
+    # ── generate_email ───────────────────────────────────────────────────────
+
     async def generate_email(
         self, db: AsyncSession, body: GenerateEmailRequest
     ) -> GenerateEmailResponse:
+        """
+        Generate a cold outreach email using the tenant's configured LLM.
+
+        FIX: Previously called get_llm_service() (legacy ZAI stub → [LLM-STUB]).
+             Now resolves the tenant LlmConfig from DB and dispatches via call_llm().
+        """
+        # ── 1. Fetch prospect ────────────────────────────────────────────────
         prospect_result = await db.execute(
             select(Prospect).where(Prospect.id == body.prospectId)
         )
         prospect = prospect_result.scalar_one_or_none()
         if prospect is None:
             return GenerateEmailResponse(prospectId=body.prospectId, emails=[])
-        llm = get_llm_service()
-        prompt = (
+
+        # ── 2. Resolve LLM config ────────────────────────────────────────────
+        config = await _resolve_llm_config(db, None)
+        if config is None:
+            logger.error(
+                "email_studio.generate_email.no_llm_config",
+                prospectId=body.prospectId,
+            )
+            return GenerateEmailResponse(
+                prospectId=body.prospectId,
+                emails=[],
+            )
+
+        # ── 3. Build prompt ──────────────────────────────────────────────────
+        system_msg = (
+            "You are an expert cold-email copywriter. "
+            "Respond ONLY with a valid JSON object — no markdown fences, no preamble."
+        )
+        user_msg = (
             f"Generate a cold outreach email for prospect "
             f"{prospect.firstName} {prospect.lastName} "
             f"({prospect.title} at {prospect.company}). "
             f"Touch #{body.touchNumber}, angle: {body.angle}, "
-            f"tone: {body.tone}, max length: {body.maxLength} chars. "
-            "Return JSON: {subject, body, qaScore (0-100), qaDetails: {"
-            "spamminess, personalization, clarity}, personalisationConfidence (0-1)}"
+            f"framework: {body.framework or 'Trigger-Based'}, "
+            f"tone: {body.tone}, max length: {body.maxLength} words. "
+            "Return JSON: "
+            '{"subject": "...", "body": "...", "qaScore": 75, '
+            '"qaDetails": {"spamminess": 10, "personalization": 60, "clarity": 80}, '
+            '"personalisationConfidence": 0.65}'
         )
-        data = await llm.generate_json(prompt=prompt)
+
+        messages = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ]
+
+        # ── 4. Call LLM ──────────────────────────────────────────────────────
+        data = await _llm_generate_json(config, messages, timeout_seconds=60.0)
+
+        # ── 5. Build response ────────────────────────────────────────────────
+        subject = str(data.get("subject", "")).strip()
+        body_text = str(data.get("body", "")).strip()
+        qa_score = int(data.get("qaScore", 70))
+        qa_details = data.get("qaDetails", {})
+        personalisation_confidence = float(data.get("personalisationConfidence", 0.5))
+
+        # If LLM returned empty content surface a clear indicator rather than
+        # silently returning blank fields.
+        if not subject and not body_text:
+            logger.warning(
+                "email_studio.generate_email.empty_llm_response",
+                prospectId=body.prospectId,
+                model=getattr(config, "modelId", "unknown"),
+            )
+
         email = GeneratedEmail(
-            subject=str(data.get("subject", "")),
-            body=str(data.get("body", "")),
-            qaScore=int(data.get("qaScore", 70)),
-            qaDetails=data.get("qaDetails", {}),
-            personalisationConfidence=float(data.get("personalisationConfidence", 0.5)),
-            flagForManualReview=int(data.get("qaScore", 70)) < 70,
+            subject=subject,
+            body=body_text,
+            qaScore=qa_score,
+            qaDetails=qa_details if isinstance(qa_details, dict) else {},
+            personalisationConfidence=personalisation_confidence,
+            flagForManualReview=qa_score < 70,
         )
         return GenerateEmailResponse(
             prospectId=body.prospectId, emails=[email], selected=email
         )
+
+    # ── anti_pattern ─────────────────────────────────────────────────────────
 
     async def anti_pattern(
         self, body_text: str, subject: str | None = None
@@ -138,6 +310,8 @@ class EmailStudioService:
             score=max(0, score),
             passed=score >= 80,
         )
+
+    # ── compliance_check ─────────────────────────────────────────────────────
 
     async def compliance_check(
         self,
@@ -198,11 +372,24 @@ class EmailStudioService:
             findings=findings, isCompliant=is_compliant, score=score
         )
 
-    # ── QA Score (5-dimension, 70 pts total) ─────────────────────────────────
+    # ── qa_score ─────────────────────────────────────────────────────────────
+
     async def qa_score(self, db: AsyncSession, body: QaScoreRequest) -> QaScoreResponse:
-        """LLM-based 5-dimension email quality audit."""
-        llm = get_llm_service()
-        prompt = f"""You are an expert cold email quality auditor. Score this email on 5 dimensions:
+        """
+        LLM-based 5-dimension email quality audit.
+
+        FIX: Previously called get_llm_service() (legacy ZAI stub).
+             Now resolves tenant LlmConfig and calls call_llm().
+        """
+        config = await _resolve_llm_config(db, body.llm_config_id)
+        if config is None:
+            return QaScoreResponse(success=False, error="No LLM model configured for this tenant.")
+
+        system_msg = (
+            "You are an expert cold email quality auditor. "
+            "Respond ONLY with a valid JSON object — no markdown fences, no preamble."
+        )
+        user_msg = f"""Score this email on 5 dimensions:
 
 Subject: {body.subject or 'N/A'}
 Body:
@@ -227,11 +414,17 @@ Return JSON:
   "flags": ["list of quality flags like 'no_social_proof', 'too_long', 'generic_opener'"],
   "suggested_rewrite": "A rewritten version of the email that scores higher, or null if score is already good"
 }}"""
-        try:
-            raw = await asyncio.wait_for(llm.generate_json(prompt=prompt), timeout=60)
-            if isinstance(raw, str):
-                raw = self._parse_llm_json(raw)
 
+        messages = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ]
+
+        raw = await _llm_generate_json(config, messages, timeout_seconds=60.0)
+        if not raw:
+            return QaScoreResponse(success=False, error="LLM returned an empty or unparseable response.")
+
+        try:
             dimensions = [QaScoreDimension(**d) for d in raw.get("dimensions", [])]
             total = sum(d.score for d in dimensions)
             return QaScoreResponse(
@@ -242,17 +435,32 @@ Return JSON:
                 flags=raw.get("flags", []),
                 suggested_rewrite=raw.get("suggested_rewrite"),
             )
-        except Exception as e:
-            logger.error("QA score failed: %s", e)
-            return QaScoreResponse(success=False, error=str(e))
+        except Exception as exc:
+            logger.error("qa_score.parse_failed", error=str(exc))
+            return QaScoreResponse(success=False, error=str(exc))
 
-    # ── Subject Lines AI Generation ───────────────────────────────────────────
+    # ── generate_subject_lines ────────────────────────────────────────────────
+
     async def generate_subject_lines(
         self, db: AsyncSession, body: SubjectLinesGenerateRequest
     ) -> SubjectLinesGenerateResponse:
-        """AI-generate subject-line variants for an email body."""
-        llm = get_llm_service()
-        prompt = f"""Generate {body.count} compelling cold email subject line variants for this email body:
+        """
+        AI-generate subject-line variants for an email body.
+
+        FIX: Previously called get_llm_service() (legacy ZAI stub).
+             Now resolves tenant LlmConfig and calls call_llm().
+        """
+        config = await _resolve_llm_config(db, body.llm_config_id)
+        if config is None:
+            return SubjectLinesGenerateResponse(
+                success=False, error="No LLM model configured for this tenant."
+            )
+
+        system_msg = (
+            "You are an expert cold email subject-line writer. "
+            "Respond ONLY with a valid JSON object — no markdown fences, no preamble."
+        )
+        user_msg = f"""Generate {body.count} compelling cold email subject line variants for this email body:
 
 {body.email_body}
 
@@ -269,12 +477,21 @@ Return JSON:
     ...
   ]
 }}"""
+
+        messages = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ]
+
+        raw = await _llm_generate_json(config, messages, timeout_seconds=60.0)
+        if not raw:
+            return SubjectLinesGenerateResponse(
+                success=False, error="LLM returned an empty or unparseable response."
+            )
+
         try:
-            raw = await asyncio.wait_for(llm.generate_json(prompt=prompt), timeout=60)
-            if isinstance(raw, str):
-                raw = self._parse_llm_json(raw)
             variants = [SubjectLineVariant(**v) for v in raw.get("variants", [])]
             return SubjectLinesGenerateResponse(success=True, variants=variants)
-        except Exception as e:
-            logger.error("Subject line generation failed: %s", e)
-            return SubjectLinesGenerateResponse(success=False, error=str(e))
+        except Exception as exc:
+            logger.error("subject_lines.parse_failed", error=str(exc))
+            return SubjectLinesGenerateResponse(success=False, error=str(exc))

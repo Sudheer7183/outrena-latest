@@ -1,600 +1,734 @@
-/**
- * SequencesPage.tsx — OUTRENA Phase 4 (Task 3-C)
- *
- * 7-touch sequence cadence editor. Horizontal touch timeline + expandable
- * editor with subject-line variants, schedule, send-now, save, and CSV export.
- */
-import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState, useCallback } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import {
-  CalendarClock,
-  Download,
-  ListChecks,
-  Mail,
-  Plus,
-  Save,
-  Send,
-} from "lucide-react";
-import { toast } from "sonner";
+  Layers, Loader2, CheckCircle2, Copy, FileDown, FileText,
+  ChevronDown, ChevronUp, Save, Send, AlertCircle,
+} from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
+import { Badge } from '@/components/ui/badge';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { toast } from 'sonner';
+import { http } from '@/services/apiClient';
 
-import { http } from "@/services/apiClient";
-import { cn, formatDate, formatDateTime } from "@/lib/utils";
-import type { EmailStatus, Sequence, TouchAngle } from "@/types/common";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
-  Dialog,
-  DialogClose,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { PageHeader } from "@/components/ui/page-header";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { NativeSelect as Select } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Textarea } from "@/components/ui/textarea";
+// ─── Types ───────────────────────────────────────────────────────────────────
 
-/* ── Types & mocks ──────────────────────────────────────────────────────── */
-
-interface CadenceSpec {
-  touch: number;
-  day: number;
-  angle: TouchAngle;
-  label: string;
-}
-interface SubjectLine {
-  id: string;
-  text: string;
-  qaScore: number | null;
-}
-
-interface CampaignLite {
+interface Campaign {
   id: string;
   name: string;
+  llmConfigId?: string | null;
+  icpProfileId?: string | null;
+  framework?: string | null;
+  senderRole?: string | null;
+  senderCompany?: string | null;
+  senderOffer?: string | null;
+  proofMetric?: string | null;
 }
-interface ProspectLite {
+
+interface Prospect {
   id: string;
-  name: string;
-  company: string | null;
+  firstName: string;
+  lastName: string;
+  title?: string | null;
+  company?: string | null;
+  seniority?: string;
+  signals?: string | null;
+  icpProfileId?: string | null;
 }
 
-const CADENCE: CadenceSpec[] = [
-  { touch: 1, day: 1, angle: "FirstTouch", label: "First touch" },
-  { touch: 2, day: 4, angle: "NewEvidence", label: "New evidence" },
-  { touch: 3, day: 9, angle: "DifferentPain", label: "Different pain" },
-  { touch: 4, day: 16, angle: "IndustryInsight", label: "Industry insight" },
-  { touch: 5, day: 25, angle: "DirectQuestion", label: "Direct question" },
-  { touch: 6, day: 35, angle: "Breakup", label: "Breakup" },
-  { touch: 7, day: 49, angle: "IndustryInsight", label: "Final value touch" },
-];
+interface Sequence {
+  id: string;
+  campaignId: string;
+  prospectId: string;
+  touchNumber: number;
+  sendDay: number;
+  angle: string;
+  framework: string;
+  channel: string;
+  subjectLine: string | null;
+  bodyCopy: string | null;
+  qaScore?: number | null;
+  status: string;
+  personalisationConfidence?: number | null;
+  flagForManualReview?: boolean;
+  sentAt?: string | null;
+}
 
-const STATUS_VARIANT: Record<EmailStatus, "secondary" | "success" | "warning" | "destructive" | "outline" | "default"> = {
-  Draft: "secondary",
-  QaFailed: "destructive",
-  QaPassed: "success",
-  Scheduled: "warning",
-  Sent: "success",
-  Replied: "default",
-  Bounced: "destructive",
-  Failed: "destructive",
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const WORD_LIMITS: Record<string, number> = {
+  FirstTouch: 150, NewEvidence: 120, DifferentPain: 120,
+  IndustryInsight: 120, DirectQuestion: 80, Breakup: 60,
 };
 
-const MOCK_CAMPAIGNS: CampaignLite[] = [
-  { id: "c1", name: "Q1 Outbound — Fintech Ops" },
-  { id: "c2", name: "Cybersec SOC Automation" },
+const TOUCH_INFO = [
+  { touch: 1, day: 'Day 1',  angle: 'First Touch',       words: 150, color: 'border-blue-200',    desc: 'The opener. References a specific signal or trigger event. Establishes relevance immediately — no generic intros.' },
+  { touch: 2, day: 'Day 3',  angle: 'New Evidence',      words: 120, color: 'border-cyan-200',    desc: 'Follows up with a new data point or case study. Introduces social proof or a metric the prospect cares about.' },
+  { touch: 3, day: 'Day 7',  angle: 'Different Pain',    words: 120, color: 'border-teal-200',    desc: 'Pivots to address a different pain point. Each email must work standalone — no "as I mentioned" references.' },
+  { touch: 4, day: 'Day 12', angle: 'Industry Insight',  words: 120, color: 'border-emerald-200', desc: 'Shares a relevant industry trend or benchmark. Creates FOMO about what competitors are doing differently.' },
+  { touch: 5, day: 'Day 18', angle: 'Direct Question',   words: 80,  color: 'border-amber-200',   desc: 'Short, direct question that demands a response. Example: "Is this still a priority for Q3?" Max 80 words.' },
+  { touch: 6, day: 'Day 24', angle: 'Breakup',           words: 60,  color: 'border-rose-200',    desc: 'The "breakup" email. Polite sign-off that creates urgency. Often gets the highest reply rate. Max 60 words.' },
+  { touch: 7, day: 'Day 30', angle: 'Breakup (LinkedIn)', words: 60, color: 'border-pink-200',    desc: 'LinkedIn follow-up breakup. Same tone, adapted for the LinkedIn channel.' },
 ];
 
-const MOCK_PROSPECTS: ProspectLite[] = [
-  { id: "p1", name: "Jordan Avery", company: "Northbeam" },
-  { id: "p2", name: "Priya Shah", company: "Helix Pay" },
-  { id: "p3", name: "Marcus Chen", company: "Loop Capital" },
-];
+const STATUS_COLORS: Record<string, string> = {
+  Draft: 'bg-muted text-muted-foreground',
+  QaPassed: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+  Sent: 'bg-blue-100 text-blue-700 border-blue-200',
+  Scheduled: 'bg-amber-100 text-amber-700 border-amber-200',
+};
 
-const MOCK_SUBJECTS: SubjectLine[] = [
-  { id: "s1", text: "Northbeam's close-cycle SLA — 12 hours late?", qaScore: 0.84 },
-  { id: "s2", text: "Reconciliation eating your close cycle?", qaScore: 0.71 },
-];
+// ─── Helper ───────────────────────────────────────────────────────────────────
 
-function mockSequence(campaignId: string, prospectId: string): Sequence[] {
-  const statuses: EmailStatus[] = [
-    "Sent",
-    "Sent",
-    "Sent",
-    "Scheduled",
-    "QaPassed",
-    "QaPassed",
-    "Draft",
-  ];
-  return CADENCE.map((c, i) => ({
-    id: `seq_${campaignId}_${prospectId}_${c.touch}`,
-    campaignId,
-    prospectId,
-    touchNumber: c.touch,
-    sendDay: c.day,
-    channel: "email",
-    angle: c.angle,
-    framework: i % 2 === 0 ? "trigger" : "value",
-    subjectLine:
-      c.touch === 1
-        ? "Northbeam's close-cycle SLA — 12 hours late?"
-        : c.touch === 2
-          ? "Reconciliation eating your close cycle?"
-          : c.touch === 3
-            ? "A different angle on Northbeam's ops load"
-            : c.touch === 4
-              ? "Industry insight: fintech close-cycle benchmarks"
-              : c.touch === 5
-                ? "Quick question on your reconciliation stack"
-                : c.touch === 6
-                  ? "Closing the loop — should I break up with you?"
-                  : "Last note: 60% faster close, ROI breakdown",
-    bodyCopy: `Hi {{firstName}},\n\nTouch ${c.touch} (${c.angle}). Body copy placeholder for ${c.label}.`,
-    qaScore: c.touch <= 3 ? 0.84 : c.touch === 4 ? 0.78 : 0.72,
-    qaDetails: "[]",
-    personalisationConfidence: 0.74,
-    flagForManualReview: c.touch === 6,
-    status: statuses[i],
-    scheduledFor: c.touch === 4 ? "2025-01-22T15:00:00Z" : null,
-    sentAt: c.touch <= 3 ? `2025-01-${String(c.day).padStart(2, "0")}T15:00:00Z` : null,
-    createdAt: "2024-12-02T10:00:00Z",
-    updatedAt: "2025-01-08T14:23:00Z",
-  }));
+function normalise<T>(data: unknown): T[] {
+  if (!data) return [];
+  if (Array.isArray(data)) return data as T[];
+  const p = data as { items?: T[] };
+  return Array.isArray(p.items) ? p.items : [];
 }
 
-/* ── Page ───────────────────────────────────────────────────────────────── */
+function parseSignals(signals: string | null | undefined): unknown[] {
+  try { return signals ? (JSON.parse(signals) as unknown[]) : []; }
+  catch { return []; }
+}
+
+function wordCount(text: string | null | undefined): number {
+  return (text ?? '').split(/\s+/).filter(Boolean).length;
+}
+
+// ─── Inline Tooltip Button ────────────────────────────────────────────────────
+
+function TBtn({
+  children, tooltip, disabled, onClick, size = 'sm', variant = 'outline', className = '',
+}: {
+  children: React.ReactNode; tooltip: string; disabled?: boolean;
+  onClick?: () => void; size?: 'sm' | 'default';
+  variant?: 'outline' | 'default' | 'ghost'; className?: string;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button size={size} variant={variant} disabled={disabled} onClick={onClick} className={className}>
+          {children}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{tooltip}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 export function SequencesPage() {
-  const qc = useQueryClient();
-
-  const campaignsQ = useQuery({
-    queryKey: ["campaigns-lite"],
-    queryFn: () => http.get<CampaignLite[]>("/api/v1/campaigns"),
-    retry: false,
+  // ── Server state ────────────────────────────────────────────────────────
+  const { data: campaignsRaw, isLoading: cLoading } = useQuery({
+    queryKey: ['campaigns', { page: 1, pageSize: 100 }],
+    queryFn: () => http.get<unknown>('/api/v1/campaigns', { page: 1, page_size: 100 }),
+    staleTime: 30_000,
   });
-  const campaignsList = Array.isArray(campaignsQ.data) && campaignsQ.data.length > 0 ? campaignsQ.data : MOCK_CAMPAIGNS;
-
-  const prospectsQ = useQuery({
-    queryKey: ["prospects-lite"],
-    queryFn: () => http.get<ProspectLite[]>("/api/v1/prospects"),
-    retry: false,
+  const { data: prospectsRaw } = useQuery({
+    queryKey: ['prospects', { page: 1, pageSize: 200 }],
+    queryFn: () => http.get<unknown>('/api/v1/prospects', { page: 1, page_size: 200 }),
+    staleTime: 30_000,
   });
-  const prospectsList = Array.isArray(prospectsQ.data) && prospectsQ.data.length > 0 ? prospectsQ.data : MOCK_PROSPECTS;
 
-  const [campaignId, setCampaignId] = useState(MOCK_CAMPAIGNS[0].id);
-  const [prospectId, setProspectId] = useState(MOCK_PROSPECTS[0].id);
-  const [selectedTouch, setSelectedTouch] = useState<number | null>(null);
-  const [scheduleOpen, setScheduleOpen] = useState(false);
-  const [scheduleAt, setScheduleAt] = useState("");
-  const [drafts, setDrafts] = useState<Record<string, { subjectLine: string; bodyCopy: string }>>({});
-  const [subjectVariants, setSubjectVariants] = useState<Record<string, SubjectLine[]>>({});
+  const campaigns  = normalise<Campaign>(campaignsRaw);
+  const prospects  = normalise<Prospect>(prospectsRaw);
 
-  const { data: apiSequences, isLoading } = useQuery({
-    queryKey: ["sequences", campaignId, prospectId],
-    queryFn: () => http.get<Sequence[]>("/api/v1/sequences", { campaignId, prospectId }),
-    retry: false,
-  });
-  const sequences = apiSequences ?? mockSequence(campaignId, prospectId);
+  // ── UI state ────────────────────────────────────────────────────────────
+  const [selectedCampaignId, setSelectedCampaignId] = useState('');
+  const [selectedProspectId, setSelectedProspectId] = useState('');
+  const [framework, setFramework]                   = useState('trigger');
+  const [generating, setGenerating]                 = useState(false);
+  const [sequences, setSequences]                   = useState<Sequence[]>([]);
+  const [savingId, setSavingId]                     = useState<string | null>(null);
+  const [sendingId, setSendingId]                   = useState<string | null>(null);
+  const [showExplain, setShowExplain]               = useState(false);
+  const [exportingCsv, setExportingCsv]             = useState(false);
 
-  const cadence = useQuery({
-    queryKey: ["cadence"],
-    queryFn: () => http.get<CadenceSpec[]>("/api/v1/sequences/cadence"),
-    retry: false,
-  });
-  const cadenceSpec = cadence.data ?? CADENCE;
+  // ── Derived ─────────────────────────────────────────────────────────────
+  const selectedCampaign = campaigns.find((c) => c.id === selectedCampaignId) ?? null;
+  const selectedProspect = prospects.find((p) => p.id === selectedProspectId) ?? null;
 
-  const selected = sequences.find((s) => s.touchNumber === selectedTouch) ?? null;
-  const selectedDraft = selected
-    ? drafts[selected.id] ?? {
-        subjectLine: selected.subjectLine ?? "",
-        bodyCopy: selected.bodyCopy ?? "",
+  // ── Handlers ─────────────────────────────────────────────────────────────
+
+  const handleGenerate = useCallback(async () => {
+    if (!selectedCampaignId || !selectedProspectId) {
+      toast.error('Select a campaign and prospect first');
+      return;
+    }
+    setGenerating(true);
+    setSequences([]);
+    try {
+      // Step 1: ensure prospect is linked to campaign (backend requires this)
+      await http.post('/api/v1/campaigns/campaign-prospects', {
+        campaignId:  selectedCampaignId,
+        prospectIds: [selectedProspectId],
+        action:      'add',
+      }).catch(() => {
+        // Ignore — prospect may already be linked
+      });
+
+      // Step 2: trigger generation
+      // Backend returns { message, created, restamped, prospects } — not the sequences themselves
+      // It generates and stores in DB; we must fetch separately
+      await http.post(
+        `/api/v1/campaigns/${selectedCampaignId}/generate-sequences`,
+        {
+          prospectId:    selectedProspectId,
+          framework,
+          llmConfigId:   selectedCampaign?.llmConfigId ?? null,
+          senderRole:    selectedCampaign?.senderRole,
+          senderCompany: selectedCampaign?.senderCompany,
+          senderOffer:   selectedCampaign?.senderOffer,
+          proofMetric:   selectedCampaign?.proofMetric,
+          seniority:     selectedProspect?.seniority,
+          signals:       parseSignals(selectedProspect?.signals),
+        },
+      );
+
+      // Step 3: fetch the sequences from DB (generation stores, doesn't return them)
+      // QUERY-PARAM CASING FIX: the backend's GET /api/v1/sequences route
+      // declares `campaign_id` / `prospect_id` (snake_case, no alias) —
+      // sending camelCase here was silently ignored by FastAPI, so this
+      // call was returning ALL sequences (unfiltered) instead of just this
+      // prospect's 7 touches. That's why generating for one prospect
+      // appeared to show sequences belonging to many other prospects too.
+      const fetched = await http.get<unknown>(
+        '/api/v1/sequences',
+        { campaign_id: selectedCampaignId, prospect_id: selectedProspectId, limit: 50 },
+      );
+      const seqs: Sequence[] = Array.isArray(fetched)
+        ? fetched
+        : ((fetched as { items?: Sequence[] }).items ?? []);
+
+      if (seqs.length === 0) {
+        // Sequences may already exist — retry with the campaign filter
+        // only (still correctly snake_case), then filter to this prospect
+        // CLIENT-SIDE ourselves. Previously, if that client-side filter
+        // also came back empty, this fell back to showing the ENTIRE
+        // campaign's unfiltered sequences — which is exactly how
+        // generating for one prospect could appear to show touches
+        // belonging to several other prospects. That unsafe fallback is
+        // removed: if we truly can't find this prospect's sequences, we
+        // show nothing rather than showing someone else's.
+        const all = await http.get<unknown>(
+          '/api/v1/sequences',
+          { campaign_id: selectedCampaignId, limit: 50 },
+        );
+        const allSeqs: Sequence[] = Array.isArray(all)
+          ? all
+          : ((all as { items?: Sequence[] }).items ?? []);
+        const forProspect = allSeqs.filter((s) => s.prospectId === selectedProspectId);
+        setSequences(forProspect);
+        toast.success(
+          forProspect.length > 0
+            ? `${forProspect.length} sequences loaded`
+            : 'Sequences generated — check back shortly'
+        );
+      } else {
+        setSequences(seqs);
+        toast.success(`${seqs.length}-touch sequence generated`);
       }
-    : null;
-  const selectedVariants = selected ? subjectVariants[selected.id] ?? MOCK_SUBJECTS : [];
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Generation failed');
+    } finally { setGenerating(false); }
+  }, [selectedCampaignId, selectedProspectId, framework, selectedCampaign, selectedProspect]);
 
-  const saveMut = useMutation({
-    mutationFn: ({ id, body }: { id: string; body: { subjectLine: string; bodyCopy: string } }) =>
-      http.put<Sequence>(`/api/v1/sequences/${id}`, body),
-    onSuccess: () => {
-      toast.success("Sequence saved");
-      qc.invalidateQueries({ queryKey: ["sequences"] });
-    },
-    onError: () => toast.error("Failed to save sequence"),
-  });
+  const handleSave = useCallback(async (seq: Sequence) => {
+    setSavingId(seq.id);
+    try {
+      await http.put(`/api/v1/sequences/${seq.id}`, {
+        subjectLine: seq.subjectLine,
+        bodyCopy:    seq.bodyCopy,
+        status:      seq.status === 'Draft' ? 'Draft' : seq.status,
+      });
+      toast.success(`Touch ${seq.touchNumber} saved`);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Save failed');
+    } finally { setSavingId(null); }
+  }, []);
 
-  const scheduleMut = useMutation({
-    mutationFn: ({ id, sendAt }: { id: string; sendAt: string }) =>
-      http.post<Sequence>(`/api/v1/sequences/${id}/scheduled-send`, { sendAt }),
-    onSuccess: () => {
-      toast.success("Sequence scheduled");
-      setScheduleOpen(false);
-      qc.invalidateQueries({ queryKey: ["sequences"] });
-    },
-    onError: () => toast.error("Failed to schedule sequence"),
-  });
-
-  const sendNowMut = useMutation({
-    mutationFn: (id: string) => http.post<{ message: string }>(`/api/v1/sequences/${id}/send-email`),
-    onSuccess: () => {
-      toast.success("Email sent");
-      qc.invalidateQueries({ queryKey: ["sequences"] });
-    },
-    onError: () => toast.error("Failed to send email"),
-  });
-
-  const subjectMut = useMutation({
-    mutationFn: (id: string) =>
-      http.post<SubjectLine[]>(`/api/v1/sequences/${id}/subject-lines`, {}),
-    onSuccess: (data) => {
-      qc.invalidateQueries({ queryKey: ["sequences"] });
-      if (selected) {
-        setSubjectVariants((prev) => ({ ...prev, [selected.id]: data }));
-      }
-      toast.success(`Generated ${data.length} subject-line variants`);
-    },
-    onError: () => {
-      if (selected) {
-        setSubjectVariants((prev) => ({ ...prev, [selected.id]: MOCK_SUBJECTS }));
-      }
-      toast.warning("Subject-line API unavailable — showing mock variants");
-    },
-  });
-
-  function exportCsv() {
-    const rows = [
-      ["touchNumber", "sendDay", "prospect", "subjectLine", "status", "sentAt"],
-      ...sequences.map((s) => [
-        String(s.touchNumber),
-        String(s.sendDay),
-        MOCK_PROSPECTS.find((p) => p.id === s.prospectId)?.name ?? s.prospectId,
-        s.subjectLine ?? "",
-        s.status,
-        s.sentAt ?? "",
-      ]),
-    ];
-    const csv = rows
-      .map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
-      .join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `sequence-${campaignId}-${prospectId}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast.success("Cadence exported");
-  }
-
-  const summary = useMemo(() => {
-    const byStatus = sequences.reduce<Record<string, number>>((acc, s) => {
-      acc[s.status] = (acc[s.status] ?? 0) + 1;
-      return acc;
-    }, {});
-    return byStatus;
+  const handleApprove = useCallback(async (seq: Sequence, index: number) => {
+    const wc = wordCount(seq.bodyCopy);
+    const limit = WORD_LIMITS[seq.angle] ?? 150;
+    if (wc > limit) {
+      toast.error(`Touch ${seq.touchNumber} exceeds ${limit}-word limit (${wc} words)`);
+      return;
+    }
+    setSavingId(seq.id);
+    try {
+      await http.put(`/api/v1/sequences/${seq.id}`, {
+        subjectLine: seq.subjectLine,
+        bodyCopy:    seq.bodyCopy,
+        status:      'QaPassed',
+      });
+      const updated = [...sequences];
+      updated[index] = { ...updated[index], status: 'QaPassed' };
+      setSequences(updated);
+      toast.success(`Touch ${seq.touchNumber} approved`);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Approve failed');
+    } finally { setSavingId(null); }
   }, [sequences]);
+
+  const handleApproveAll = useCallback(async () => {
+    for (let i = 0; i < sequences.length; i++) {
+      const seq = sequences[i];
+      const wc = wordCount(seq.bodyCopy);
+      const limit = WORD_LIMITS[seq.angle] ?? 150;
+      if (wc > limit) {
+        toast.error(`Touch ${seq.touchNumber} exceeds ${limit}-word limit — fix before approving all`);
+        return;
+      }
+    }
+    setSavingId('all');
+    try {
+      await Promise.all(
+        sequences.map((seq) =>
+          http.put(`/api/v1/sequences/${seq.id}`, {
+            subjectLine: seq.subjectLine,
+            bodyCopy:    seq.bodyCopy,
+            status:      'QaPassed',
+          })
+        )
+      );
+      setSequences(sequences.map((s) => ({ ...s, status: 'QaPassed' })));
+      toast.success('All touches approved');
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Approve all failed');
+    } finally { setSavingId(null); }
+  }, [sequences]);
+
+  const handleSendNow = useCallback(async (seq: Sequence, index: number) => {
+    setSendingId(seq.id);
+    try {
+      await http.post(`/api/v1/sequences/${seq.id}/send-email`, {});
+      const updated = [...sequences];
+      updated[index] = { ...updated[index], status: 'Sent' };
+      setSequences(updated);
+      toast.success(`Touch ${seq.touchNumber} sent`);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Send failed');
+    } finally { setSendingId(null); }
+  }, [sequences]);
+
+  const handleExportCsv = useCallback(async () => {
+    if (!selectedCampaignId) { toast.error('Select a campaign first'); return; }
+    setExportingCsv(true);
+    try {
+      const rows = sequences.length > 0
+        ? sequences
+        // QUERY-PARAM CASING FIX: backend export_sequences only declares
+        // `campaign_id` (snake_case, no alias) and doesn't support a
+        // prospect filter at all — the fallback path below only ever
+        // triggers when `sequences` (already correctly prospect-scoped
+        // in memory) is empty, so exporting the whole campaign here is
+        // an acceptable fallback rather than a silent scoping bug.
+        : await http.get<Sequence[]>('/api/v1/sequences/export', {
+            campaign_id: selectedCampaignId,
+          });
+      const data = Array.isArray(rows) ? rows : sequences;
+      const headers = ['touchNumber', 'sendDay', 'angle', 'channel', 'subjectLine', 'bodyCopy', 'qaScore', 'status', 'sentAt'];
+      const csv = [
+        headers.join(','),
+        ...data.map((s) =>
+          headers.map((h) => {
+            const val = String((s as unknown as Record<string, unknown>)[h] ?? '');
+            return val.includes(',') ? `"${val.replace(/"/g, '""')}"` : val;
+          }).join(',')
+        ),
+      ].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = `sequences-${selectedCampaignId}-${new Date().toISOString().split('T')[0]}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success('CSV exported');
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Export failed');
+    } finally { setExportingCsv(false); }
+  }, [sequences, selectedCampaignId, selectedProspectId]);
+
+  // ── Render ───────────────────────────────────────────────────────────────
+
+  if (cLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="Sequences"
-        description="7-touch cadence editor with subject-line variants, scheduling, and MailBridge sending."
-        actions={
-          <Button variant="outline" size="sm" onClick={exportCsv}>
-            <Download className="h-4 w-4" /> Export Cadence
-          </Button>
-        }
-      />
+      {/* Header */}
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h3 className="text-lg font-semibold">Sequence Builder</h3>
+          <p className="text-sm text-muted-foreground">
+            Generate 7-touch email sequences with escalating cadence
+          </p>
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          <TBtn
+            variant="outline"
+            tooltip="Export sequences to CSV"
+            onClick={handleExportCsv}
+            disabled={exportingCsv || (!selectedCampaignId && sequences.length === 0)}
+          >
+            {exportingCsv
+              ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              : <FileDown className="h-4 w-4 mr-2" />
+            }
+            Export CSV
+          </TBtn>
+          <TBtn
+            variant="outline"
+            tooltip="How the 7-touch cadence works"
+            onClick={() => setShowExplain((v) => !v)}
+          >
+            <FileText className="h-4 w-4 mr-2" />
+            How It Works
+            {showExplain ? <ChevronUp className="h-3 w-3 ml-1" /> : <ChevronDown className="h-3 w-3 ml-1" />}
+          </TBtn>
+        </div>
+      </div>
 
+      {/* Configuration Card */}
       <Card>
         <CardContent className="p-4">
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
             <div className="space-y-2">
-              <Label htmlFor="seq-campaign">Campaign</Label>
+              <Label>Campaign</Label>
               <Select
-                id="seq-campaign"
-                value={campaignId}
-                onChange={(e) => {
-                  setCampaignId(e.target.value);
-                  setSelectedTouch(null);
-                }}
+                value={selectedCampaignId}
+                onValueChange={(v) => { setSelectedCampaignId(v); setSequences([]); }}
               >
-                {campaignsList.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
+                <SelectTrigger><SelectValue placeholder="Select campaign..." /></SelectTrigger>
+                <SelectContent className="max-h-64">
+                  {campaigns.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {campaigns.length === 0 && (
+                <p className="text-xs text-amber-600">Create a campaign first</p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label>Prospect</Label>
+              <Select value={selectedProspectId} onValueChange={setSelectedProspectId}>
+                <SelectTrigger><SelectValue placeholder="Select prospect..." /></SelectTrigger>
+                <SelectContent className="max-h-64">
+                  {prospects.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.firstName} {p.lastName} — {p.company || 'No company'}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
               </Select>
             </div>
+
             <div className="space-y-2">
-              <Label htmlFor="seq-prospect">Prospect</Label>
-              <Select
-                id="seq-prospect"
-                value={prospectId}
-                onChange={(e) => {
-                  setProspectId(e.target.value);
-                  setSelectedTouch(null);
-                }}
-              >
-                {prospectsList.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} — {p.company}
-                  </option>
-                ))}
+              <Label>Framework</Label>
+              <Select value={framework} onValueChange={setFramework}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="trigger">Trigger-Based</SelectItem>
+                  <SelectItem value="problem">Problem-First</SelectItem>
+                  <SelectItem value="value">Value-First</SelectItem>
+                  <SelectItem value="mutual">Mutual Connection</SelectItem>
+                  <SelectItem value="direct">Direct Ask</SelectItem>
+                </SelectContent>
               </Select>
             </div>
+
+            <TBtn
+              size="default"
+              variant="default"
+              tooltip="Generate a 7-touch email sequence"
+              onClick={handleGenerate}
+              disabled={generating || !selectedCampaignId || !selectedProspectId}
+            >
+              {generating
+                ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating...</>
+                : <><Layers className="h-4 w-4 mr-2" />Generate 7-Touch Sequence</>
+              }
+            </TBtn>
           </div>
-          {Object.keys(summary).length > 0 && (
-            <div className="mt-4 flex flex-wrap gap-2">
-              {Object.entries(summary).map(([status, count]) => (
-                <Badge key={status} variant={STATUS_VARIANT[status as EmailStatus] ?? "secondary"}>
-                  {status}: {count}
-                </Badge>
-              ))}
-            </div>
-          )}
         </CardContent>
       </Card>
 
-      {isLoading ? (
-        <div className="space-y-2">
-          {Array.from({ length: 2 }).map((_, i) => (
-            <Skeleton key={i} className="h-32 w-full" />
-          ))}
-        </div>
-      ) : sequences.length === 0 ? (
-        <EmptyState
-          icon={<ListChecks className="h-6 w-6" />}
-          title="No sequences for this campaign + prospect"
-          description="Pick another prospect or generate a cadence."
-        />
-      ) : (
-        <>
-          {/* Horizontal timeline */}
-          <ScrollArea maxHeightClass="max-h-none">
-            <div className="flex gap-3 overflow-x-auto pb-2">
-              {cadenceSpec.map((c) => {
-                const seq = sequences.find((s) => s.touchNumber === c.touch);
-                const isSelected = selectedTouch === c.touch;
-                return (
-                  <button
-                    key={c.touch}
-                    type="button"
-                    onClick={() => setSelectedTouch(c.touch)}
-                    className={cn(
-                      "w-56 shrink-0 rounded-lg border p-3 text-left transition-colors hover:bg-accent",
-                      isSelected ? "border-primary bg-accent/50 ring-1 ring-primary" : "bg-card",
-                    )}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold uppercase text-muted-foreground">
-                        Touch {c.touch}
-                      </span>
-                      {seq && (
-                        <Badge variant={STATUS_VARIANT[seq.status] ?? "secondary"} className="text-[10px]">
+      {/* Sequence Timeline */}
+      {sequences.length > 0 && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h4 className="font-medium text-sm">
+              Sequence Timeline
+              <span className="ml-2 text-xs text-muted-foreground font-normal">
+                ({sequences.filter((s) => s.status === 'QaPassed').length}/{sequences.length} approved)
+              </span>
+            </h4>
+            <TBtn
+              size="sm"
+              variant="outline"
+              tooltip="Approve all touches (checks word limits)"
+              onClick={handleApproveAll}
+              disabled={savingId === 'all'}
+            >
+              {savingId === 'all'
+                ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                : <CheckCircle2 className="h-3 w-3 mr-1" />
+              }
+              Approve All
+            </TBtn>
+          </div>
+
+          <div className="relative">
+            {/* Timeline spine */}
+            <div className="absolute left-6 top-0 bottom-0 w-px bg-border" />
+
+            {sequences.map((seq, i) => {
+              const wc    = wordCount(seq.bodyCopy);
+              const limit = WORD_LIMITS[seq.angle] ?? 150;
+              const over  = wc > limit;
+              const isSaving  = savingId === seq.id;
+              const isSending = sendingId === seq.id;
+
+              return (
+                <div key={seq.id} className="relative pl-14 pb-6">
+                  {/* Touch number bubble */}
+                  <div className={`absolute left-4 h-5 w-5 rounded-full flex items-center justify-center text-xs font-bold ${
+                    seq.status === 'QaPassed'
+                      ? 'bg-emerald-500 text-white'
+                      : seq.status === 'Sent'
+                        ? 'bg-blue-500 text-white'
+                        : 'bg-primary text-primary-foreground'
+                  }`}>
+                    {seq.touchNumber}
+                  </div>
+
+                  <Card className={seq.status === 'QaPassed' ? 'border-emerald-200' : ''}>
+                    <CardHeader className="pb-2">
+                      <div className="flex items-start justify-between gap-2 flex-wrap">
+                        <div>
+                          <CardTitle className="text-sm flex items-center gap-2">
+                            Touch {seq.touchNumber}: {seq.angle.replace(/([A-Z])/g, ' $1').trim()}
+                            {seq.channel === 'LINKEDIN' && (
+                              <Badge variant="outline" className="text-[10px] bg-cyan-50 text-cyan-700 border-cyan-200">
+                                LinkedIn
+                              </Badge>
+                            )}
+                            {seq.channel === 'EMAIL' && (
+                              <Badge variant="outline" className="text-[10px] bg-blue-50 text-blue-700 border-blue-200">
+                                Email
+                              </Badge>
+                            )}
+                            {/* QA Score badge (SQ-1) */}
+                            {seq.qaScore != null && (
+                              <Badge
+                                variant="outline"
+                                className={`text-[10px] ${
+                                  seq.qaScore >= 80
+                                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                    : seq.qaScore >= 60
+                                      ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                      : 'bg-red-50 text-red-700 border-red-200'
+                                }`}
+                              >
+                                QA {seq.qaScore}/100
+                              </Badge>
+                            )}
+                          </CardTitle>
+                          <CardDescription className="text-xs">Send on Day {seq.sendDay}</CardDescription>
+                        </div>
+                        <Badge
+                          variant="outline"
+                          className={`text-xs ${STATUS_COLORS[seq.status] ?? 'bg-muted text-muted-foreground'}`}
+                        >
                           {seq.status}
                         </Badge>
+                      </div>
+
+                      {/* Personalisation confidence indicator */}
+                      {seq.flagForManualReview && (
+                        <div className="flex items-center gap-1 text-xs text-amber-600 mt-1">
+                          <AlertCircle className="h-3 w-3 shrink-0" />
+                          <span>Low personalisation confidence — review before sending</span>
+                        </div>
                       )}
-                    </div>
-                    <p className="mt-1 text-sm font-medium">{c.label}</p>
-                    <p className="text-xs text-muted-foreground">Day {c.day} · {c.angle}</p>
-                    {seq && (
-                      <p className="mt-2 truncate text-xs text-muted-foreground">
-                        {seq.subjectLine ?? "— no subject —"}
-                      </p>
-                    )}
-                    {seq?.qaScore !== null && seq?.qaScore !== undefined && (
-                      <p className="mt-1 text-xs">
-                        QA: <span className="font-medium">{Math.round(seq.qaScore * 100)}%</span>
-                      </p>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </ScrollArea>
+                    </CardHeader>
 
-          {/* Expanded editor */}
-          {selected && selectedDraft && (
-            <Card>
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <CardTitle className="text-base">
-                      Touch {selected.touchNumber} — {CADENCE[selected.touchNumber - 1]?.label}
-                    </CardTitle>
-                    <CardDescription>
-                      Day {selected.sendDay} · {selected.angle} · {selected.framework ?? "—"}
-                    </CardDescription>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setScheduleOpen(true)}
-                      disabled={selected.status === "Sent" || selected.status === "Replied"}
-                    >
-                      <CalendarClock className="h-4 w-4" /> Schedule
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => sendNowMut.mutate(selected.id)}
-                      disabled={selected.status === "Sent" || selected.status === "Replied" || sendNowMut.isPending}
-                    >
-                      <Send className="h-4 w-4" />
-                      {sendNowMut.isPending ? "Sending…" : "Send Now"}
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={() =>
-                        saveMut.mutate({ id: selected.id, body: selectedDraft })
-                      }
-                      disabled={saveMut.isPending}
-                    >
-                      <Save className="h-4 w-4" />
-                      {saveMut.isPending ? "Saving…" : "Save"}
-                    </Button>
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="subj">Subject line</Label>
-                  <Input
-                    id="subj"
-                    value={selectedDraft.subjectLine}
-                    onChange={(e) =>
-                      setDrafts((prev) => ({
-                        ...prev,
-                        [selected.id]: { ...selectedDraft, subjectLine: e.target.value },
-                      }))
-                    }
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="body">Body copy</Label>
-                  <Textarea
-                    id="body"
-                    rows={8}
-                    value={selectedDraft.bodyCopy}
-                    onChange={(e) =>
-                      setDrafts((prev) => ({
-                        ...prev,
-                        [selected.id]: { ...selectedDraft, bodyCopy: e.target.value },
-                      }))
-                    }
-                  />
-                </div>
+                    <CardContent className="space-y-3">
+                      {/* Subject line */}
+                      <div className="space-y-1">
+                        <Label className="text-xs">Subject</Label>
+                        <Input
+                          value={seq.subjectLine ?? ''}
+                          onChange={(e) => {
+                            const updated = [...sequences];
+                            updated[i] = { ...updated[i], subjectLine: e.target.value };
+                            setSequences(updated);
+                          }}
+                          className="text-sm"
+                          placeholder="Subject line..."
+                        />
+                      </div>
 
-                <div className="rounded-md border bg-muted/30 p-3">
-                  <div className="mb-2 flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-sm font-medium">
-                      <Mail className="h-4 w-4" /> Subject-line variants
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => subjectMut.mutate(selected.id)}
-                      disabled={subjectMut.isPending}
-                    >
-                      <Plus className="h-4 w-4" />
-                      {subjectMut.isPending ? "Generating…" : "Generate more"}
-                    </Button>
-                  </div>
-                  {selectedVariants.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">No variants yet.</p>
-                  ) : (
-                    <ul className="space-y-1.5">
-                      {selectedVariants.map((v) => (
-                        <li
-                          key={v.id}
-                          className="flex items-center justify-between gap-2 rounded bg-background p-2 text-sm"
-                        >
-                          <span className="min-w-0 flex-1 truncate">{v.text}</span>
-                          {v.qaScore !== null && (
-                            <Badge variant="secondary" className="shrink-0">
-                              {Math.round(v.qaScore * 100)}%
-                            </Badge>
+                      {/* Body copy */}
+                      <div className="space-y-1">
+                        <Label className="text-xs">Body</Label>
+                        <Textarea
+                          value={seq.bodyCopy ?? ''}
+                          onChange={(e) => {
+                            const updated = [...sequences];
+                            updated[i] = { ...updated[i], bodyCopy: e.target.value };
+                            setSequences(updated);
+                          }}
+                          rows={5}
+                          className="text-sm font-mono"
+                          placeholder="Email body..."
+                        />
+                        {/* Word count */}
+                        <div className="flex justify-between text-xs">
+                          <span className={over ? 'text-red-600 font-medium' : 'text-muted-foreground'}>
+                            Words: {wc} / {limit}
+                            {over && ' — OVER LIMIT'}
+                          </span>
+                          {seq.personalisationConfidence != null && (
+                            <span className="text-muted-foreground">
+                              Confidence: {Math.round(seq.personalisationConfidence * 100)}%
+                            </span>
                           )}
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="shrink-0"
-                            onClick={() =>
-                              setDrafts((prev) => ({
-                                ...prev,
-                                [selected.id]: { ...selectedDraft, subjectLine: v.text },
-                              }))
-                            }
-                          >
-                            Use
-                          </Button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
+                        </div>
+                      </div>
 
-                <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
-                  <div>
-                    <p className="text-muted-foreground">QA score</p>
-                    <p className="font-medium">
-                      {selected.qaScore !== null ? `${Math.round(selected.qaScore * 100)}%` : "—"}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-muted-foreground">Personalisation</p>
-                    <p className="font-medium">
-                      {selected.personalisationConfidence !== null
-                        ? `${Math.round(selected.personalisationConfidence * 100)}%`
-                        : "—"}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-muted-foreground">Scheduled for</p>
-                    <p className="font-medium">{formatDateTime(selected.scheduledFor)}</p>
-                  </div>
-                  <div>
-                    <p className="text-muted-foreground">Sent at</p>
-                    <p className="font-medium">{formatDateTime(selected.sentAt)}</p>
-                  </div>
+                      {/* Action buttons */}
+                      <div className="flex gap-2 flex-wrap">
+                        {/* Save (SQ-2: save on edit, not only on schedule) */}
+                        <TBtn
+                          size="sm"
+                          variant="outline"
+                          tooltip="Save subject and body edits"
+                          onClick={() => handleSave(seq)}
+                          disabled={isSaving}
+                        >
+                          {isSaving
+                            ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                            : <Save className="h-3 w-3 mr-1" />
+                          }
+                          Save
+                        </TBtn>
+
+                        {/* Approve */}
+                        <TBtn
+                          size="sm"
+                          variant="outline"
+                          tooltip={over ? `Exceeds ${limit}-word limit` : 'Approve this touch'}
+                          onClick={() => handleApprove(seq, i)}
+                          disabled={isSaving || seq.status === 'QaPassed'}
+                        >
+                          <CheckCircle2 className="h-3 w-3 mr-1" />
+                          {seq.status === 'QaPassed' ? 'Approved' : 'Approve'}
+                        </TBtn>
+
+                        {/* Copy body (SQ-3) */}
+                        <TBtn
+                          size="sm"
+                          variant="ghost"
+                          tooltip="Copy body to clipboard"
+                          onClick={() => {
+                            navigator.clipboard.writeText(seq.bodyCopy ?? '');
+                            toast.success('Copied');
+                          }}
+                        >
+                          <Copy className="h-3 w-3 mr-1" />
+                          Copy
+                        </TBtn>
+
+                        {/* Send Now */}
+                        <TBtn
+                          size="sm"
+                          variant="ghost"
+                          tooltip="Send this touch now via MailBridge"
+                          onClick={() => handleSendNow(seq, i)}
+                          disabled={isSending || seq.status === 'Sent'}
+                        >
+                          {isSending
+                            ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                            : <Send className="h-3 w-3 mr-1" />
+                          }
+                          {seq.status === 'Sent' ? 'Sent' : 'Send Now'}
+                        </TBtn>
+                      </div>
+                    </CardContent>
+                  </Card>
                 </div>
-                {selected.flagForManualReview && (
-                  <p className="text-xs text-amber-700">
-                    This touch is flagged for manual review.
-                  </p>
-                )}
-              </CardContent>
-            </Card>
-          )}
-        </>
+              );
+            })}
+          </div>
+        </div>
       )}
 
-      {/* Schedule dialog */}
-      <Dialog open={scheduleOpen} onOpenChange={setScheduleOpen}>
-        <DialogClose onClose={() => setScheduleOpen(false)} />
-        <DialogHeader>
-          <DialogTitle>Schedule touch</DialogTitle>
-          <DialogDescription>
-            Pick a send date/time. {selected && `Currently scheduled: ${formatDate(selected.scheduledFor)}`}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-2">
-          <Label htmlFor="sched">Send at</Label>
-          <Input
-            id="sched"
-            type="datetime-local"
-            value={scheduleAt}
-            onChange={(e) => setScheduleAt(e.target.value)}
-          />
+      {/* Empty state */}
+      {sequences.length === 0 && !generating && (
+        <div className="py-16 text-center text-muted-foreground">
+          <Layers className="h-12 w-12 mx-auto mb-4 opacity-30" />
+          <p className="text-sm">Select a campaign and prospect, then click Generate</p>
+          <p className="text-xs mt-1">Creates 7 personalised touches across ~30 days</p>
         </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => setScheduleOpen(false)}>
-            Cancel
-          </Button>
-          <Button
-            disabled={!scheduleAt || !selected || scheduleMut.isPending}
-            onClick={() =>
-              selected &&
-              scheduleAt &&
-              scheduleMut.mutate({ id: selected.id, sendAt: new Date(scheduleAt).toISOString() })
-            }
-          >
-            {scheduleMut.isPending ? "Scheduling…" : "Schedule"}
-          </Button>
-        </DialogFooter>
-      </Dialog>
+      )}
+
+      {/* Cadence Reference Guide (SQ-4) */}
+      {showExplain && (
+        <Card id="seq-explain" className="border-blue-100 bg-blue-50/30">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <FileText className="h-4 w-4" />
+              How the 7-Touch Sequence Works
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4 text-sm">
+            <p className="text-muted-foreground">
+              A scientifically-structured cold email cadence designed to maximise reply rates through
+              strategic escalation. Each touch uses a different psychological angle sent at an optimised
+              interval.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {TOUCH_INFO.map((t) => (
+                <div key={t.touch} className={`p-3 rounded-lg border ${t.color} space-y-1`}>
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium text-sm">Touch {t.touch}: {t.angle}</span>
+                    <span className="text-xs text-muted-foreground">{t.day}</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{t.desc}</p>
+                  <p className="text-xs font-medium">{t.words} words max</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="bg-muted rounded-lg p-3 text-xs space-y-1">
+              <p className="font-medium">Key Principles:</p>
+              <ul className="list-disc list-inside space-y-1 text-muted-foreground">
+                <li><strong>Standalone Rule:</strong> Each email must make sense if read in isolation</li>
+                <li><strong>Escalating Urgency:</strong> Tone gradually increases from helpful to direct</li>
+                <li><strong>Peer Test:</strong> Must read like an internal message, not marketing copy</li>
+                <li><strong>Word Limits:</strong> Enforced by angle (see cards above) and seniority tier</li>
+                <li><strong>No "Checking In":</strong> Banned: "circling back", "just wanted to follow up", "touching base"</li>
+              </ul>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

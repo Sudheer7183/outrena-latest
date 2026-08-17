@@ -53,7 +53,16 @@ async def list_configs(
     _: object = Depends(require_role(Role.MANAGER)),
 ) -> list[SourceConfigResponse]:
     items = await _service.list_configs(db)
-    return [SourceConfigResponse.model_validate(i) for i in items]
+    items_parsed = []
+    for i in items:
+        try:
+            import json as _json
+            if isinstance(i.settings, str):
+                i.settings = _json.loads(i.settings)
+        except Exception:
+            i.settings = {}
+        items_parsed.append(SourceConfigResponse.model_validate(i))
+    return items_parsed
 
 
 @_canonical_router.post("/configs", response_model=SourceConfigResponse, status_code=201)

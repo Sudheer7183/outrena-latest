@@ -1,13 +1,9 @@
 """
 content_ideas.py — Phase 3 /api/v1/content-ideas router.
 
-Endpoints:
-  GET    /content-ideas              list (optional ICP filter)
-  POST   /content-ideas              create
-  POST   /content-ideas/generate     LLM-generate N ideas for an ICP
-  GET    /content-ideas/{id}         fetch one
-  PUT    /content-ideas/{id}         update
-  DELETE /content-ideas/{id}         delete
+FIX: generate endpoint now passes topic and audience from the request body
+to the service, so the frontend's {topic, audience, count} payload works
+correctly without requiring an icpProfileId.
 """
 from __future__ import annotations
 
@@ -55,13 +51,24 @@ async def create_idea(
     return ContentIdeaResponse.model_validate(item)
 
 
-@router.post("/generate", response_model=ContentIdeaGenerateResponse, dependencies=[Depends(enforce_llm_cap)])
+@router.post(
+    "/generate",
+    response_model=ContentIdeaGenerateResponse,
+    dependencies=[Depends(enforce_llm_cap)],
+)
 async def generate_ideas(
     body: ContentIdeaGenerateRequest,
     db: AsyncSession = Depends(get_db),
     _: object = Depends(require_role(Role.REP)),
 ) -> ContentIdeaGenerateResponse:
-    items = await _service.generate(db, body.icpProfileId, body.count)
+    # FIX: pass topic and audience so generate() works without icpProfileId
+    items = await _service.generate(
+        db,
+        icp_profile_id=body.icpProfileId,
+        count=body.count,
+        topic=body.topic,
+        audience=body.audience,
+    )
     return ContentIdeaGenerateResponse(
         ideas=[ContentIdeaResponse.model_validate(i) for i in items]
     )

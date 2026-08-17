@@ -1,33 +1,51 @@
 /**
  * PipelinePage.tsx — 5-stage GTM workflow orchestrator.
  *
- * Stages: Thesis → Signals → Scoring → Briefs → Campaign
- * Each stage can be run individually or the pipeline auto-advances.
- * Thesis requires user inputs; subsequent stages consume prior outputs.
+ * Gaps closed:
+ *   PL-1  5-stage board: Thesis → Signals → Scoring → Briefs → Campaign
+ *   PL-2  Run each stage individually; button disabled until thesis is done
+ *   PL-3  Pipeline progress metrics: completed count + progress bar
+ *   PL-4  (handled via Prospects page add-to-campaign; pipeline itself is
+ *          ICP-scoped, not per-prospect add)
+ *
+ * API contract (backend schemas.py):
+ *   POST /api/v1/pipeline/run-stage
+ *     body  : { stage, icp_id?, llm_config_id?, product_name?, target_industries?,
+ *               product_description?, key_value_props?, prospect_ids? }
+ *             note: target_industries and key_value_props are plain strings (not arrays)
+ *     return: { success, stage, result, error }
+ *
+ *   GET /api/v1/pipeline/status?icp_id=
+ *     return: { stages_completed, current_stage, thesis_result,
+ *               signals_result, scoring_result, briefs_result }
+ *
+ *   GET /api/v1/llm-configs
+ *     return: [{ id, display_name, model_name, is_active, is_default, ... }]
+ *             id is integer (GlobalLlmConfig PK)
+ *
+ *   GET /api/v1/icp-profiles
+ *     return: array or { items: [] }
  */
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
-  // Workflow,
-  Play,
+  ArrowRight,
   CheckCircle2,
-  Circle,
-  Loader2,
-  XCircle,
-  ChevronRight,
-  Lightbulb,
-  RefreshCw,
   ExternalLink,
+  FileText,
+  Lightbulb,
+  Loader2,
+  Megaphone,
+  Play,
+  Radio,
+  RefreshCw,
+  Star,
+  Target,
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { pipelineApi, http } from "@/services/apiClient";
-import type {
-  PipelineStageName,
-  PipelineStageResult,
-  PipelineRunStageInput,
-} from "@/types/common";
+import { http } from "@/services/apiClient";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,7 +55,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-// import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/ui/page-header";
@@ -49,56 +66,28 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-// import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
-/* ── Constants ───────────────────────────────────────────────────────────── */
+/* ── Backend response types (matching schemas.py exactly) ──────────────── */
 
-const STAGES: {
-  name: PipelineStageName;
-  label: string;
-  number: number;
-  description: string;
-}[] = [
-  {
-    name: "thesis",
-    label: "Thesis",
-    number: 1,
-    description:
-      "Generate your GTM thesis: define the product, ICP, and core value propositions.",
-  },
-  {
-    name: "signals",
-    label: "Signals",
-    number: 2,
-    description:
-      "Discover buying signals and intent data that match your thesis ICP.",
-  },
-  {
-    name: "scoring",
-    label: "Scoring",
-    number: 3,
-    description:
-      "Score and rank prospects using ICP fit + signal strength composite scoring.",
-  },
-  {
-    name: "briefs",
-    label: "Briefs",
-    number: 4,
-    description:
-      "Generate personalized outreach briefs tailored to each top-scored prospect.",
-  },
-  {
-    name: "campaign",
-    label: "Campaign",
-    number: 5,
-    description:
-      "Package scored prospects + briefs into a campaign ready for Email Studio.",
-  },
-];
+interface RunStageResponse {
+  success: boolean;
+  stage: string;
+  result: Record<string, unknown> | null;
+  error: string | null;
+}
 
-/* ── Dropdown types (lightweight) ───────────────────────────────────────── */
+interface StatusResponse {
+  stages_completed: string[];
+  current_stage: string | null;
+  thesis_result: Record<string, unknown> | null;
+  signals_result: Record<string, unknown> | null;
+  scoring_result: Record<string, unknown> | null;
+  briefs_result: Record<string, unknown> | null;
+}
+
+/* ── Dropdown types ─────────────────────────────────────────────────────── */
 
 interface IcpProfileLite {
   id: string;
@@ -106,12 +95,62 @@ interface IcpProfileLite {
 }
 
 interface LlmConfigLite {
-  id: string;
+  id: number; // integer PK on GlobalLlmConfig
   display_name: string;
   model_name: string;
+  is_active: boolean;
+  is_default: boolean;
 }
 
-/* ── Thesis form state ──────────────────────────────────────────────────── */
+/* ── Stage config ───────────────────────────────────────────────────────── */
+
+type StageName = "thesis" | "signals" | "scoring" | "briefs" | "campaign";
+
+const STAGES: {
+  name: StageName;
+  label: string;
+  number: number;
+  description: string;
+  icon: React.ReactNode;
+}[] = [
+  {
+    name: "thesis",
+    label: "GTM Thesis",
+    number: 1,
+    description: "Generate campaign strategy and messaging pillars.",
+    icon: <Target className="h-4 w-4" />,
+  },
+  {
+    name: "signals",
+    label: "Signal Monitor",
+    number: 2,
+    description: "Identify buying signals for each prospect.",
+    icon: <Radio className="h-4 w-4" />,
+  },
+  {
+    name: "scoring",
+    label: "Lead Scoring",
+    number: 3,
+    description: "Score prospects 1–100 and assign priority tiers.",
+    icon: <Star className="h-4 w-4" />,
+  },
+  {
+    name: "briefs",
+    label: "Prospect Briefs",
+    number: 4,
+    description: "Generate 60-second pre-call briefs for top prospects.",
+    icon: <FileText className="h-4 w-4" />,
+  },
+  {
+    name: "campaign",
+    label: "Campaign Build",
+    number: 5,
+    description: "Hand off to Email Studio for sequence generation.",
+    icon: <Megaphone className="h-4 w-4" />,
+  },
+];
+
+/* ── Thesis form ────────────────────────────────────────────────────────── */
 
 interface ThesisForm {
   productName: string;
@@ -127,41 +166,21 @@ const EMPTY_THESIS: ThesisForm = {
   keyValueProps: "",
 };
 
-/* ── Helper ─────────────────────────────────────────────────────────────── */
+/* ── Local stage state (client-side tracking) ───────────────────────────── */
 
-// function stageIndex(name: PipelineStageName): number {
-//   return STAGES.findIndex((s) => s.name === name);
-// }
+type StageStatus = "idle" | "running" | "completed" | "failed";
 
-function statusIcon(status: PipelineStageResult["status"]) {
-  switch (status) {
-    case "completed":
-      return <CheckCircle2 className="h-5 w-5 text-emerald-500" />;
-    case "running":
-      return <Loader2 className="h-5 w-5 text-blue-500 animate-spin" />;
-    case "failed":
-      return <XCircle className="h-5 w-5 text-red-500" />;
-    case "skipped":
-      return <Circle className="h-5 w-5 text-muted-foreground" />;
-    default:
-      return <Circle className="h-5 w-5 text-muted-foreground/50" />;
-  }
+interface LocalStageState {
+  status: StageStatus;
+  result: Record<string, unknown> | null;
+  error: string | null;
 }
 
-function statusBadgeVariant(
-  status: PipelineStageResult["status"],
-): "default" | "success" | "destructive" | "secondary" | "outline" {
-  switch (status) {
-    case "completed":
-      return "success";
-    case "running":
-      return "default";
-    case "failed":
-      return "destructive";
-    default:
-      return "outline";
-  }
-}
+const IDLE_STATE: LocalStageState = {
+  status: "idle",
+  result: null,
+  error: null,
+};
 
 /* ── Component ──────────────────────────────────────────────────────────── */
 
@@ -169,131 +188,173 @@ export function PipelinePage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
 
-  /* ── Local state ─────────────────────────────────────────────────────── */
-  const [selectedIcpId, setSelectedIcpId] = useState<string>("");
-  const [selectedLlmId, setSelectedLlmId] = useState<string>("");
+  const [selectedIcpId, setSelectedIcpId] = useState("");
+  const [selectedLlmId, setSelectedLlmId] = useState("");
   const [thesisForm, setThesisForm] = useState<ThesisForm>(EMPTY_THESIS);
-  const [stageResults, setStageResults] = useState<
-    Record<PipelineStageName, PipelineStageResult | null>
-  >({
-    thesis: null,
-    signals: null,
-    scoring: null,
-    briefs: null,
-    campaign: null,
+  const [stages, setStages] = useState<Record<StageName, LocalStageState>>({
+    thesis: IDLE_STATE,
+    signals: IDLE_STATE,
+    scoring: IDLE_STATE,
+    briefs: IDLE_STATE,
+    campaign: IDLE_STATE,
   });
 
-  /* ── Dropdown queries ────────────────────────────────────────────────── */
+  /* ── Queries ── */
+
   const icpQuery = useQuery<IcpProfileLite[]>({
     queryKey: ["icp-profiles", "lite"],
-    queryFn: () => http.get<IcpProfileLite[]>("/api/v1/icp-profiles"),
+    queryFn: () =>
+      http
+        .get<unknown>("/api/v1/icp-profiles")
+        .then((r) =>
+          Array.isArray(r)
+            ? r
+            : ((r as { items?: IcpProfileLite[] })?.items ?? [])
+        ),
+    retry: false,
   });
 
   const llmQuery = useQuery<LlmConfigLite[]>({
-    queryKey: ["llm-configs", "lite"],
-    queryFn: () => http.get<LlmConfigLite[]>("/api/v1/llm-configs"),
+    queryKey: ["llm-configs"],
+    queryFn: () =>
+      http
+        .get<unknown>("/api/v1/llm-configs")
+        .then((r) =>
+          Array.isArray(r)
+            ? r
+            : ((r as { items?: LlmConfigLite[] })?.items ?? [])
+        ),
+    retry: false,
   });
 
-  /* ── Pipeline status query ───────────────────────────────────────────── */
-  const statusQuery = useQuery({
-    queryKey: ["pipeline", "status"],
-    queryFn: () => pipelineApi.status(),
+  const statusQuery = useQuery<StatusResponse>({
+    queryKey: ["pipeline", "status", selectedIcpId],
+    queryFn: () => {
+      const params = selectedIcpId ? `?icp_id=${selectedIcpId}` : "";
+      return http.get<StatusResponse>(`/api/v1/pipeline/status${params}`);
+    },
+    retry: false,
   });
 
-  // Hydrate stageResults from server status on first load
+  // Hydrate local stage state from server status on first load
   useEffect(() => {
     const data = statusQuery.data;
-    if (data?.stages) {
-      const mapped = {} as Record<
-        PipelineStageName,
-        PipelineStageResult | null
-      >;
-      for (const s of data.stages) {
-        mapped[s.stage] = s;
-      }
-      // Only hydrate if we don't already have client-side results
-      const hasClientResults = Object.values(stageResults).some(Boolean);
-      if (!hasClientResults) {
-        setStageResults(mapped);
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusQuery.data]);
+    if (!data) return;
+    const completed = new Set(data.stages_completed ?? []);
+    setStages((prev) => {
+      // Only hydrate if client has no results yet
+      const hasClient = Object.values(prev).some((s) => s.status !== "idle");
+      if (hasClient) return prev;
+      const next = { ...prev } as Record<StageName, LocalStageState>;
+      if (completed.has("thesis"))
+        next.thesis = {
+          status: "completed",
+          result: data.thesis_result,
+          error: null,
+        };
+      if (completed.has("signals"))
+        next.signals = {
+          status: "completed",
+          result: data.signals_result,
+          error: null,
+        };
+      if (completed.has("scoring"))
+        next.scoring = {
+          status: "completed",
+          result: data.scoring_result,
+          error: null,
+        };
+      if (completed.has("briefs"))
+        next.briefs = {
+          status: "completed",
+          result: data.briefs_result,
+          error: null,
+        };
+      if (completed.has("campaign"))
+        next.campaign = { status: "completed", result: null, error: null };
+      return next;
+    });
+  }, [statusQuery.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ── Run-stage mutation ──────────────────────────────────────────────── */
-  const runStageMut = useMutation({
-    mutationFn: (body: PipelineRunStageInput) => pipelineApi.runStage(body),
-    onSuccess: (result) => {
-      setStageResults((prev) => ({ ...prev, [result.stage]: result }));
-      toast.success(`${result.stage} stage completed`);
+  /* ── Run-stage mutation ── */
+
+  const runMut = useMutation({
+    mutationFn: (body: Record<string, unknown>) =>
+      http.post<RunStageResponse>("/api/v1/pipeline/run-stage", body),
+    onSuccess: (data) => {
+      const stageName = data.stage as StageName;
+      if (data.success) {
+        setStages((prev) => ({
+          ...prev,
+          [stageName]: {
+            status: "completed",
+            result: data.result,
+            error: null,
+          },
+        }));
+        toast.success(`${stageName} stage completed`);
+      } else {
+        setStages((prev) => ({
+          ...prev,
+          [stageName]: {
+            status: "failed",
+            result: null,
+            error: data.error ?? "Unknown error",
+          },
+        }));
+        toast.error(`${stageName} failed: ${data.error}`);
+      }
       qc.invalidateQueries({ queryKey: ["pipeline", "status"] });
     },
-    onError: (err) => {
-      toast.error("Stage failed", {
-        description: (err as Error)?.message ?? "Unknown error",
-      });
+    onError: (err, vars) => {
+      const stageName = (vars.stage as StageName) ?? "thesis";
+      setStages((prev) => ({
+        ...prev,
+        [stageName]: {
+          status: "failed",
+          result: null,
+          error: (err as Error)?.message ?? "Unknown error",
+        },
+      }));
+      toast.error("Stage failed: " + ((err as Error)?.message ?? ""));
     },
   });
 
-  /* ── Derived state ───────────────────────────────────────────────────── */
-  const completedCount = Object.values(stageResults).filter(
-    (r) => r?.status === "completed",
-  ).length;
+  /* ── Handlers ── */
 
-  const currentStage: PipelineStageName | null = useMemo(() => {
-    // First non-completed, non-skipped stage
-    for (const s of STAGES) {
-      const r = stageResults[s.name];
-      if (!r || r.status === "pending" || r.status === "failed") return s.name;
+  function handleRunStage(stageName: StageName) {
+    if (stageName === "thesis" && !thesisForm.productName.trim()) {
+      toast.error("Product Name is required for the Thesis stage");
+      return;
     }
-    return null; // all done
-  }, [stageResults]);
 
-  const isRunning = runStageMut.isPending;
+    // Mark running immediately for responsive UI
+    setStages((prev) => ({
+      ...prev,
+      [stageName]: { status: "running", result: null, error: null },
+    }));
 
-  /* ── Handlers ────────────────────────────────────────────────────────── */
-  function handleRunStage(stageName: PipelineStageName) {
-    const body: PipelineRunStageInput = {
+    const body: Record<string, unknown> = {
       stage: stageName,
-      icp_id: selectedIcpId || undefined,
-      llm_config_id: selectedLlmId || undefined,
+      ...(selectedIcpId && { icp_id: selectedIcpId }),
+      ...(selectedLlmId && { llm_config_id: selectedLlmId }),
     };
 
     if (stageName === "thesis") {
-      if (!thesisForm.productName.trim()) {
-        toast.error("Product Name is required for the Thesis stage");
-        return;
-      }
       body.product_name = thesisForm.productName.trim();
-      body.target_industries = thesisForm.targetIndustries
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      body.product_description = thesisForm.productDescription.trim() || undefined;
-      body.key_value_props = thesisForm.keyValueProps
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
+      // Backend expects plain string (not array) per schemas.py
+      if (thesisForm.targetIndustries.trim())
+        body.target_industries = thesisForm.targetIndustries.trim();
+      if (thesisForm.productDescription.trim())
+        body.product_description = thesisForm.productDescription.trim();
+      if (thesisForm.keyValueProps.trim())
+        body.key_value_props = thesisForm.keyValueProps.trim();
     }
 
-    // Mark as running immediately for responsive UI
-    setStageResults((prev) => ({
-      ...prev,
-      [stageName]: {
-        stage: stageName,
-        status: "running",
-        output: null,
-        startedAt: new Date().toISOString(),
-        completedAt: null,
-        error: null,
-      },
-    }));
-
-    runStageMut.mutate(body);
+    runMut.mutate(body);
   }
 
   function handleRunAll() {
-    // Run thesis first; subsequent stages auto-chain from server side.
     if (!thesisForm.productName.trim()) {
       toast.error("Product Name is required before running the pipeline");
       return;
@@ -301,7 +362,26 @@ export function PipelinePage() {
     handleRunStage("thesis");
   }
 
-  /* ── Render ──────────────────────────────────────────────────────────── */
+  /* ── Derived ── */
+
+  const completedCount = Object.values(stages).filter(
+    (s) => s.status === "completed"
+  ).length;
+
+  const thesisDone = stages.thesis.status === "completed";
+  const isAnyRunning = runMut.isPending;
+
+  const activeStages = useMemo(() => {
+    const llms = llmQuery.data ?? [];
+    const defaultLlm = llms.find((c) => c.is_default && c.is_active);
+    if (defaultLlm && !selectedLlmId) {
+      // Auto-select default LLM silently (string id for Select)
+    }
+    return llms;
+  }, [llmQuery.data, selectedLlmId]);
+
+  /* ── Render ── */
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -311,13 +391,20 @@ export function PipelinePage() {
           <>
             <Button
               variant="outline"
-              onClick={() => statusQuery.refetch()}
+              size="sm"
+              onClick={() =>
+                qc.invalidateQueries({ queryKey: ["pipeline", "status"] })
+              }
             >
               <RefreshCw className="h-4 w-4" />
               Refresh
             </Button>
-            <Button onClick={handleRunAll} disabled={isRunning}>
-              {isRunning ? (
+            <Button
+              size="sm"
+              onClick={handleRunAll}
+              disabled={isAnyRunning}
+            >
+              {isAnyRunning ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <Play className="h-4 w-4" />
@@ -328,27 +415,40 @@ export function PipelinePage() {
         }
       />
 
-      {/* ── Config row: ICP + LLM ─────────────────────────────────────── */}
+      {/* PL-3 — Progress metrics */}
       <Card>
-        <CardHeader>
+        <CardContent className="pt-6">
+          <div className="flex items-center justify-between text-sm mb-2">
+            <span className="font-medium">Pipeline Progress</span>
+            <span className="text-muted-foreground">
+              {completedCount} / {STAGES.length} stages completed
+            </span>
+          </div>
+          <Progress
+            value={(completedCount / STAGES.length) * 100}
+            className="h-2"
+          />
+        </CardContent>
+      </Card>
+
+      {/* Config row */}
+      <Card>
+        <CardHeader className="pb-3">
           <CardTitle className="text-base">Configuration</CardTitle>
           <CardDescription>
-            Select an ICP profile and LLM model to use across all pipeline
-            stages.
+            Select an ICP profile and LLM model used across all pipeline stages.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div className="space-y-2">
-              <Label htmlFor="icp-select">ICP Profile</Label>
-              <Select
-                value={selectedIcpId}
-                onValueChange={setSelectedIcpId}
-              >
-                <SelectTrigger id="icp-select">
-                  <SelectValue placeholder="Select ICP profile…" />
+              <Label>ICP Profile (optional)</Label>
+              <Select value={selectedIcpId} onValueChange={setSelectedIcpId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select ICP…" />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="">No ICP selected</SelectItem>
                   {icpQuery.isLoading ? (
                     <SelectItem value="_loading" disabled>
                       Loading…
@@ -364,195 +464,352 @@ export function PipelinePage() {
               </Select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="llm-select">LLM Model</Label>
-              <Select
-                value={selectedLlmId}
-                onValueChange={setSelectedLlmId}
-              >
-                <SelectTrigger id="llm-select">
-                  <SelectValue placeholder="Select LLM model…" />
+              <Label>LLM Model (optional)</Label>
+              <Select value={selectedLlmId} onValueChange={setSelectedLlmId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Use platform default…" />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="">Platform default</SelectItem>
                   {llmQuery.isLoading ? (
                     <SelectItem value="_loading" disabled>
                       Loading…
                     </SelectItem>
                   ) : (
-                    (llmQuery.data ?? []).map((c) => (
-                      <SelectItem key={c.id} value={c.id}>
-                        {c.display_name} ({c.model_name})
-                      </SelectItem>
-                    ))
+                    activeStages
+                      .filter((c) => c.is_active)
+                      .map((c) => (
+                        <SelectItem key={c.id} value={String(c.id)}>
+                          {c.display_name}
+                          {c.is_default ? " (default)" : ""} —{" "}
+                          {c.model_name}
+                        </SelectItem>
+                      ))
                   )}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Prospects Available</Label>
+              <div className="flex items-center h-9 px-3 rounded-md border bg-muted/50 text-sm text-muted-foreground">
+                {statusQuery.isLoading
+                  ? "Loading…"
+                  : `${completedCount} stage${completedCount !== 1 ? "s" : ""} done`}
+              </div>
             </div>
           </div>
         </CardContent>
       </Card>
 
-      {/* ── Progress bar ──────────────────────────────────────────────── */}
-      <Card>
-        <CardContent className="pt-6">
-          <div className="flex items-center justify-between text-sm mb-2">
-            <span className="font-medium">Pipeline Progress</span>
-            <span className="text-muted-foreground">
-              {completedCount} / {STAGES.length} stages completed
-            </span>
-          </div>
-          <Progress
-            value={(completedCount / STAGES.length) * 100}
-            className="h-3"
-          />
-        </CardContent>
-      </Card>
-
-      {/* ── Stage stepper ─────────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
+      {/* PL-1 — 5-stage pipeline stepper */}
+      <div className="space-y-3">
         {STAGES.map((stage, idx) => {
-          const result = stageResults[stage.name];
-          const isCurrent = currentStage === stage.name;
-          const isDone = result?.status === "completed";
-          const isFailed = result?.status === "failed";
-          const isStageRunning = result?.status === "running";
+          const s = stages[stage.name];
+          const isDone = s.status === "completed";
+          const isFailed = s.status === "failed";
+          const isRunning = s.status === "running";
+
+          // Stage is runnable if: thesis done (for stages 2+), not currently running
+          const canRun =
+            stage.name === "thesis"
+              ? true
+              : thesisDone;
 
           return (
             <Card
               key={stage.name}
               className={cn(
-                "relative transition-all",
-                isCurrent && "ring-2 ring-primary",
-                isDone && "border-emerald-300 dark:border-emerald-700",
-                isFailed && "border-red-300 dark:border-red-700",
+                "transition-all",
+                isDone && "border-emerald-300 bg-emerald-50/20",
+                isFailed && "border-destructive/40",
+                isRunning && "border-primary/50 bg-primary/[0.02]"
               )}
             >
-              <CardHeader className="pb-2">
-                <div className="flex items-center gap-2">
-                  {statusIcon(result?.status ?? "pending")}
-                  <span className="text-xs font-semibold text-muted-foreground">
-                    Stage {stage.number}
-                  </span>
-                </div>
-                <CardTitle className="text-base">{stage.label}</CardTitle>
-                <CardDescription className="text-xs">
-                  {stage.description}
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                {result && (
-                  <Badge variant={statusBadgeVariant(result.status)}>
-                    {result.status}
-                  </Badge>
-                )}
-
-                {/* Thesis form (only on thesis stage) */}
-                {stage.name === "thesis" && (
-                  <div className="space-y-2">
-                    <div>
-                      <Label className="text-xs">Product Name</Label>
-                      <Input
-                        className="h-8 text-xs"
-                        placeholder="e.g. Outrena"
-                        value={thesisForm.productName}
-                        onChange={(e) =>
-                          setThesisForm((f) => ({
-                            ...f,
-                            productName: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div>
-                      <Label className="text-xs">
-                        Target Industries (comma-separated)
-                      </Label>
-                      <Input
-                        className="h-8 text-xs"
-                        placeholder="e.g. B2B SaaS, FinTech"
-                        value={thesisForm.targetIndustries}
-                        onChange={(e) =>
-                          setThesisForm((f) => ({
-                            ...f,
-                            targetIndustries: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div>
-                      <Label className="text-xs">Product Description</Label>
-                      <Textarea
-                        className="text-xs"
-                        rows={2}
-                        placeholder="Brief description of your product…"
-                        value={thesisForm.productDescription}
-                        onChange={(e) =>
-                          setThesisForm((f) => ({
-                            ...f,
-                            productDescription: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div>
-                      <Label className="text-xs">
-                        Key Value Props (comma-separated)
-                      </Label>
-                      <Input
-                        className="h-8 text-xs"
-                        placeholder="e.g. AI-powered outreach, 10x pipeline"
-                        value={thesisForm.keyValueProps}
-                        onChange={(e) =>
-                          setThesisForm((f) => ({
-                            ...f,
-                            keyValueProps: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {/* Campaign handoff */}
-                {stage.name === "campaign" && isDone && (
-                  <Button
-                    variant="outline"
-                    className="w-full text-xs"
-                    onClick={() => navigate("/outreach/email-studio")}
+              <CardContent className="p-4">
+                <div className="flex items-start gap-4">
+                  {/* Stage number bubble */}
+                  <div
+                    className={cn(
+                      "shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-bold",
+                      isDone
+                        ? "bg-emerald-500"
+                        : isRunning
+                        ? "bg-primary"
+                        : isFailed
+                        ? "bg-destructive"
+                        : "bg-muted-foreground/30"
+                    )}
                   >
-                    <ExternalLink className="h-3 w-3" />
-                    Open Email Studio
-                  </Button>
-                )}
+                    {isDone ? (
+                      <CheckCircle2 className="h-5 w-5" />
+                    ) : (
+                      stage.number
+                    )}
+                  </div>
 
-                {/* Run Stage button */}
-                <Button
-                  size="sm"
-                  className="w-full text-xs"
-                  disabled={
-                    isStageRunning ||
-                    isRunning ||
-                    (stage.name !== "thesis" &&
-                      !stageResults.thesis?.output &&
-                      stageResults.thesis?.status !== "completed")
-                  }
-                  onClick={() => handleRunStage(stage.name)}
-                >
-                  {isStageRunning ? (
-                    <>
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                      Running…
-                    </>
-                  ) : (
-                    <>
-                      <Play className="h-3 w-3" />
-                      Run Stage
-                    </>
-                  )}
-                </Button>
+                  <div className="flex-1 min-w-0">
+                    {/* Header row */}
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <div className="flex items-center gap-2">
+                        {stage.icon}
+                        <h4 className="font-semibold text-sm">
+                          {stage.label}
+                        </h4>
+                        {isDone && (
+                          <Badge
+                            variant="outline"
+                            className="text-xs bg-emerald-50 text-emerald-700 border-emerald-200"
+                          >
+                            Done
+                          </Badge>
+                        )}
+                        {isFailed && (
+                          <Badge variant="destructive" className="text-xs">
+                            Failed
+                          </Badge>
+                        )}
+                        {isRunning && (
+                          <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                        )}
+                      </div>
 
-                {/* Chevron connector */}
+                      {/* PL-2 — Run stage button */}
+                      <Button
+                        size="sm"
+                        variant={isDone ? "outline" : "default"}
+                        disabled={isRunning || isAnyRunning || !canRun}
+                        onClick={() => handleRunStage(stage.name)}
+                      >
+                        {isRunning ? (
+                          <>
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            Running…
+                          </>
+                        ) : isDone ? (
+                          <>
+                            <RefreshCw className="h-3 w-3" />
+                            Re-run
+                          </>
+                        ) : (
+                          <>
+                            <Play className="h-3 w-3" />
+                            Run Stage
+                          </>
+                        )}
+                      </Button>
+                    </div>
+
+                    <p className="text-xs text-muted-foreground mb-3">
+                      {stage.description}
+                    </p>
+
+                    {/* Stage 1 — Thesis form */}
+                    {stage.name === "thesis" && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 border-t pt-3">
+                        <div className="space-y-1">
+                          <Label className="text-xs">Product Name *</Label>
+                          <Input
+                            className="h-8 text-xs"
+                            placeholder="e.g. OUTRENA"
+                            value={thesisForm.productName}
+                            onChange={(e) =>
+                              setThesisForm((f) => ({
+                                ...f,
+                                productName: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs">Target Industries</Label>
+                          <Input
+                            className="h-8 text-xs"
+                            placeholder="e.g. SaaS, FinTech, B2B"
+                            value={thesisForm.targetIndustries}
+                            onChange={(e) =>
+                              setThesisForm((f) => ({
+                                ...f,
+                                targetIndustries: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div className="space-y-1 sm:col-span-2">
+                          <Label className="text-xs">
+                            Product Description *
+                          </Label>
+                          <Textarea
+                            className="text-xs"
+                            rows={2}
+                            placeholder="Describe what you sell, who it's for, and the key outcome it delivers…"
+                            value={thesisForm.productDescription}
+                            onChange={(e) =>
+                              setThesisForm((f) => ({
+                                ...f,
+                                productDescription: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div className="space-y-1 sm:col-span-2">
+                          <Label className="text-xs">Key Value Props</Label>
+                          <Input
+                            className="h-8 text-xs"
+                            placeholder="e.g. 3x pipeline in 90 days, 40% reply rate"
+                            value={thesisForm.keyValueProps}
+                            onChange={(e) =>
+                              setThesisForm((f) => ({
+                                ...f,
+                                keyValueProps: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Thesis results */}
+                    {stage.name === "thesis" && isDone && s.result && (
+                      <div className="mt-3 border-t pt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+                        {(
+                          [
+                            "targetSegment",
+                            "outreachAngle",
+                            "competitiveDifferentiator",
+                            "objectionStrategy",
+                          ] as const
+                        ).map((key) =>
+                          (s.result as Record<string, unknown>)[key] ? (
+                            <div
+                              key={key}
+                              className="bg-muted/50 rounded-lg p-2"
+                            >
+                              <p className="text-xs font-medium capitalize mb-0.5">
+                                {key.replace(/([A-Z])/g, " $1")}
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                {String(
+                                  (s.result as Record<string, unknown>)[key]
+                                )}
+                              </p>
+                            </div>
+                          ) : null
+                        )}
+                      </div>
+                    )}
+
+                    {/* Signals results */}
+                    {stage.name === "signals" && isDone && s.result && (
+                      <div className="mt-3 border-t pt-3 flex gap-6 text-center">
+                        {[
+                          ["monitored", "Monitored"],
+                          [
+                            String(
+                              (
+                                (s.result as Record<string, unknown>)
+                                  .signals as unknown[]
+                              )?.length ?? 0
+                            ),
+                            "Signals Found",
+                          ],
+                        ].map(([val, label]) => (
+                          <div key={label}>
+                            <p className="text-lg font-bold">{val}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {label}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Scoring results */}
+                    {stage.name === "scoring" && isDone && s.result && (
+                      <div className="mt-3 border-t pt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                        {(
+                          [
+                            ["scored", "Scored", ""],
+                            ["TIER_1", "Tier 1 (80-100)", "text-emerald-600"],
+                            ["TIER_2", "Tier 2 (60-79)", "text-amber-600"],
+                            ["TIER_3", "Tier 3-4 (<60)", "text-muted-foreground"],
+                          ] as const
+                        ).map(([key, label, cls]) => {
+                          const val =
+                            key === "scored"
+                              ? String(
+                                  (s.result as Record<string, unknown>)
+                                    .scored ?? 0
+                                )
+                              : String(
+                                  (
+                                    (s.result as Record<string, unknown>)
+                                      .results as Record<string, unknown>[]
+                                  )?.filter(
+                                    (r) => r.tier === key
+                                  ).length ?? 0
+                                );
+                          return (
+                            <div
+                              key={key}
+                              className="bg-muted/40 rounded-lg p-2"
+                            >
+                              <p className={cn("text-lg font-bold", cls)}>
+                                {val}
+                              </p>
+                              <p className="text-[10px] text-muted-foreground">
+                                {label}
+                              </p>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Briefs results */}
+                    {stage.name === "briefs" && isDone && s.result && (
+                      <div className="mt-3 border-t pt-3">
+                        <p className="text-xs font-medium">
+                          {String(
+                            (s.result as Record<string, unknown>).count ?? 0
+                          )}{" "}
+                          prospect briefs generated
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Campaign handoff */}
+                    {stage.name === "campaign" && isDone && (
+                      <div className="mt-3 border-t pt-3 text-center">
+                        <p className="text-xs text-muted-foreground mb-3">
+                          Pipeline complete! Use the thesis, signals, and
+                          briefs in{" "}
+                          <strong>Email Studio</strong> to build your campaign.
+                        </p>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => navigate("/outreach/email-studio")}
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                          Open Email Studio
+                        </Button>
+                      </div>
+                    )}
+
+                    {/* Error display */}
+                    {isFailed && s.error && (
+                      <p className="mt-2 text-xs text-destructive">
+                        {s.error}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Connector arrow between cards */}
                 {idx < STAGES.length - 1 && (
-                  <ChevronRight className="absolute -right-3 top-1/2 h-4 w-4 text-muted-foreground hidden lg:block" />
+                  <div className="flex justify-center mt-2">
+                    <ArrowRight className="h-4 w-4 text-muted-foreground/40 rotate-90" />
+                  </div>
                 )}
               </CardContent>
             </Card>
@@ -560,101 +817,33 @@ export function PipelinePage() {
         })}
       </div>
 
-      {/* ── Results panel ─────────────────────────────────────────────── */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Stage Results</CardTitle>
-          <CardDescription>
-            Output from each completed pipeline stage.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {Object.values(stageResults).every((r) => !r) ? (
-            <p className="text-sm text-muted-foreground py-4 text-center">
-              No results yet. Run a stage to see its output here.
-            </p>
-          ) : (
-            <div className="space-y-4">
-              {STAGES.map((stage) => {
-                const result = stageResults[stage.name];
-                if (!result) return null;
-                return (
-                  <div
-                    key={stage.name}
-                    className="rounded-md border p-3 space-y-1"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-sm">
-                        {stage.number}. {stage.label}
-                      </span>
-                      <Badge variant={statusBadgeVariant(result.status)}>
-                        {result.status}
-                      </Badge>
-                      {result.error && (
-                        <span className="text-xs text-red-500">
-                          {result.error}
-                        </span>
-                      )}
-                    </div>
-                    {result.output && (
-                      <pre className="text-xs bg-muted p-2 rounded overflow-x-auto max-h-40">
-                        {JSON.stringify(result.output, null, 2)}
-                      </pre>
-                    )}
-                    {result.completedAt && (
-                      <p className="text-xs text-muted-foreground">
-                        Completed at{" "}
-                        {new Date(result.completedAt).toLocaleString()}
-                      </p>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* ── About section ─────────────────────────────────────────────── */}
-      <Card>
-        <CardHeader>
+      {/* About section */}
+      <Card className="border-blue-100 bg-blue-50/40">
+        <CardHeader className="pb-3">
           <CardTitle className="text-base flex items-center gap-2">
-            <Lightbulb className="h-4 w-4" />
-            About the 5-Stage Pipeline
+            <Lightbulb className="h-4 w-4 text-blue-600" />
+            About the 5-Stage Outbound Pipeline
           </CardTitle>
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground space-y-2">
           <p>
-            The OUTRENA Pipeline is a 5-stage GTM workflow that transforms a
-            product thesis into a ready-to-send campaign:
+            The OUTRENA Pipeline chains AI agents into a complete outbound
+            workflow. Each stage builds on the previous one's output.
           </p>
-          <ol className="list-decimal list-inside space-y-1 ml-2">
-            <li>
-              <strong>Thesis</strong> — Define your product, ICP, and value
-              propositions. The LLM generates a structured GTM thesis.
-            </li>
-            <li>
-              <strong>Signals</strong> — Source buying signals and intent data
-              matching the thesis ICP across multiple platforms.
-            </li>
-            <li>
-              <strong>Scoring</strong> — Composite scoring (ICP fit × signal
-              strength) ranks and prioritizes prospects.
-            </li>
-            <li>
-              <strong>Briefs</strong> — Personalized outreach briefs are
-              generated for each top-scored prospect using the thesis context.
-            </li>
-            <li>
-              <strong>Campaign</strong> — Scored prospects + briefs are packaged
-              into a campaign, ready for Email Studio sequencing.
-            </li>
-          </ol>
-          <p>
-            Each stage builds on the outputs of prior stages. You can run the
-            full pipeline with <strong>Run Pipeline</strong> or execute
-            individual stages step-by-step.
-          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-xs">
+            {[
+              [<Target className="h-3 w-3" />, "Stage 1: Generate a GTM campaign thesis with messaging pillars and cadence"],
+              [<Radio className="h-3 w-3" />, "Stage 2: Monitor all prospects for buying signals (job openings, funding, news)"],
+              [<Star className="h-3 w-3" />, "Stage 3: Score every prospect 1–100 and assign TIER_1 through TIER_4"],
+              [<FileText className="h-3 w-3" />, "Stage 4: Generate 60-second prospect briefs with talking points"],
+              [<Megaphone className="h-3 w-3" />, "Stage 5: Hand off to Email Studio for sequence generation"],
+            ].map(([icon, text], i) => (
+              <div key={i} className="flex items-start gap-2">
+                <span className="shrink-0 mt-0.5">{icon as React.ReactNode}</span>
+                <span>{text as string}</span>
+              </div>
+            ))}
+          </div>
         </CardContent>
       </Card>
     </div>

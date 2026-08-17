@@ -1,412 +1,587 @@
 /**
- * PromptManagementPage.tsx — manage the 47 OUTRENA prompt templates.
+ * PromptManagementPage.tsx — manage the 47 seeded OUTRENA prompt templates.
  *
- * API:
- *   GET /api/v1/prompts         → Prompt[]
- *   PUT /api/v1/prompts/:key    → Prompt
+ * API (verified against app/features/prompt_management/router.py + schemas):
+ *   GET  /api/v1/prompts?category=   → PromptResponse[]
+ *   PUT  /api/v1/prompts/:key         { template } → PromptResponse
+ *   POST /api/v1/prompts/reset        → { resetCount, message } (resets ALL)
  *
- * Renders a filterable, searchable table. Clicking a row opens a dialog with
- * a large Textarea to edit the template body; Save → PUT.
+ * CORRECTIONS vs. the previous version:
+ *   - `variables` is already `list[str]` in PromptResponse (parsed server-side
+ *     by a field_validator) — it is NOT a JSON-encoded string. The previous
+ *     code typed it as `string` and ran `JSON.parse()` on the frontend.
+ *     Typed correctly here as `string[]` to match what the backend sends.
+ *   - The category list was hardcoded to 6 names (email_generation, icp,
+ *     sequence, analytics, reply, system) that don't match the real seed
+ *     data. The backend's 47 seeded prompts actually use 15 categories
+ *     (ab_testing, analytics, competitor, content, deal, domain, email,
+ *     icp, job_change, meeting, optimization, prospecting, scheduler,
+ *     sequence, weekly) — verified directly against prompt_defs.py.
+ *     Categories are now derived dynamically from the fetched data instead
+ *     of hardcoded, so this never drifts from the backend again.
+ *   - Removed the MOCK_PROMPTS fallback — an empty result now shows a real
+ *     empty state instead of silently substituting fabricated data.
+ *
+ * There is no per-key reset endpoint — only `POST /prompts/reset` (resets
+ * ALL prompts). Per-row "Reset to default" is implemented as
+ * `PUT /prompts/{key}` with `{ template: defaultValue }`, since
+ * `defaultValue` is a permanent column holding the original seed template
+ * (confirmed in config_models.py — it's set once at seed time and never
+ * mutated by `update_template`).
+ *
+ * PM-1 ✓ Prompt list with categories, dynamically derived + filterable.
+ * PM-2 ✓ Inline expand/edit — textarea editor with variable hint panel.
+ * PM-3 ✓ Reset to default per prompt (via defaultValue) + Reset All.
+ * PM-4 ✓ Variable documentation — {{name}} badges (backend only provides names,
+ *          not descriptions/examples, so no per-variable copy is fabricated).
+ * PM-5 ✓ "Customized" badge — derived as template !== defaultValue.
  */
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FileText, Save, Search } from "lucide-react";
+import {
+  ChevronDown,
+  Edit3,
+  Info,
+  Loader2,
+  RefreshCw,
+  Save,
+  Search,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 import { http } from "@/services/apiClient";
 import { PageHeader } from "@/components/ui/page-header";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { NativeSelect as Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
-  DialogClose,
+  DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { formatDateTime, truncate } from "@/lib/utils";
+import { formatDateTime } from "@/lib/utils";
 
-type PromptCategory =
-  | "email_generation"
-  | "icp"
-  | "sequence"
-  | "analytics"
-  | "reply"
-  | "system";
-
-const CATEGORIES: PromptCategory[] = [
-  "email_generation",
-  "icp",
-  "sequence",
-  "analytics",
-  "reply",
-  "system",
-];
+/* ── Types (aligned with PromptResponse) ─────────────────────────────── */
 
 interface Prompt {
   id: string;
   key: string;
+  category: string;
   name: string;
-  category: PromptCategory;
   description: string;
   template: string;
   isEditable: boolean;
   defaultValue: string;
-  variables: string;
+  variables: string[];
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
 }
 
-const MOCK_PROMPTS: Prompt[] = [
-  {
-    id: "cl_mock_1",
-    key: "email.first_touch",
-    name: "First Touch Email",
-    category: "email_generation",
-    description: "Cold first-touch email using the PAS framework.",
-    template:
-      "Hi {{first_name}},\n\nI noticed {{company}} recently {{trigger}}. Most {{persona}} we work with tell us {{pain_point}}.\n\nWe help teams like yours {{outcome}} — would a 15-min call next week make sense?\n\nBest,\n{{sender_name}}",
-    isEditable: true,
-    defaultValue: "",
-    variables: '["first_name", "company", "trigger", "persona", "pain_point", "outcome", "sender_name"]',
-    sortOrder: 1,
-    createdAt: "2025-01-22T10:00:00Z",
-    updatedAt: "2025-02-10T11:00:00Z",
-  },
-  {
-    id: "cl_mock_2",
-    key: "icp.autodiscover",
-    name: "ICP Auto-Discover",
-    category: "icp",
-    description: "Distils an ICP profile from 3 reference customers.",
-    template:
-      "You are a B2B ICP analyst. Given the following 3 reference customers: {{references}}.\n\nExtract firmographics, technographics, intent signals, and seniority tiers. Return as JSON.",
-    isEditable: true,
-    defaultValue: "",
-    variables: '["references"]',
-    sortOrder: 2,
-    createdAt: "2025-01-22T10:00:00Z",
-    updatedAt: "2025-02-04T16:30:00Z",
-  },
-  {
-    id: "cl_mock_3",
-    key: "sequence.plan",
-    name: "Sequence Planner",
-    category: "sequence",
-    description: "Plans a 5-touch sequence given prospect + angle.",
-    template:
-      "Plan a 5-touch outreach sequence for {{prospect_name}} at {{company}}. Angle: {{angle}}. Framework: {{framework}}. Mix email + LinkedIn touches spaced 3-4 days apart.",
-    isEditable: true,
-    defaultValue: "",
-    variables: '["prospect_name", "company", "angle", "framework"]',
-    sortOrder: 3,
-    createdAt: "2025-01-22T10:00:00Z",
-    updatedAt: "2025-02-08T09:15:00Z",
-  },
-  {
-    id: "cl_mock_4",
-    key: "analytics.weekly_digest",
-    name: "Weekly Digest Summary",
-    category: "analytics",
-    description: "Summarises the week's outreach into 3 bullet points.",
-    template:
-      "Summarise the following outreach metrics into 3 executive bullet points: sent={{sent}}, opened={{opened}}, replied={{replied}}, pipeline_value={{pipeline_value}}.",
-    isEditable: true,
-    defaultValue: "",
-    variables: '["sent", "opened", "replied", "pipeline_value"]',
-    sortOrder: 4,
-    createdAt: "2025-01-22T10:00:00Z",
-    updatedAt: "2025-02-09T18:00:00Z",
-  },
-  {
-    id: "cl_mock_5",
-    key: "reply.categorise",
-    name: "Reply Categoriser",
-    category: "reply",
-    description: "Classifies inbound reply intent into positive/neutral/negative.",
-    template:
-      "Classify the following inbound reply into one of: positive, neutral, negative, ooo, unsubscribe. Reply:\n\n{{inbound_message}}\n\nReturn JSON: { category, confidence, suggested_reply }.",
-    isEditable: true,
-    defaultValue: "",
-    variables: '["inbound_message"]',
-    sortOrder: 5,
-    createdAt: "2025-01-22T10:00:00Z",
-    updatedAt: "2025-02-07T14:45:00Z",
-  },
-  {
-    id: "cl_mock_6",
-    key: "system.ground_rules",
-    name: "System Ground Rules",
-    category: "system",
-    description: "System-level rules injected into every generation.",
-    template:
-      "You are OUTRENA, an AI outreach assistant. Always be: concise, specific, and respectful. Never fabricate case studies. Never claim to have spoken with the prospect before.",
-    isEditable: false,
-    defaultValue: "",
-    variables: "[]",
-    sortOrder: 6,
-    createdAt: "2025-01-22T10:00:00Z",
-    updatedAt: "2025-01-25T10:00:00Z",
-  },
+/** Stable color palette assigned by category index, since the real
+ * category set (15 values from prompt_defs.py) isn't fixed at compile time. */
+const CATEGORY_PALETTE = [
+  "bg-blue-500/10 text-blue-600 border-blue-500/20",
+  "bg-purple-500/10 text-purple-600 border-purple-500/20",
+  "bg-amber-500/10 text-amber-600 border-amber-500/20",
+  "bg-green-500/10 text-green-600 border-green-500/20",
+  "bg-rose-500/10 text-rose-600 border-rose-500/20",
+  "bg-sky-500/10 text-sky-600 border-sky-500/20",
+  "bg-orange-500/10 text-orange-600 border-orange-500/20",
+  "bg-indigo-500/10 text-indigo-600 border-indigo-500/20",
+  "bg-teal-500/10 text-teal-600 border-teal-500/20",
+  "bg-cyan-500/10 text-cyan-600 border-cyan-500/20",
+  "bg-pink-500/10 text-pink-600 border-pink-500/20",
+  "bg-lime-500/10 text-lime-600 border-lime-500/20",
+  "bg-fuchsia-500/10 text-fuchsia-600 border-fuchsia-500/20",
+  "bg-emerald-500/10 text-emerald-600 border-emerald-500/20",
+  "bg-violet-500/10 text-violet-600 border-violet-500/20",
 ];
 
-function categoryVariant(
-  cat: PromptCategory,
-): "default" | "secondary" | "success" | "warning" | "outline" {
-  switch (cat) {
-    case "email_generation":
-      return "success";
-    case "icp":
-      return "default";
-    case "sequence":
-      return "warning";
-    case "analytics":
-      return "secondary";
-    case "reply":
-      return "default";
-    case "system":
-      return "outline";
-  }
+function categoryColor(category: string, allCategories: string[]): string {
+  const idx = allCategories.indexOf(category);
+  if (idx === -1) return "bg-gray-500/10 text-gray-600 border-gray-500/20";
+  return CATEGORY_PALETTE[idx % CATEGORY_PALETTE.length];
 }
+
+function categoryLabel(category: string): string {
+  return category
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+function normalisePrompts(raw: unknown): Prompt[] {
+  if (Array.isArray(raw)) return raw as Prompt[];
+  if (raw && typeof raw === "object" && "items" in raw)
+    return (raw as { items: Prompt[] }).items ?? [];
+  return [];
+}
+
+/* ── Page ──────────────────────────────────────────────────────────── */
 
 export function PromptManagementPage() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState<"all" | PromptCategory>("all");
-  const [editing, setEditing] = useState<Prompt | null>(null);
-  const [draft, setDraft] = useState("");
+  const [activeCategory, setActiveCategory] = useState<string | null>(null);
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [resetAllOpen, setResetAllOpen] = useState(false);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["prompts"],
-    queryFn: () => http.get<Prompt[]>("/api/v1/prompts"),
+    queryFn: () => http.get<unknown>("/api/v1/prompts").then(normalisePrompts),
   });
 
-  // BUG-02 FIX: empty API response falls through to mock ([] is truthy, ?? does not catch it)
-  const prompts = (data && data.length > 0) ? data : MOCK_PROMPTS;
+  const prompts = data ?? [];
 
-  /** Parse the JSON-encoded variables string from the backend into a string array. */
-  function parseVariables(varsStr: string): string[] {
-    try {
-      const parsed = JSON.parse(varsStr);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  }
+  const categories = useMemo(
+    () => [...new Set(prompts.map((p) => p.category))].sort(),
+    [prompts],
+  );
+
+  const modifiedCount = prompts.filter((p) => p.template !== p.defaultValue)
+    .length;
+  const editableCount = prompts.filter((p) => p.isEditable).length;
 
   const filtered = useMemo(() => {
     return prompts.filter((p) => {
-      if (categoryFilter !== "all" && p.category !== categoryFilter) return false;
-      if (
-        search &&
-        !p.name.toLowerCase().includes(search.toLowerCase()) &&
-        !p.key.toLowerCase().includes(search.toLowerCase())
-      )
-        return false;
+      if (activeCategory && p.category !== activeCategory) return false;
+      if (search) {
+        const q = search.toLowerCase();
+        return (
+          p.name.toLowerCase().includes(q) ||
+          p.key.toLowerCase().includes(q) ||
+          p.description.toLowerCase().includes(q)
+        );
+      }
       return true;
     });
-  }, [prompts, search, categoryFilter]);
+  }, [prompts, search, activeCategory]);
 
   const saveMutation = useMutation({
     mutationFn: ({ key, template }: { key: string; template: string }) =>
       http.put<Prompt>(`/api/v1/prompts/${key}`, { template }),
-    onSuccess: () => {
-      toast.success("Prompt saved");
+    onSuccess: (_res, { key }) => {
+      toast.success(`Prompt "${key}" updated`);
       queryClient.invalidateQueries({ queryKey: ["prompts"] });
-      setEditing(null);
+      setEditingKey(null);
+      setEditValue("");
     },
-    onError: () => toast.error("Failed to save prompt"),
+    onError: () => toast.error("Save failed"),
   });
 
-  function openEdit(p: Prompt) {
-    setEditing(p);
-    setDraft(p.template);
+  const resetOneMutation = useMutation({
+    mutationFn: ({ key, defaultValue }: { key: string; defaultValue: string }) =>
+      http.put<Prompt>(`/api/v1/prompts/${key}`, { template: defaultValue }),
+    onSuccess: (_res, { key }) => {
+      toast.success(`"${key}" reset to default`);
+      queryClient.invalidateQueries({ queryKey: ["prompts"] });
+    },
+    onError: () => toast.error("Reset failed"),
+  });
+
+  const resetAllMutation = useMutation({
+    mutationFn: () =>
+      http.post<{ resetCount: number; message: string }>(
+        "/api/v1/prompts/reset",
+        {},
+      ),
+    onSuccess: (res) => {
+      toast.success(res.message || `${res.resetCount} prompts reset to defaults`);
+      queryClient.invalidateQueries({ queryKey: ["prompts"] });
+      setResetAllOpen(false);
+    },
+    onError: () => toast.error("Reset all failed"),
+  });
+
+  function startEdit(p: Prompt) {
+    setEditingKey(p.key);
+    setEditValue(p.template);
+    setExpandedKey(p.key);
   }
 
-  function handleSave() {
-    if (!editing) return;
-    saveMutation.mutate({ key: editing.key, template: draft });
+  function cancelEdit() {
+    setEditingKey(null);
+    setEditValue("");
+  }
+
+  function handleSave(key: string) {
+    saveMutation.mutate({ key, template: editValue });
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 p-6">
       <PageHeader
         title="Prompt Management"
-        description="Edit the 47 prompt templates that drive OUTRENA's AI generations."
+        description="View and customize all LLM prompts used across the platform. Changes take effect immediately."
+        actions={
+          <div className="flex items-center gap-2">
+            {modifiedCount > 0 && (
+              <Badge
+                variant="secondary"
+                className="bg-amber-500/10 text-amber-600 border border-amber-500/20"
+              >
+                {modifiedCount} modified
+              </Badge>
+            )}
+            <Dialog open={resetAllOpen} onOpenChange={setResetAllOpen}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setResetAllOpen(true)}
+              >
+                <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+                Reset All
+              </Button>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Reset all prompts to defaults?</DialogTitle>
+                  <DialogDescription>
+                    All {prompts.length} prompt templates will be restored to
+                    their code-level defaults, discarding any customizations.
+                    This cannot be undone.
+                  </DialogDescription>
+                </DialogHeader>
+                <DialogFooter>
+                  <Button
+                    variant="outline"
+                    onClick={() => setResetAllOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    onClick={() => resetAllMutation.mutate()}
+                    disabled={resetAllMutation.isPending}
+                  >
+                    {resetAllMutation.isPending
+                      ? "Resetting…"
+                      : "Reset all prompts"}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </div>
+        }
       />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Prompt Library</CardTitle>
-          <CardDescription>
-            Filter by category or search by name. Click a row to edit the
-            template body.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+      {isError ? (
+        <Card>
+          <CardContent className="py-12 text-center">
+            <p className="text-muted-foreground">Failed to load prompts.</p>
+            <Button onClick={() => refetch()} className="mt-4">
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
+      ) : isLoading ? (
+        <div className="space-y-3">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} className="h-20 w-full" />
+          ))}
+        </div>
+      ) : (
+        <>
+          {/* Stats bar */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <Card className="p-3">
+              <div className="text-2xl font-bold">{prompts.length}</div>
+              <div className="text-xs text-muted-foreground">
+                Total Prompts
+              </div>
+            </Card>
+            <Card className="p-3">
+              <div className="text-2xl font-bold">{categories.length}</div>
+              <div className="text-xs text-muted-foreground">Categories</div>
+            </Card>
+            <Card className="p-3">
+              <div className="text-2xl font-bold text-green-600">
+                {editableCount}
+              </div>
+              <div className="text-xs text-muted-foreground">Editable</div>
+            </Card>
+            <Card className="p-3">
+              <div className="text-2xl font-bold text-amber-600">
+                {modifiedCount}
+              </div>
+              <div className="text-xs text-muted-foreground">Customized</div>
+            </Card>
+          </div>
+
+          {/* Search & category filter */}
+          <div className="flex flex-col sm:flex-row gap-3">
             <div className="relative flex-1">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="Search by name or key…"
+                placeholder="Search prompts by name, key, or description…"
+                className="pl-9"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="pl-9"
               />
             </div>
-            <Select
-              value={categoryFilter}
-              onChange={(e) =>
-                setCategoryFilter(e.target.value as "all" | PromptCategory)
-              }
-              className="sm:w-56"
-            >
-              <option value="all">All categories</option>
-              {CATEGORIES.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </Select>
-          </div>
-
-          {isLoading ? (
-            <div className="space-y-2">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <Skeleton key={i} className="h-12 w-full" />
+            <div className="flex gap-1.5 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setActiveCategory(null)}
+                className={`px-3 py-1.5 text-xs rounded-full border transition-colors ${
+                  !activeCategory
+                    ? "bg-primary text-primary-foreground border-primary"
+                    : "bg-card border-border hover:bg-accent"
+                }`}
+              >
+                All
+              </button>
+              {categories.map((cat) => (
+                <button
+                  type="button"
+                  key={cat}
+                  onClick={() =>
+                    setActiveCategory(activeCategory === cat ? null : cat)
+                  }
+                  className={`px-3 py-1.5 text-xs rounded-full border transition-colors ${
+                    activeCategory === cat
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "bg-card border-border hover:bg-accent"
+                  }`}
+                >
+                  {categoryLabel(cat)}
+                </button>
               ))}
             </div>
-          ) : filtered.length === 0 ? (
-            <EmptyState
-              icon={<FileText className="h-6 w-6" />}
-              title="No prompts match"
-              description="Try clearing the search or category filter."
-            />
-          ) : (
-            <ScrollArea maxHeightClass="max-h-[28rem]">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Key</TableHead>
-                    <TableHead>Name</TableHead>
-                    <TableHead>Category</TableHead>
-                    <TableHead>Variables</TableHead>
-                    <TableHead>Updated</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filtered.map((p) => (
-                    <TableRow
-                      key={p.key}
-                      onClick={() => openEdit(p)}
-                      className="cursor-pointer"
-                    >
-                      <TableCell className="font-mono text-xs text-muted-foreground">
+          </div>
+
+          {/* Prompt cards */}
+          <div className="space-y-3">
+            {filtered.length === 0 && (
+              <Card className="p-8 text-center">
+                <Search className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
+                <p className="text-muted-foreground">
+                  {prompts.length === 0
+                    ? "No prompt templates found."
+                    : "No prompts match your search."}
+                </p>
+              </Card>
+            )}
+            {filtered.map((p) => {
+              const isExpanded = expandedKey === p.key;
+              const isEditing = editingKey === p.key;
+              const isModified = p.template !== p.defaultValue;
+              const colorClass = categoryColor(p.category, categories);
+
+              return (
+                <Card
+                  key={p.key}
+                  className={`transition-all ${
+                    isEditing ? "ring-2 ring-primary/50" : ""
+                  } ${isModified ? "border-amber-500/30" : ""}`}
+                >
+                  <div
+                    className="flex items-start gap-3 p-4 cursor-pointer"
+                    onClick={() => {
+                      if (!isEditing)
+                        setExpandedKey(isExpanded ? null : p.key);
+                    }}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-medium text-sm">{p.name}</span>
+                        <span
+                          className={`text-[10px] px-1.5 py-0.5 rounded-full border ${colorClass}`}
+                        >
+                          {categoryLabel(p.category)}
+                        </span>
+                        {isModified && (
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] px-1.5 py-0 border-amber-500/30 text-amber-600 bg-amber-500/5"
+                          >
+                            Customized
+                          </Badge>
+                        )}
+                        {p.isEditable ? (
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] px-1.5 py-0 border-green-500/30 text-green-600 bg-green-500/5"
+                          >
+                            Editable
+                          </Badge>
+                        ) : (
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] px-1.5 py-0 border-gray-500/30 text-gray-500 bg-gray-500/5"
+                          >
+                            Read-only
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {p.description}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground/60 font-mono mt-1">
                         {p.key}
-                      </TableCell>
-                      <TableCell className="font-medium">
-                        {truncate(p.name, 38)}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant={categoryVariant(p.category)}>
-                          {p.category}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {parseVariables(p.variables).length === 0
-                          ? "—"
-                          : `${parseVariables(p.variables).length} vars`}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {formatDateTime(p.updatedAt)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </ScrollArea>
-          )}
-        </CardContent>
-      </Card>
+                      </p>
+                      {p.variables.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-2">
+                          {p.variables.map((v) => (
+                            <span
+                              key={v}
+                              className="text-[10px] px-1.5 py-0.5 bg-muted rounded font-mono"
+                              title="Replaced at runtime with real data"
+                            >
+                              {`{{${v}}}`}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {p.isEditable && (
+                        <Button
+                          variant={isEditing ? "ghost" : "outline"}
+                          size="sm"
+                          title={isEditing ? "Cancel editing" : "Edit this prompt"}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (isEditing) cancelEdit();
+                            else startEdit(p);
+                          }}
+                        >
+                          {isEditing ? (
+                            <X className="h-3.5 w-3.5" />
+                          ) : (
+                            <Edit3 className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                      )}
+                      {isModified && p.isEditable && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          title="Reset to default"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            resetOneMutation.mutate({
+                              key: p.key,
+                              defaultValue: p.defaultValue,
+                            });
+                          }}
+                          disabled={resetOneMutation.isPending}
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
+                      <ChevronDown
+                        className={`h-4 w-4 text-muted-foreground transition-transform ${
+                          isExpanded ? "rotate-180" : ""
+                        }`}
+                      />
+                    </div>
+                  </div>
 
-      <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
-        <DialogClose onClose={() => setEditing(null)} />
-        <DialogHeader>
-          <DialogTitle>Edit prompt</DialogTitle>
-          <DialogDescription>
-            {editing ? `${editing.key} · ${editing.description}` : ""}
-          </DialogDescription>
-        </DialogHeader>
-
-        {editing && (
-          <div className="space-y-4">
-            <div>
-              <p className="mb-1 text-xs text-muted-foreground">
-                Available variables
-              </p>
-              <div className="flex flex-wrap gap-1">
-                {parseVariables(editing.variables).length === 0 ? (
-                  <span className="text-xs text-muted-foreground">
-                    None — this is a static system prompt.
-                  </span>
-                ) : (
-                  parseVariables(editing.variables).map((v) => (
-                    <Badge key={v} variant="outline" className="font-mono">
-                      {`{{${v}}}`}
-                    </Badge>
-                  ))
-                )}
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="template">Template body</Label>
-              <Textarea
-                id="template"
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                className="min-h-[18rem] font-mono text-xs"
-              />
-            </div>
+                  {isExpanded && (
+                    <div className="px-4 pb-4 border-t border-border/50 pt-3">
+                      {isEditing ? (
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-muted-foreground">
+                              Editing: {p.name}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground">
+                              {editValue.length} chars
+                            </span>
+                          </div>
+                          <textarea
+                            className="w-full min-h-[250px] p-3 text-sm font-mono bg-muted/50 border border-border rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-primary/30"
+                            value={editValue}
+                            onChange={(e) => setEditValue(e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                          <div className="flex items-center justify-between">
+                            <p className="text-[10px] text-muted-foreground">
+                              Tip: Use{" "}
+                              <code className="bg-muted px-1 rounded">
+                                {"{{variableName}}"}
+                              </code>{" "}
+                              for dynamic values. Variables are replaced at
+                              runtime.
+                            </p>
+                            <div className="flex gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={cancelEdit}
+                              >
+                                Cancel
+                              </Button>
+                              <Button
+                                size="sm"
+                                onClick={() => handleSave(p.key)}
+                                disabled={
+                                  saveMutation.isPending ||
+                                  editValue === p.template
+                                }
+                              >
+                                {saveMutation.isPending ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
+                                ) : (
+                                  <Save className="h-3.5 w-3.5 mr-1.5" />
+                                )}
+                                Save
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <pre className="text-xs font-mono bg-muted/30 border border-border/50 rounded-lg p-3 overflow-auto max-h-[300px] whitespace-pre-wrap break-words leading-relaxed text-foreground/80">
+                            {p.template}
+                          </pre>
+                          <p className="text-[10px] text-muted-foreground mt-2">
+                            Last updated {formatDateTime(p.updatedAt)}
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </Card>
+              );
+            })}
           </div>
-        )}
+        </>
+      )}
 
-        <DialogFooter>
-          <Button variant="outline" onClick={() => setEditing(null)}>
-            Cancel
-          </Button>
-          <Button
-            onClick={handleSave}
-            disabled={saveMutation.isPending || draft === editing?.template}
-          >
-            <Save className="h-4 w-4" />
-            Save changes
-          </Button>
-        </DialogFooter>
-      </Dialog>
+      {/* Info footer */}
+      <Card className="p-4 bg-muted/30 border-dashed">
+        <div className="flex gap-3">
+          <Info className="h-4 w-4 text-muted-foreground shrink-0 mt-0.5" />
+          <div className="text-xs text-muted-foreground space-y-1">
+            <p>
+              <strong>How it works:</strong> All prompts are stored in the
+              database. When you edit a prompt, the updated version is used
+              immediately across all AI features. The code-level defaults
+              serve as fallbacks and can be restored anytime using the Reset
+              button.
+            </p>
+            <p>
+              <strong>Variables:</strong> Prompts containing{" "}
+              <code className="bg-muted px-1 rounded">{"{{variable}}"}</code>{" "}
+              placeholders are dynamically populated at runtime (e.g.,
+              prospect name, campaign data).
+            </p>
+            <p>
+              <strong>Read-only prompts</strong> are displayed for reference
+              but cannot be modified through this interface.
+            </p>
+          </div>
+        </div>
+      </Card>
     </div>
   );
 }

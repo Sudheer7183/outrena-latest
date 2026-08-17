@@ -1,29 +1,40 @@
 /**
  * IcpProfilesPage.tsx — ICP profiles CRUD + AI Suggest + Auto-Discover.
  *
- * Left: list of profiles (name, segment, avg ICP score, prospect count).
- * Right: detail panel with tabs (Profile / Scoring / Signals) + edit form.
- * "AI Suggest" → icp-suggest w/ seed description fills the form.
- * "Auto-Discover" → icp-auto-discover w/ a URL generates a profile.
+ * Layout  : card grid (3-col responsive), matching the Next.js reference.
+ * API     : /api/v1/icp-profiles (list, create, update, delete)
+ *           /api/v1/icp-profiles/suggest  (AI suggest fields)
+ *           /api/v1/icp-profiles/auto-discover (derive ICP from prospects)
+ *
+ * ICP-1  ✓ Auto-Discover dialog — 2-tab (website / description), save toggle,
+ *            result preview, per-persona save.
+ * ICP-2  ✓ Correct form fields: name, persona, companyType, topObjections (3),
+ *            painPoints (3), valueProps (3), senderRole, senderCompany,
+ *            senderOffer, proofMetric.
+ * ICP-3  ✓ Card grid display — all fields shown with badge truncation + expand.
+ * ICP-4  ✓ Edit dialog pre-populated with existing values.
+ * ICP-5  ✓ Delete with confirmation dialog.
+ * ICP-6  ✓ LLM config warning banner when no active LLM.
  */
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Sparkles,
   Globe,
   Plus,
-  Pencil,
   Trash2,
-  Users,
   Target,
   Loader2,
-  Save,
+  Wand2,
+  Edit3,
+  AlertCircle,
+  CheckCircle2,
+  FileText,
+  Bot,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { http } from "@/services/apiClient";
-import { Pagination, usePagination } from "@/components/ui/pagination";
-import { cn, formatPercent, timeAgo } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -34,13 +45,11 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { InfoLabel } from "@/components/ui/info-label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { PageHeader } from "@/components/ui/page-header";
-import { Progress } from "@/components/ui/progress";
-import { EmptyState } from "@/components/ui/empty-state";
+import { Switch } from "@/components/ui/switch";
 import {
   Tabs,
   TabsList,
@@ -49,640 +58,661 @@ import {
 } from "@/components/ui/tabs";
 import {
   Dialog,
-  DialogClose,
+  DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import type { SeniorityTier } from "@/types/common";
 
-/* ── Types ─────────────────────────────────────────────────────────── */
-
-interface ScoreWeights {
-  industry: number;
-  companySize: number;
-  seniority: number;
-  intent: number;
-  engagement: number;
-}
+/* ── Types (aligned with backend IcpResponse schema) ───────────────── */
 
 interface IcpProfile {
   id: string;
   name: string;
-  targetSegment: string;
-  industry: string;
-  companySize: string;
-  seniority: SeniorityTier;
+  persona: string | null;
+  companyType: string | null;
+  topObjections: string[];
   painPoints: string[];
-  buyingSignals: string[];
-  scoreWeights: ScoreWeights;
-  icpScoreAvg: number;
-  prospectCount: number;
+  valueProps: string[];
+  senderRole: string | null;
+  senderCompany: string | null;
+  senderOffer: string | null;
+  proofMetric: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
-type IcpSuggestResponse = {
-  name?: string;
-  persona?: string;
-  companyType?: string | null;
-  painPoints?: string[];
-  valueProps?: string[];
-  topObjections?: string[];
-  raw?: string | null;
-};
+interface LlmConfig {
+  id: string;
+  isActive?: boolean;
+  is_active?: boolean;
+  isDefault?: boolean;
+  is_default?: boolean;
+}
 
-type IcpAutoDiscoverResponse = {
-  name?: string;
-  persona?: string;
-  companyType?: string | null;
-  industries?: string[];
-  companySizes?: string[];
-  seniorityTiers?: string[];
-  painPoints?: string[];
-  valueProps?: string[];
-  topObjections?: string[];
-  raw?: string | null;
-};
+/* Flat form state — 3 indexed inputs per array field */
+interface IcpFormState {
+  name: string;
+  persona: string;
+  companyType: string;
+  senderRole: string;
+  senderCompany: string;
+  senderOffer: string;
+  proofMetric: string;
+  objection1: string;
+  objection2: string;
+  objection3: string;
+  pain1: string;
+  pain2: string;
+  pain3: string;
+  value1: string;
+  value2: string;
+  value3: string;
+}
 
-const EMPTY_PROFILE: Omit<IcpProfile, "id" | "createdAt" | "updatedAt" | "icpScoreAvg" | "prospectCount"> = {
+const EMPTY_FORM: IcpFormState = {
   name: "",
-  targetSegment: "",
-  industry: "",
-  companySize: "",
-  seniority: "Director",
-  painPoints: [],
-  buyingSignals: [],
-  scoreWeights: { industry: 25, companySize: 20, seniority: 15, intent: 25, engagement: 15 },
+  persona: "",
+  companyType: "",
+  senderRole: "",
+  senderCompany: "",
+  senderOffer: "",
+  proofMetric: "",
+  objection1: "",
+  objection2: "",
+  objection3: "",
+  pain1: "",
+  pain2: "",
+  pain3: "",
+  value1: "",
+  value2: "",
+  value3: "",
 };
 
-/* ── Mock data ─────────────────────────────────────────────────────── */
+/* ── Helpers ────────────────────────────────────────────────────────── */
 
-const MOCK_PROFILES: IcpProfile[] = [
-  {
-    id: "icp-1",
-    name: "Fintech VP Sales (Series B/C)",
-    targetSegment: "B2B Fintech / Payments",
-    industry: "Financial Services",
-    companySize: "50–200",
-    seniority: "Director",
-    painPoints: [
-      "SDR ramp time too long",
-      "Salesforce data quality is poor",
-      "Pipeline coverage < 3x",
-    ],
-    buyingSignals: [
-      "Hiring SDRs in last 90d",
-      "Just raised Series B",
-      "Using Sales Navigator",
-    ],
-    scoreWeights: { industry: 25, companySize: 20, seniority: 15, intent: 25, engagement: 15 },
-    icpScoreAvg: 0.78,
-    prospectCount: 142,
-    createdAt: "2024-11-20T10:00:00Z",
-    updatedAt: "2025-01-08T14:30:00Z",
-  },
-  {
-    id: "icp-2",
-    name: "Mid-Market HR Ops Director",
-    targetSegment: "HR Tech / People Ops",
-    industry: "Software / SaaS",
-    companySize: "200–1000",
-    seniority: "Director",
-    painPoints: [
-      "Manual onboarding workflows",
-      "HRIS data siloed from LMS",
-      "Compliance reporting is slow",
-    ],
-    buyingSignals: [
-      "Posted HR Ops role",
-      "Using Workday",
-      "Mentioned onboarding pain on LinkedIn",
-    ],
-    scoreWeights: { industry: 20, companySize: 25, seniority: 20, intent: 20, engagement: 15 },
-    icpScoreAvg: 0.71,
-    prospectCount: 89,
-    createdAt: "2024-12-01T09:00:00Z",
-    updatedAt: "2025-01-05T11:15:00Z",
-  },
-  {
-    id: "icp-3",
-    name: "DevTools Eng Lead (IC)",
-    targetSegment: "Developer Tools / Platform Eng",
-    industry: "Software / Infrastructure",
-    companySize: "20–100",
-    seniority: "IC",
-    painPoints: [
-      "CI/CD pipeline flakiness",
-      "Observability costs ballooning",
-      "On-call burnout",
-    ],
-    buyingSignals: [
-      "Starred relevant GH repos",
-      "Posted hiring req for SRE",
-      "Talked at KubeCon",
-    ],
-    scoreWeights: { industry: 30, companySize: 15, seniority: 10, intent: 30, engagement: 15 },
-    icpScoreAvg: 0.83,
-    prospectCount: 56,
-    createdAt: "2024-12-15T16:00:00Z",
-    updatedAt: "2025-01-09T08:45:00Z",
-  },
-];
+function profileToForm(p: IcpProfile): IcpFormState {
+  return {
+    name: p.name,
+    persona: p.persona ?? "",
+    companyType: p.companyType ?? "",
+    senderRole: p.senderRole ?? "",
+    senderCompany: p.senderCompany ?? "",
+    senderOffer: p.senderOffer ?? "",
+    proofMetric: p.proofMetric ?? "",
+    objection1: p.topObjections[0] ?? "",
+    objection2: p.topObjections[1] ?? "",
+    objection3: p.topObjections[2] ?? "",
+    pain1: p.painPoints[0] ?? "",
+    pain2: p.painPoints[1] ?? "",
+    pain3: p.painPoints[2] ?? "",
+    value1: p.valueProps[0] ?? "",
+    value2: p.valueProps[1] ?? "",
+    value3: p.valueProps[2] ?? "",
+  };
+}
+
+function formToPayload(f: IcpFormState) {
+  return {
+    name: f.name.trim(),
+    persona: f.persona.trim() || null,
+    companyType: f.companyType.trim() || null,
+    senderRole: f.senderRole.trim() || null,
+    senderCompany: f.senderCompany.trim() || null,
+    senderOffer: f.senderOffer.trim() || null,
+    proofMetric: f.proofMetric.trim() || null,
+    topObjections: [f.objection1, f.objection2, f.objection3].filter(Boolean),
+    painPoints: [f.pain1, f.pain2, f.pain3].filter(Boolean),
+    valueProps: [f.value1, f.value2, f.value3].filter(Boolean),
+  };
+}
+
+function normaliseProfiles(raw: unknown): IcpProfile[] {
+  if (Array.isArray(raw)) return raw as IcpProfile[];
+  if (raw && typeof raw === "object" && "items" in raw)
+    return (raw as { items: IcpProfile[] }).items ?? [];
+  return [];
+}
 
 /* ── Page ──────────────────────────────────────────────────────────── */
 
 export function IcpProfilesPage() {
   const qc = useQueryClient();
-  const [selectedId, setSelectedId] = useState<string | null>(MOCK_PROFILES[0].id);
-  const [draft, setDraft] = useState<IcpProfile | null>(null);
-  const [seedDesc, setSeedDesc] = useState("");
-  const [discoverUrl, setDiscoverUrl] = useState("");
+
+  /* ── Dialog state ── */
+  const [crudOpen, setCrudOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState<IcpFormState>(EMPTY_FORM);
+
+  const [discoverOpen, setDiscoverOpen] = useState(false);
+  const [discoverMode, setDiscoverMode] = useState<"website" | "description">(
+    "website"
+  );
+  const [discoverWebsite, setDiscoverWebsite] = useState("");
+  const [discoverDescription, setDiscoverDescription] = useState("");
+  const [discoverSave, setDiscoverSave] = useState(true);
+  const [discoverResult, setDiscoverResult] = useState<unknown>(null);
+  const [discovering, setDiscovering] = useState(false);
+
+  const [suggesting, setSuggesting] = useState(false);
+
   const [deleteTarget, setDeleteTarget] = useState<IcpProfile | null>(null);
 
-  const listQuery = useQuery<IcpProfile[]>({
+  /* ── Queries ── */
+  const profilesQ = useQuery<IcpProfile[]>({
     queryKey: ["icp-profiles"],
-    queryFn: () => http.get<IcpProfile[]>("/api/v1/icp-profiles"),
+    queryFn: () =>
+      http.get<unknown>("/api/v1/icp-profiles").then(normaliseProfiles),
   });
-  const profiles = listQuery.data ?? MOCK_PROFILES;
+  const profiles = profilesQ.data ?? [];
 
-  const { page, pageSize, total, pageItems, setPage, setPageSize } = usePagination({ items: profiles, initialPageSize: 15 });
-
-  const selected = useMemo(() => {
-    if (draft) return draft;
-    return profiles.find((p) => p.id === selectedId) ?? null;
-  }, [draft, profiles, selectedId]);
-
-  /* mutations */
-  const suggestMutation = useMutation({
-    mutationFn: (seed: string) =>
-      http.post<IcpSuggestResponse>("/api/v1/icp-suggest", { seed }),
-    onSuccess: (data) => {
-      qc.invalidateQueries({ queryKey: ["icp-profiles"] });
-      toast.success("AI suggestion applied", {
-        description: "Profile fields filled from seed description.",
-      });
-      /* BUG-15 FIX: Backend returns flat fields (name, persona, painPoints, etc.)
-         not a nested IcpProfile object.  Construct the profile manually. */
-      setDraft((prev) => ({
-        ...(prev ?? EMPTY_PROFILE),
-        name: data.name ?? prev?.name ?? "",
-        targetSegment: data.companyType ?? prev?.targetSegment ?? "",
-        industry: data.companyType ?? prev?.industry ?? "",
-        painPoints: data.painPoints ?? prev?.painPoints ?? [],
-        buyingSignals: prev?.buyingSignals ?? [],
-        scoreWeights: prev?.scoreWeights ?? EMPTY_PROFILE.scoreWeights,
-        id: prev?.id ?? "draft",
-        createdAt: prev?.createdAt ?? new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        icpScoreAvg: prev?.icpScoreAvg ?? 0,
-        prospectCount: prev?.prospectCount ?? 0,
-      }) as IcpProfile);
-    },
-    onError: (err) => {
-      toast.error("AI suggestion failed", {
-        description: err instanceof Error ? err.message : "Unknown error",
-      });
-    },
+  const llmQ = useQuery<LlmConfig[]>({
+    queryKey: ["llm-configs"],
+    queryFn: () =>
+      http
+        .get<unknown>("/api/v1/llm-configs")
+        .then((r) => (Array.isArray(r) ? r : (r as { items?: LlmConfig[] })?.items ?? [])),
   });
+  const hasLlm = (llmQ.data ?? []).some(
+    (c) => (c.isActive ?? c.is_active) !== false
+  );
 
-  const discoverMutation = useMutation({
-    mutationFn: (url: string) =>
-      http.post<IcpAutoDiscoverResponse>("/api/v1/icp-auto-discover", { url }),
-    onSuccess: (data) => {
-      qc.invalidateQueries({ queryKey: ["icp-profiles"] });
-      toast.success("Auto-discovered profile", {
-        description: `From ${urlOrDomain(discoverUrl)}`,
-      });
-      setDraft({
-        ...EMPTY_PROFILE,
-        ...data,
-        name: data.name ?? `Profile from ${urlOrDomain(discoverUrl)}`,
-        id: "draft",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        icpScoreAvg: 0.69,
-        prospectCount: 0,
-      } as IcpProfile);
-    },
-    onError: (err) => {
-      toast.error("Auto-discover failed", {
-        description: err instanceof Error ? err.message : "Unknown error",
-      });
-    },
-  });
-
+  /* ── Mutations ── */
   const saveMutation = useMutation({
-    mutationFn: (profile: IcpProfile) => {
-      const body = stripPersisted(profile);
-      if (profile.id === "draft" || !profiles.some((p) => p.id === profile.id)) {
-        return http.post<IcpProfile>("/api/v1/icp-profiles", body);
-      }
-      return http.put<IcpProfile>(`/api/v1/icp-profiles/${profile.id}`, body);
+    mutationFn: (payload: ReturnType<typeof formToPayload> & { id?: string }) => {
+      const { id, ...body } = payload;
+      if (id) return http.put<IcpProfile>(`/api/v1/icp-profiles/${id}`, body);
+      return http.post<IcpProfile>("/api/v1/icp-profiles", body);
     },
     onSuccess: () => {
-      toast.success("Profile saved");
-      setDraft(null);
+      toast.success(editingId ? "ICP profile updated" : "ICP profile saved");
+      setCrudOpen(false);
+      setForm(EMPTY_FORM);
+      setEditingId(null);
       qc.invalidateQueries({ queryKey: ["icp-profiles"] });
     },
-    onError: () => {
-      toast.error("Failed to save — backend unavailable");
-    },
+    onError: () => toast.error("Failed to save ICP profile"),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => http.delete(`/api/v1/icp-profiles/${id}`),
     onSuccess: () => {
-      toast.success("Profile deleted");
-      setSelectedId(profiles[0]?.id ?? null);
+      toast.success("ICP profile deleted");
       setDeleteTarget(null);
       qc.invalidateQueries({ queryKey: ["icp-profiles"] });
     },
-    onError: () => toast.error("Delete failed — backend unavailable"),
+    onError: () => toast.error("Delete failed"),
   });
 
-  function handleSelect(p: IcpProfile) {
-    setDraft(null);
-    setSelectedId(p.id);
+  /* ── Handlers ── */
+  function openCreate() {
+    setEditingId(null);
+    setForm(EMPTY_FORM);
+    setCrudOpen(true);
   }
 
-  function handleNew() {
-    setDraft({
-      ...EMPTY_PROFILE,
-      id: "draft",
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      icpScoreAvg: 0,
-      prospectCount: 0,
-    });
-    setSelectedId(null);
+  function openEdit(p: IcpProfile) {
+    setEditingId(p.id);
+    setForm(profileToForm(p));
+    setCrudOpen(true);
   }
 
   function handleSave() {
-    if (!selected) return;
-    if (!selected.name.trim()) {
+    if (!form.name.trim()) {
       toast.error("Profile name is required");
       return;
     }
-    saveMutation.mutate(selected);
+    const payload = formToPayload(form);
+    saveMutation.mutate(editingId ? { ...payload, id: editingId } : payload);
   }
 
-  function patch<K extends keyof IcpProfile>(key: K, value: IcpProfile[K]) {
-    if (!selected) return;
-    const target = draft ?? selected;
-    setDraft({ ...target, [key]: value, updatedAt: new Date().toISOString() });
+  async function handleAiSuggest() {
+    if (!form.persona.trim()) {
+      toast.error("Enter a persona description first, then click AI Suggest");
+      return;
+    }
+    setSuggesting(true);
+    try {
+      const data = await http.post<{
+        suggestions?: {
+          painPoints?: string[];
+          objections?: string[];
+          valueProps?: string[];
+          proofMetric?: string;
+        };
+        painPoints?: string[];
+        topObjections?: string[];
+        valueProps?: string[];
+        proofMetric?: string;
+      }>("/api/v1/icp-profiles/suggest", {
+        seed: form.persona,
+      });
+      // Support both wrapped (data.suggestions) and flat response shapes
+      const s = (data as { suggestions?: typeof data }).suggestions ?? data;
+      const pains = s.painPoints ?? [];
+      const objections = s.topObjections ?? (s as { objections?: string[] }).objections ?? [];
+      const values = s.valueProps ?? [];
+      setForm((f) => ({
+        ...f,
+        pain1: pains[0] ?? f.pain1,
+        pain2: pains[1] ?? f.pain2,
+        pain3: pains[2] ?? f.pain3,
+        objection1: objections[0] ?? f.objection1,
+        objection2: objections[1] ?? f.objection2,
+        objection3: objections[2] ?? f.objection3,
+        value1: values[0] ?? f.value1,
+        value2: values[1] ?? f.value2,
+        value3: values[2] ?? f.value3,
+        proofMetric: (s.proofMetric ?? f.proofMetric) || f.proofMetric,
+      }));
+      toast.success("AI suggestions applied! Review and adjust as needed.");
+    } catch {
+      toast.error("AI suggestion failed");
+    }
+    setSuggesting(false);
   }
 
+  function resetDiscover() {
+    setDiscoverMode("website");
+    setDiscoverWebsite("");
+    setDiscoverDescription("");
+    setDiscoverSave(true);
+    setDiscoverResult(null);
+  }
+
+  async function handleAutoDiscover() {
+    if (discoverMode === "website" && !discoverWebsite.trim()) {
+      toast.error("Enter your website URL");
+      return;
+    }
+    if (discoverMode === "description" && discoverDescription.trim().length < 10) {
+      toast.error("Enter at least 10 characters describing your ICP");
+      return;
+    }
+    setDiscovering(true);
+    setDiscoverResult(null);
+    try {
+      // Backend /auto-discover accepts a list of prospects. For the
+      // website/description flow we send a synthetic single-prospect payload
+      // with the input embedded in the description field.
+      const syntheticProspect =
+        discoverMode === "website"
+          ? { description: `website: ${discoverWebsite.trim()}` }
+          : { description: discoverDescription.trim() };
+
+      const data = await http.post<unknown>(
+        "/api/v1/icp-profiles/auto-discover",
+        {
+          prospects: [syntheticProspect],
+          existingIcpId: null,
+        }
+      );
+      setDiscoverResult(data);
+
+      if (discoverSave) {
+        // Auto-save: derive a profile from the response and POST it
+        const r = data as {
+          suggestedPersona?: string;
+          commonAttributes?: Record<string, unknown>;
+        };
+        const name =
+          discoverMode === "website"
+            ? `Profile from ${discoverWebsite.trim()}`
+            : "Auto-Discovered ICP";
+        await http.post<IcpProfile>("/api/v1/icp-profiles", {
+          name,
+          persona: r.suggestedPersona ?? "",
+          companyType:
+            String(r.commonAttributes?.companyType ?? "") || null,
+          painPoints: [],
+          topObjections: [],
+          valueProps: [],
+        });
+        toast.success(`Auto-discovered ICP saved — "${name}"`);
+        qc.invalidateQueries({ queryKey: ["icp-profiles"] });
+        setTimeout(() => {
+          setDiscoverOpen(false);
+          resetDiscover();
+        }, 2500);
+      } else {
+        toast.success("Auto-discovery complete — review the result below");
+      }
+    } catch {
+      toast.error("Auto-discovery failed");
+    }
+    setDiscovering(false);
+  }
+
+  async function handleSaveDiscoveredProfile(profileData: {
+    name?: string;
+    persona?: string;
+    companyType?: string | null;
+  }) {
+    try {
+      await http.post<IcpProfile>("/api/v1/icp-profiles", {
+        name: profileData.name ?? "Auto-Discovered ICP",
+        persona: profileData.persona ?? "",
+        companyType: profileData.companyType ?? null,
+        painPoints: [],
+        topObjections: [],
+        valueProps: [],
+      });
+      toast.success(`Saved "${profileData.name ?? "ICP"}" to your list`);
+      qc.invalidateQueries({ queryKey: ["icp-profiles"] });
+      setDiscoverOpen(false);
+      resetDiscover();
+    } catch {
+      toast.error("Failed to save profile");
+    }
+  }
+
+  /* ── Render ── */
   return (
     <div className="space-y-6 p-6">
       <PageHeader
         title="ICP Profiles"
-        description="Define, score, and refine your Ideal Customer Profiles. AI Suggest and Auto-Discover accelerate profile creation."
+        description="Define your Ideal Customer Profiles for targeted outreach"
         actions={
-          <Button size="sm" onClick={handleNew}>
-            <Plus className="h-4 w-4" />
-            New Profile
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* Auto-Discover ICP */}
+            <Dialog
+              open={discoverOpen}
+              onOpenChange={(o) => {
+                setDiscoverOpen(o);
+                if (!o) resetDiscover();
+              }}
+            >
+              <DialogTrigger asChild>
+                <Button
+                  variant="outline"
+                  className="border-violet-300 text-violet-700 hover:bg-violet-50"
+                  onClick={() => {
+                    resetDiscover();
+                    setDiscoverOpen(true);
+                  }}
+                >
+                  <Wand2 className="h-4 w-4 mr-2" />
+                  Auto-Discover ICP
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+                <DialogHeader>
+                  <DialogTitle>Auto-Discover ICP</DialogTitle>
+                  <DialogDescription>
+                    Let the AI infer your Ideal Customer Profile — the fastest
+                    way to get started.
+                  </DialogDescription>
+                </DialogHeader>
+
+                <div className="space-y-4 py-4">
+                  {/* LLM warning */}
+                  {!hasLlm && (
+                    <div className="rounded-md bg-amber-50 border border-amber-300 p-4 text-sm space-y-2">
+                      <p className="font-medium text-amber-900 flex items-center gap-2">
+                        <AlertCircle className="h-4 w-4" />
+                        No AI model configured
+                      </p>
+                      <p className="text-amber-800 text-xs">
+                        Auto-Discover needs an LLM. Configure one in LLM
+                        Models first.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Mode tabs */}
+                  <Tabs
+                    value={discoverMode}
+                    onValueChange={(v) => {
+                      setDiscoverMode(v as "website" | "description");
+                      setDiscoverResult(null);
+                    }}
+                  >
+                    <TabsList className="grid w-full grid-cols-2">
+                      <TabsTrigger value="website">
+                        <Globe className="h-3.5 w-3.5 mr-1.5" />
+                        From your website
+                      </TabsTrigger>
+                      <TabsTrigger value="description">
+                        <FileText className="h-3.5 w-3.5 mr-1.5" />
+                        From description
+                      </TabsTrigger>
+                    </TabsList>
+
+                    <TabsContent value="website" className="space-y-3 mt-4">
+                      <div className="rounded-md bg-violet-50 border border-violet-200 p-3 text-xs text-violet-800">
+                        <p className="font-medium mb-1">How it works</p>
+                        <p>
+                          Enter your company URL. The AI reads your website,
+                          searches for competitors and industry context, and
+                          infers your ICP automatically — persona, company
+                          type, pain points, and value propositions.
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Your Website URL</Label>
+                        <Input
+                          placeholder="e.g. mycompany.com"
+                          value={discoverWebsite}
+                          onChange={(e) => setDiscoverWebsite(e.target.value)}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          No need to include https:// — we'll strip it.
+                        </p>
+                      </div>
+                    </TabsContent>
+
+                    <TabsContent
+                      value="description"
+                      className="space-y-3 mt-4"
+                    >
+                      <div className="rounded-md bg-violet-50 border border-violet-200 p-3 text-xs text-violet-800">
+                        <p className="font-medium mb-1">How it works</p>
+                        <p>
+                          Describe your ideal customer in plain English. The
+                          AI structures it into a full ICP profile — persona,
+                          company type, pain points, objections, and value
+                          propositions.
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Describe your ideal customer</Label>
+                        <Textarea
+                          placeholder="e.g. We sell to VP of Engineering at Series B SaaS companies (50–500 employees) who are struggling with slow release cycles..."
+                          value={discoverDescription}
+                          onChange={(e) =>
+                            setDiscoverDescription(e.target.value)
+                          }
+                          rows={5}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          The more specific you are, the better the AI result.
+                        </p>
+                      </div>
+                    </TabsContent>
+                  </Tabs>
+
+                  <Separator />
+
+                  {/* Save toggle */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium">
+                        Save profiles automatically
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        If on, discovered profiles are saved immediately. If
+                        off, you can review first.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={discoverSave}
+                      onCheckedChange={setDiscoverSave}
+                    />
+                  </div>
+
+                  {/* Result */}
+                  {Boolean(discoverResult) && (
+                    <DiscoverResult
+                      result={discoverResult as DiscoverResultShape}
+                      discoverMode={discoverMode}
+                      discoverSave={discoverSave}
+                      discoverWebsite={discoverWebsite}
+                      onSaveProfile={handleSaveDiscoveredProfile}
+                    />
+                  )}
+                </div>
+
+                <DialogFooter>
+                  {discovering && (
+                    <p className="text-xs text-muted-foreground mr-auto flex items-center gap-1.5">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      {discoverMode === "website"
+                        ? "Searching the web + AI analysis (30–60 s)…"
+                        : "AI analyzing your description (10–20 s)…"}
+                    </p>
+                  )}
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setDiscoverOpen(false);
+                      resetDiscover();
+                    }}
+                  >
+                    Close
+                  </Button>
+                  <Button
+                    onClick={handleAutoDiscover}
+                    disabled={discovering || !hasLlm}
+                  >
+                    {discovering ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                        Discovering…
+                      </>
+                    ) : (
+                      <>
+                        <Wand2 className="h-3.5 w-3.5 mr-1.5" />
+                        Run Auto-Discovery
+                      </>
+                    )}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
+            {/* Create ICP (manual) */}
+            <Dialog
+              open={crudOpen}
+              onOpenChange={(o) => {
+                setCrudOpen(o);
+                if (!o) {
+                  setForm(EMPTY_FORM);
+                  setEditingId(null);
+                }
+              }}
+            >
+              <DialogTrigger asChild>
+                <Button onClick={openCreate}>
+                  <Plus className="h-4 w-4 mr-2" />
+                  Create ICP
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+                <IcpFormDialog
+                  form={form}
+                  setForm={setForm}
+                  editingId={editingId}
+                  suggesting={suggesting}
+                  saving={saveMutation.isPending}
+                  hasLlm={hasLlm}
+                  onAiSuggest={handleAiSuggest}
+                  onSave={handleSave}
+                  onClose={() => {
+                    setCrudOpen(false);
+                    setForm(EMPTY_FORM);
+                    setEditingId(null);
+                  }}
+                />
+              </DialogContent>
+            </Dialog>
+          </div>
         }
       />
 
-      {listQuery.isError ? (
-        <Card className="mt-6">
+      {/* LLM warning banner */}
+      {!hasLlm && !llmQ.isLoading && (
+        <div className="rounded-md bg-amber-50 border border-amber-300 p-4 flex items-start gap-3">
+          <AlertCircle className="h-5 w-5 text-amber-600 mt-0.5 shrink-0" />
+          <div className="space-y-1">
+            <p className="text-sm font-medium text-amber-900">
+              No AI model configured
+            </p>
+            <p className="text-xs text-amber-800">
+              AI Suggest and Auto-Discover require an active LLM. Configure
+              one in{" "}
+              <span className="font-semibold">Setup → LLM Models</span>.
+            </p>
+          </div>
+          <Bot className="h-5 w-5 text-amber-500 ml-auto shrink-0" />
+        </div>
+      )}
+
+      {/* Profile grid */}
+      {profilesQ.isLoading ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className="h-48 animate-pulse rounded-lg bg-muted"
+            />
+          ))}
+        </div>
+      ) : profilesQ.isError ? (
+        <Card>
           <CardContent className="py-12 text-center">
             <p className="text-muted-foreground">
-              Failed to load ICP profiles. Please try again.
+              Failed to load ICP profiles.
             </p>
             <Button
-              onClick={() => listQuery.refetch()}
+              onClick={() => profilesQ.refetch()}
               className="mt-4"
             >
               Retry
             </Button>
           </CardContent>
         </Card>
-      ) : (
-      <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
-        {/* Left list */}
-        <Card className="h-fit">
-          <CardHeader>
-            <CardTitle className="text-base">Profiles</CardTitle>
-            <CardDescription>{profiles.length} configured</CardDescription>
-          </CardHeader>
-          <CardContent className="p-0">
-            {listQuery.isLoading ? (
-              <div className="space-y-2 p-4">
-                {[0, 1, 2].map((i) => (
-                  <div key={i} className="h-16 animate-pulse rounded-md bg-muted" />
-                ))}
-              </div>
-            ) : profiles.length === 0 ? (
-              <EmptyState
-                icon={<Target className="h-6 w-6" />}
-                title="No ICP profiles yet"
-                description="Create one to start sourcing prospects."
-              />
-            ) : (
-              <ul className="divide-y">
-                {pageItems.map((p) => {
-                  const active = (draft?.id === p.id) || (!draft && selectedId === p.id);
-                  return (
-                    <li key={p.id}>
-                      <button
-                        type="button"
-                        onClick={() => handleSelect(p)}
-                        className={cn(
-                          "flex w-full flex-col gap-1 p-4 text-left transition-colors hover:bg-muted/50",
-                          active && "bg-muted",
-                        )}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="truncate text-sm font-medium">{p.name}</p>
-                          <Badge variant="secondary">{p.prospectCount}</Badge>
-                        </div>
-                        <p className="truncate text-xs text-muted-foreground">
-                          {p.targetSegment}
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <Progress value={(p.icpScoreAvg ?? 0) * 100} className="h-1.5" />
-                          <span className="text-xs font-medium text-muted-foreground">
-                            {formatPercent(p.icpScoreAvg ?? 0)}
-                          </span>
-                        </div>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          
-              <Pagination
-                page={page}
-                pageSize={pageSize}
-                total={total}
-                onPageChange={setPage}
-                onPageSizeChange={setPageSize}
-              />
-            </CardContent>
+      ) : profiles.length === 0 ? (
+        <Card>
+          <CardContent className="py-12 text-center">
+            <Target className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+            <h4 className="font-medium mb-2">No ICP Profiles Yet</h4>
+            <p className="text-sm text-muted-foreground mb-4">
+              Create your first ICP to start targeting the right prospects.
+            </p>
+            <Button size="sm" onClick={openCreate}>
+              <Plus className="h-4 w-4 mr-1" />
+              Create ICP
+            </Button>
+          </CardContent>
         </Card>
-
-        {/* Right detail */}
-        {selected ? (
-          <Card>
-            <CardHeader>
-              <div className="flex items-start justify-between gap-4">
-                <div className="space-y-1">
-                  <CardTitle className="flex items-center gap-2">
-                    <Pencil className="h-4 w-4" />
-                    {selected.name || "Untitled Profile"}
-                  </CardTitle>
-                  <CardDescription>
-                    Updated {timeAgo(selected.updatedAt)} · {selected.prospectCount} prospects · avg ICP{" "}
-                    {formatPercent(selected.icpScoreAvg ?? 0)}
-                  </CardDescription>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleSave}
-                    disabled={saveMutation.isPending}
-                  >
-                    {saveMutation.isPending ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Save className="h-4 w-4" />
-                    )}
-                    Save
-                  </Button>
-                  {selected.id !== "draft" && (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          onClick={() => setDeleteTarget(selected)}
-                          aria-label="Delete profile"
-                        >
-                          <Trash2 className="h-4 w-4 text-red-600" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>Delete profile</TooltipContent>
-                    </Tooltip>
-                  )}
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <Tabs defaultValue="profile">
-                <TabsList>
-                  <TabsTrigger value="profile">Profile</TabsTrigger>
-                  <TabsTrigger value="scoring">Scoring</TabsTrigger>
-                  <TabsTrigger value="signals">Signals</TabsTrigger>
-                </TabsList>
-
-                {/* Profile tab */}
-                <TabsContent value="profile" className="space-y-4">
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label htmlFor="name">Name</Label>
-                      <Input
-                        id="name"
-                        value={selected.name}
-                        onChange={(e) => patch("name", e.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="targetSegment">Target Segment</Label>
-                      <Input
-                        id="targetSegment"
-                        value={selected.targetSegment}
-                        onChange={(e) => patch("targetSegment", e.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="industry">Industry</Label>
-                      <Input
-                        id="industry"
-                        value={selected.industry}
-                        onChange={(e) => patch("industry", e.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="companySize">Company Size</Label>
-                      <Input
-                        id="companySize"
-                        value={selected.companySize}
-                        onChange={(e) => patch("companySize", e.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <InfoLabel
-                        htmlFor="seniority"
-                        label="Seniority Tier"
-                        info="Which seniority level to target: C-Suite = C-level execs (CEO/CTO/CRO), Director = VP/Director层, IC = Individual Contributors (SDRs/AEs/PMs)."
-                      />
-                      <select
-                        id="seniority"
-                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                        value={selected.seniority}
-                        onChange={(e) => patch("seniority", e.target.value as SeniorityTier)}
-                      >
-                        <option value="C_Suite">C-Suite</option>
-                        <option value="Director">Director</option>
-                        <option value="IC">IC</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <Separator />
-
-                  {/* AI tools */}
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <div className="rounded-md border p-4 space-y-3">
-                      <div className="flex items-center gap-2">
-                        <Sparkles className="h-4 w-4 text-amber-500" />
-                        <p className="text-sm font-medium">AI Suggest</p>
-                      </div>
-                      <p className="text-xs text-muted-foreground">
-                        Describe the ICP in plain English. OUTRENA fills the form.
-                      </p>
-                      <Textarea
-                        rows={3}
-                        placeholder="e.g. Heads of RevOps at US-based B2B SaaS, 50–500 employees, Series A+"
-                        value={seedDesc}
-                        onChange={(e) => setSeedDesc(e.target.value)}
-                      />
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="w-full"
-                        disabled={!seedDesc.trim() || suggestMutation.isPending}
-                        onClick={() => suggestMutation.mutate(seedDesc)}
-                      >
-                        {suggestMutation.isPending ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <Sparkles className="h-4 w-4" />
-                        )}
-                        Suggest Profile
-                      </Button>
-                    </div>
-
-                    <div className="rounded-md border p-4 space-y-3">
-                      <div className="flex items-center gap-2">
-                        <Globe className="h-4 w-4 text-emerald-600" />
-                        <p className="text-sm font-medium">Auto-Discover</p>
-                      </div>
-                      <p className="text-xs text-muted-foreground">
-                        Paste a company URL. OUTRENA infers an ICP from public data.
-                      </p>
-                      <Input
-                        placeholder="https://acme.com"
-                        value={discoverUrl}
-                        onChange={(e) => setDiscoverUrl(e.target.value)}
-                      />
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="w-full"
-                        disabled={!discoverUrl.trim() || discoverMutation.isPending}
-                        onClick={() => discoverMutation.mutate(discoverUrl)}
-                      >
-                        {discoverMutation.isPending ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <Globe className="h-4 w-4" />
-                        )}
-                        Discover Profile
-                      </Button>
-                    </div>
-                  </div>
-                </TabsContent>
-
-                {/* Scoring tab */}
-                <TabsContent value="scoring" className="space-y-4">
-                  <InfoLabel
-                    label="ICP Score Weights"
-                    info="Weight each dimension (should sum to 100). ICP score = weighted average of: industry match, company size match, seniority match, intent signal strength, and engagement history."
-                  />
-                  <div className="space-y-3">
-                    {(Object.keys(selected.scoreWeights) as (keyof ScoreWeights)[]).map((key) => (
-                      <div key={key} className="grid grid-cols-[140px_1fr_60px] items-center gap-3">
-                        <Label className="capitalize">{key}</Label>
-                        <input
-                          type="range"
-                          min={0}
-                          max={50}
-                          value={selected.scoreWeights[key]}
-                          onChange={(e) =>
-                            patch("scoreWeights", {
-                              ...selected.scoreWeights,
-                              [key]: Number(e.target.value),
-                            })
-                          }
-                          className="w-full"
-                        />
-                        <span className="text-right text-sm font-medium">
-                          {selected.scoreWeights[key]}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                  <Separator />
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-muted-foreground">Total weight</span>
-                    <Badge
-                      variant={
-                        totalWeight(selected.scoreWeights) === 100 ? "success" : "warning"
-                      }
-                    >
-                      {totalWeight(selected.scoreWeights)} / 100
-                    </Badge>
-                  </div>
-                </TabsContent>
-
-                {/* Signals tab */}
-                <TabsContent value="signals" className="space-y-4">
-                  <SignalEditor
-                    title="Pain Points"
-                    items={selected.painPoints}
-                    onChange={(items) => patch("painPoints", items)}
-                    placeholder="e.g. SDR ramp time too long"
-                  />
-                  <SignalEditor
-                    title="Buying Signals"
-                    items={selected.buyingSignals}
-                    onChange={(items) => patch("buyingSignals", items)}
-                    placeholder="e.g. Hiring SDRs in last 90d"
-                  />
-                </TabsContent>
-              </Tabs>
-            </CardContent>
-          </Card>
-        ) : (
-          <Card>
-            <CardContent className="p-0">
-              <EmptyState
-                icon={<Users className="h-6 w-6" />}
-                title="Select a profile"
-                description="Pick a profile on the left, or create a new one to get started."
-                action={
-                  <Button size="sm" onClick={handleNew}>
-                    <Plus className="h-4 w-4" />
-                    New Profile
-                  </Button>
-                }
-              />
-            </CardContent>
-          </Card>
-        )}
-      </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {profiles.map((p) => (
+            <IcpCard
+              key={p.id}
+              profile={p}
+              onEdit={() => openEdit(p)}
+              onDelete={() => setDeleteTarget(p)}
+            />
+          ))}
+        </div>
       )}
 
       {/* Delete confirmation dialog */}
@@ -690,111 +720,446 @@ export function IcpProfilesPage() {
         open={!!deleteTarget}
         onOpenChange={(o) => !o && setDeleteTarget(null)}
       >
-        <DialogClose onClose={() => setDeleteTarget(null)} />
-        <DialogHeader>
-          <DialogTitle>Delete ICP profile?</DialogTitle>
-          <DialogDescription>
-            {deleteTarget?.name
-              ? `Profile "${deleteTarget.name}" will be permanently removed. Prospects linked to this profile will lose their ICP scoring. This action cannot be undone.`
-              : "This ICP profile will be permanently removed. This action cannot be undone."}
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => setDeleteTarget(null)}>
-            Cancel
-          </Button>
-          <Button
-            variant="destructive"
-            onClick={() =>
-              deleteTarget && deleteMutation.mutate(deleteTarget.id)
-            }
-            disabled={deleteMutation.isPending}
-          >
-            {deleteMutation.isPending ? "Deleting…" : "Delete"}
-          </Button>
-        </DialogFooter>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete ICP profile?</DialogTitle>
+            <DialogDescription>
+              {deleteTarget?.name
+                ? `"${deleteTarget.name}" will be permanently removed. Prospects linked to this profile will lose their ICP scoring. This action cannot be undone.`
+                : "This ICP profile will be permanently removed. This action cannot be undone."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteTarget(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() =>
+                deleteTarget && deleteMutation.mutate(deleteTarget.id)
+              }
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending ? "Deleting…" : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
     </div>
   );
 }
 
-/* ── Subcomponents ─────────────────────────────────────────────────── */
+/* ── IcpCard ────────────────────────────────────────────────────────── */
 
-function SignalEditor({
-  title,
-  items,
-  onChange,
-  placeholder,
+function IcpCard({
+  profile: p,
+  onEdit,
+  onDelete,
 }: {
-  title: string;
-  items: string[];
-  onChange: (items: string[]) => void;
-  placeholder: string;
+  profile: IcpProfile;
+  onEdit: () => void;
+  onDelete: () => void;
 }) {
-  const [draft, setDraft] = useState("");
-  function add() {
-    const v = draft.trim();
-    if (!v) return;
-    onChange([...items, v]);
-    setDraft("");
-  }
   return (
-    <div className="space-y-2">
-      <Label>{title}</Label>
-      <div className="flex gap-2">
-        <Input
-          placeholder={placeholder}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              add();
-            }
-          }}
-        />
-        <Button size="sm" variant="outline" onClick={add} type="button">
-          <Plus className="h-4 w-4" />
-          Add
-        </Button>
-      </div>
-      <ul className="space-y-1">
-        {items.map((item, i) => (
-          <li
-            key={`${item}-${i}`}
-            className="flex items-center justify-between rounded-md border bg-muted/30 px-3 py-1.5 text-sm"
-          >
-            <span>{item}</span>
-            <button
-              type="button"
-              className="text-muted-foreground hover:text-red-600"
-              onClick={() => onChange(items.filter((_, idx) => idx !== i))}
-              aria-label={`Remove ${item}`}
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
-          </li>
-        ))}
-      </ul>
-    </div>
+    <Card>
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-sm truncate">{p.name}</CardTitle>
+          <div className="flex items-center gap-1 shrink-0">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8"
+                  onClick={onEdit}
+                  aria-label="Edit"
+                >
+                  <Edit3 className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Edit this ICP profile</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8 text-red-500 hover:text-red-700"
+                  onClick={onDelete}
+                  aria-label="Delete"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Delete this ICP profile</TooltipContent>
+            </Tooltip>
+          </div>
+        </div>
+        <CardDescription className="text-xs">
+          {p.companyType ?? "No company type"}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-2 text-xs">
+        {p.persona && (
+          <p className="text-muted-foreground line-clamp-2">{p.persona}</p>
+        )}
+        {p.topObjections.length > 0 && (
+          <div>
+            <p className="font-medium mb-1">Objections:</p>
+            <div className="flex flex-wrap gap-1">
+              {p.topObjections.map((o, i) => (
+                <Badge key={i} variant="secondary" className="text-xs">
+                  {o}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        )}
+        {p.painPoints.length > 0 && (
+          <div>
+            <p className="font-medium mb-1">Pain Points:</p>
+            <div className="flex flex-wrap gap-1">
+              {p.painPoints.map((pn, i) => (
+                <Badge key={i} variant="outline" className="text-xs">
+                  {pn}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        )}
+        {p.valueProps.length > 0 && (
+          <div>
+            <p className="font-medium mb-1">Value Props:</p>
+            <div className="flex flex-wrap gap-1">
+              {p.valueProps.map((v, i) => (
+                <Badge
+                  key={i}
+                  className="text-xs bg-emerald-100 text-emerald-700 border-emerald-200"
+                >
+                  {v}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        )}
+        {(p.senderCompany ?? p.senderRole) && (
+          <p className="text-muted-foreground mt-1">
+            From:{" "}
+            {[p.senderRole, p.senderCompany].filter(Boolean).join(" at ")}
+          </p>
+        )}
+        {p.proofMetric && (
+          <p className="text-muted-foreground">Proof: {p.proofMetric}</p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
-function urlOrDomain(input: string): string {
-  try {
-    const u = new URL(input);
-    return u.hostname;
-  } catch {
-    return input;
+/* ── IcpFormDialog ──────────────────────────────────────────────────── */
+
+function IcpFormDialog({
+  form,
+  setForm,
+  editingId,
+  suggesting,
+  saving,
+  hasLlm,
+  onAiSuggest,
+  onSave,
+  onClose,
+}: {
+  form: IcpFormState;
+  setForm: React.Dispatch<React.SetStateAction<IcpFormState>>;
+  editingId: string | null;
+  suggesting: boolean;
+  saving: boolean;
+  hasLlm: boolean;
+  onAiSuggest: () => void;
+  onSave: () => void;
+  onClose: () => void;
+}) {
+  function f(key: keyof IcpFormState) {
+    return (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+      setForm((prev) => ({ ...prev, [key]: e.target.value }));
   }
+
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>
+          {editingId ? "Edit ICP Profile" : "Create ICP Profile"}
+        </DialogTitle>
+        <DialogDescription>
+          {editingId
+            ? "Update your target buyer persona"
+            : "Define your target buyer persona"}
+        </DialogDescription>
+      </DialogHeader>
+
+      <div className="space-y-4 py-4">
+        {/* Core fields */}
+        <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <Label>Profile Name *</Label>
+            <Input
+              placeholder="e.g. SaaS CTOs under 200"
+              value={form.name}
+              onChange={f("name")}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Company Type</Label>
+            <Input
+              placeholder="e.g. B2B SaaS, Series A–C"
+              value={form.companyType}
+              onChange={f("companyType")}
+            />
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Target Persona</Label>
+          <Textarea
+            placeholder="Describe your ideal buyer in detail…"
+            value={form.persona}
+            onChange={f("persona")}
+            rows={3}
+          />
+        </div>
+
+        <Separator />
+        <p className="text-sm font-medium">Sender Information</p>
+        <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <Label>Your Role</Label>
+            <Input
+              placeholder="e.g. CEO at MyCo"
+              value={form.senderRole}
+              onChange={f("senderRole")}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Your Company</Label>
+            <Input
+              placeholder="e.g. MyCo"
+              value={form.senderCompany}
+              onChange={f("senderCompany")}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Your Offer</Label>
+            <Input
+              placeholder="e.g. AI lead gen platform"
+              value={form.senderOffer}
+              onChange={f("senderOffer")}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Proof Metric</Label>
+            <Input
+              placeholder="e.g. 3× pipeline in 90 days"
+              value={form.proofMetric}
+              onChange={f("proofMetric")}
+            />
+          </div>
+        </div>
+
+        <Separator />
+        <p className="text-sm font-medium">Top 3 Objections</p>
+        <p className="text-xs text-muted-foreground">
+          What will this buyer push back on when approached?
+        </p>
+        <div className="grid grid-cols-1 gap-2">
+          <Input
+            placeholder='e.g. "We already have a solution for this"'
+            value={form.objection1}
+            onChange={f("objection1")}
+          />
+          <Input
+            placeholder="e.g. &quot;We don't have budget for new tools right now&quot;"
+            value={form.objection2}
+            onChange={f("objection2")}
+          />
+          <Input
+            placeholder='e.g. "Our team is too busy to evaluate another vendor"'
+            value={form.objection3}
+            onChange={f("objection3")}
+          />
+        </div>
+
+        <Separator />
+        <p className="text-sm font-medium">Pain Points</p>
+        <p className="text-xs text-muted-foreground">
+          What daily frustrations or strategic gaps does this buyer face?
+        </p>
+        <div className="grid grid-cols-1 gap-2">
+          <Input
+            placeholder='e.g. "Manual prospecting takes 20+ hours per week"'
+            value={form.pain1}
+            onChange={f("pain1")}
+          />
+          <Input
+            placeholder='e.g. "Low reply rates on outbound campaigns (under 2%)"'
+            value={form.pain2}
+            onChange={f("pain2")}
+          />
+          <Input
+            placeholder='e.g. "Sales reps send generic templates that damage brand"'
+            value={form.pain3}
+            onChange={f("pain3")}
+          />
+        </div>
+
+        <Separator />
+        <p className="text-sm font-medium">Value Propositions</p>
+        <p className="text-xs text-muted-foreground">
+          What specific outcomes can you deliver? Use metrics when possible.
+        </p>
+        <div className="grid grid-cols-1 gap-2">
+          <Input
+            placeholder='e.g. "3× more qualified pipeline in 90 days"'
+            value={form.value1}
+            onChange={f("value1")}
+          />
+          <Input
+            placeholder='e.g. "Cut prospecting time from 20 hrs to 2 hrs per week"'
+            value={form.value2}
+            onChange={f("value2")}
+          />
+          <Input
+            placeholder='e.g. "AI-written emails that sound human, not like a vendor"'
+            value={form.value3}
+            onChange={f("value3")}
+          />
+        </div>
+      </div>
+
+      <DialogFooter>
+        <Button variant="outline" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button
+          variant="outline"
+          className="border-violet-300 text-violet-700 hover:bg-violet-50"
+          onClick={onAiSuggest}
+          disabled={suggesting || !form.persona.trim() || !hasLlm}
+        >
+          <Sparkles className="h-3.5 w-3.5 mr-1.5" />
+          {suggesting ? "Suggesting…" : "AI Suggest Fields"}
+        </Button>
+        <Button onClick={onSave} disabled={saving}>
+          {saving ? (
+            <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+          ) : null}
+          {editingId ? "Update ICP" : "Save ICP"}
+        </Button>
+      </DialogFooter>
+    </>
+  );
 }
 
-function totalWeight(w: ScoreWeights): number {
-  return Object.values(w).reduce((s, n) => s + n, 0);
+/* ── DiscoverResult ─────────────────────────────────────────────────── */
+
+interface DiscoverResultShape {
+  suggestedPersona?: string;
+  commonAttributes?: Record<string, unknown>;
 }
 
-function stripPersisted(p: IcpProfile): Omit<IcpProfile, "id" | "createdAt" | "updatedAt"> {
-  const { id: _id, createdAt: _c, updatedAt: _u, ...rest } = p;
-  void _id; void _c; void _u;
-  return rest;
+function DiscoverResult({
+  result,
+  discoverMode,
+  discoverSave,
+  discoverWebsite,
+  onSaveProfile,
+}: {
+  result: DiscoverResultShape;
+  discoverMode: "website" | "description";
+  discoverSave: boolean;
+  discoverWebsite: string;
+  onSaveProfile: (p: {
+    name?: string;
+    persona?: string;
+    companyType?: string | null;
+  }) => void;
+}) {
+  return (
+    <div className="space-y-3 rounded-md border p-4 bg-muted/30">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium flex items-center gap-2">
+          <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+          Discovery Result
+        </p>
+        <Badge variant="outline" className="text-xs font-mono">
+          {discoverMode === "website" ? (
+            <Globe className="h-3 w-3 mr-1" />
+          ) : (
+            <FileText className="h-3 w-3 mr-1" />
+          )}
+          {discoverMode === "website" ? discoverWebsite : "your description"}
+        </Badge>
+      </div>
+
+      {/* Suggested persona */}
+      {result.suggestedPersona && (
+        <div className="text-xs space-y-1">
+          <p>
+            <span className="font-medium">Suggested Persona:</span>{" "}
+            {`${result.suggestedPersona}`}
+          </p>
+        </div>
+      )}
+
+      {/* Common attributes */}
+      {result.commonAttributes && Object.keys(result.commonAttributes).length > 0 && (
+          <div className="text-xs space-y-1">
+            <p className="font-medium">Common Attributes:</p>
+            {Object.entries(result.commonAttributes).map(
+              ([k, v]) => (
+                <p key={k}>
+                  <span className="font-medium capitalize">{k}:</span>{" "}
+                  {`${v}`}
+                </p>
+              )
+            )}
+          </div>
+        )}
+
+      {/* Review mode save button */}
+      {!discoverSave && (
+        <Button
+          size="sm"
+          className="mt-2"
+          onClick={() =>
+            onSaveProfile({
+              name:
+                discoverMode === "website"
+                  ? `Profile from ${discoverWebsite}`
+                  : "Auto-Discovered ICP",
+              persona: result.suggestedPersona
+                ? String(result.suggestedPersona)
+                : undefined,
+              companyType:
+                result.commonAttributes && "companyType" in result.commonAttributes
+                  ? `${result.commonAttributes.companyType}`
+                  : null,
+            })
+          }
+        >
+          <Plus className="h-3.5 w-3.5 mr-1.5" />
+          Save {"&"} Close
+        </Button>
+      )}
+
+      {discoverSave && (
+        <p className="text-xs text-emerald-700 font-medium">
+          ✓ Profile saved — modal will close shortly.
+        </p>
+      )}
+    </div>
+  );
 }

@@ -8,6 +8,7 @@ from typing import Any
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.campaign_models import Campaign, Sequence, SubjectLine
@@ -52,7 +53,7 @@ class SequenceService:
           * role == "REP" → filter by owner_user_id == user_id.
           * MANAGER+ or role is None → no owner filter.
         """
-        stmt = select(Sequence).offset(offset).limit(limit)
+        stmt = select(Sequence).options(selectinload(Sequence.subjectLines)).offset(offset).limit(limit)
         if campaign_id:
             stmt = stmt.where(Sequence.campaignId == campaign_id)
         if prospect_id:
@@ -68,7 +69,7 @@ class SequenceService:
 
     async def get(self, db: AsyncSession, sequence_id: str) -> Sequence | None:
         result = await db.execute(
-            select(Sequence).where(Sequence.id == sequence_id)
+            select(Sequence).options(selectinload(Sequence.subjectLines)).where(Sequence.id == sequence_id)
         )
         return result.scalar_one_or_none()
 

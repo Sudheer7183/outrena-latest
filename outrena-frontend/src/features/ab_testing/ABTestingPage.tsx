@@ -1,680 +1,823 @@
 /**
- * ABTestingPage.tsx — A/B testing CRUD + significance + variants chart.
+ * ABTestingPage.tsx - create, run, and evaluate A/B tests on campaign
+ * subject lines / bodies, with statistical-significance results and a
+ * winner-promotion flow.
  *
- * Table of tests (draft/running/completed/paused). "New Test" dialog with 2+
- * variants (subject + body). Per-row "Start" (→ running) and "View
- * Significance" (per-variant stats + winner/confidence/p-value). Selecting a
- * test opens a detail drawer with a variants comparison bar chart.
+ * API (verified against app/features/ab_testing/router.py + schemas):
+ *   GET    /api/v1/ab-testing?campaign_id=        -> AbTestResponse[]
+ *   POST   /api/v1/ab-testing                       AbTestCreate -> AbTestResponse
+ *   GET    /api/v1/ab-testing/:id                   -> AbTestResponse
+ *   PUT    /api/v1/ab-testing/:id                    AbTestUpdate { status?, startedAt?, endedAt? }
+ *   DELETE /api/v1/ab-testing/:id
+ *   POST   /api/v1/ab-testing/:id/start              -> AbTestResponse (sets status=running + startedAt)
+ *   GET    /api/v1/ab-testing/:id/significance       -> SignificanceResult (two-proportion z-test)
+ *   GET    /api/v1/campaigns                          -> for the campaign selector
+ *   GET    /api/v1/sequences?campaign_id=&limit=500   -> for the Promote Winner flow
+ *   PUT    /api/v1/sequences/:id                      { subjectLine?, bodyCopy? } -> used by Promote Winner
+ *
+ * CORRECTIONS vs. the previous version:
+ *   - `element` is `"subject" | "body" | "sendTime"` in the real schema -
+ *     there is no `"angle"` variable type (the gap doc's description
+ *     included it; the backend model does not support it). The create
+ *     dialog only offers the three real options.
+ *   - `SignificanceResult` is a FLAT object (variantACount, variantBCount,
+ *     variantASuccesses, variantBSuccesses, variantARate, variantBRate,
+ *     zScore, pValue, isSignificant, winner) - the previous code expected
+ *     a `perVariant: [...]` array that doesn't exist on the backend at all
+ *     and silently fell back to MOCK_SIG on every real response. Fixed to
+ *     read the actual flat fields; all mock fallbacks removed.
+ *   - "successes" in the significance result is `isPositiveReply` on the
+ *     per-prospect assignment (confirmed in ab_testing/service.py) - i.e.
+ *     positive reply rate, not opens. Labeled accurately as such.
+ *   - There is no endpoint exposing individual AbTestAssignment rows, so
+ *     the "per-prospect assignment breakdown table" the gap doc describes
+ *     (AB-3) cannot be built from real data - the Results dialog shows the
+ *     real aggregate stats and states this limitation instead of faking
+ *     table rows.
+ *   - There is no dedicated pause/stop/promote-winner endpoint. Pause/stop
+ *     use the general `PUT {status}` update. "Promote Winner" (AB-4) is
+ *     implemented by fetching the campaign's not-yet-sent sequences at the
+ *     test's touchNumber and PUTing the winning variant's subject/body to
+ *     each one - there is no bulk-apply endpoint, so this is orchestrated
+ *     client-side against the real per-sequence update endpoint.
+ *
+ * AB-1  Create A/B Test dialog: name, campaign, element, variant content, split ratio.
+ * AB-2  Test list with status badge + start/pause/resume/stop actions.
+ * AB-3  Results dialog: variant A/B stats, winner badge, significance indicator.
+ * AB-4  Promote winner - applies winning variant to not-yet-sent sequences.
  */
-import { useEffect, useMemo, useState } from "react";
+import {  useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Legend,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import {
-  ChartColumn,
   FlaskConical,
   Loader2,
+  Pause,
   Play,
   Plus,
-  Sigma,
+  Rocket,
+  Square,
   Trash2,
   Trophy,
 } from "lucide-react";
 import { toast } from "sonner";
+
 import { http } from "@/services/apiClient";
-import type { ABTest, ABTestVariant } from "@/types/common";
+import { PageHeader } from "@/components/ui/page-header";
 import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { NativeSelect as Select } from "@/components/ui/select";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog,
-  DialogClose,
+  DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
-import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState } from "@/components/ui/empty-state";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Info } from "lucide-react";
-import {
-  Tooltip as ShadcnTooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
-import { cn, formatDateTime, formatPercent } from "@/lib/utils";
 
-/* ── Types ───────────────────────────────────────────────────────────────── */
+/* Types (aligned with real backend schemas) */
+
+interface AbTest {
+  id: string;
+  name: string;
+  campaignId: string;
+  description: string | null;
+  element: "subject" | "body" | "sendTime";
+  variantALabel: string;
+  variantBLabel: string;
+  variantASubject: string | null;
+  variantBSubject: string | null;
+  variantABody: string | null;
+  variantBBody: string | null;
+  splitRatio: number;
+  status: string;
+  touchNumber: number;
+  startedAt: string | null;
+  endedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
 
 interface SignificanceResult {
-  winner: string | null;
-  confidence: number;
+  abTestId: string;
+  variantACount: number;
+  variantBCount: number;
+  variantASuccesses: number;
+  variantBSuccesses: number;
+  variantARate: number;
+  variantBRate: number;
+  zScore: number;
   pValue: number;
-  sampleSizeNote: string;
-  perVariant: { label: string; sent: number; opened: number; replied: number; openRate: number; replyRate: number }[];
+  isSignificant: boolean;
+  winner: "A" | "B" | null;
 }
 
-/* ── Mock data ───────────────────────────────────────────────────────────── */
-const now = new Date().toISOString();
-function v(label: string, subject: string, sent: number, opened: number, replied: number): ABTestVariant {
-  return { id: `${label}-${Math.random().toString(36).slice(2, 8)}`, label, subject, sent, opened, replied };
+interface Campaign {
+  id: string;
+  name: string;
 }
 
-const MOCK_TESTS: ABTest[] = [
-  {
-    id: "ab1",
-    name: "Q4 SaaS — Opener angle",
-    status: "completed",
-    metric: "reply_rate",
-    winner: "B",
-    createdAt: now,
-    updatedAt: now,
-    variants: [
-      v("A", "Quick question about your outbound", 800, 384, 48),
-      v("B", "Saw your Series B — congrats", 800, 452, 86),
-    ],
-  },
-  {
-    id: "ab2",
-    name: "Fintech — Subject length",
-    status: "running",
-    metric: "open_rate",
-    winner: null,
-    createdAt: now,
-    updatedAt: now,
-    variants: [
-      v("A", "Idea for your team", 600, 318, 31),
-      v("B", "Cutting reply time by 40% — open to a look?", 600, 246, 22),
-    ],
-  },
-  {
-    id: "ab3",
-    name: "DevTools — Touch 3 angle",
-    status: "running",
-    metric: "reply_rate",
-    winner: null,
-    createdAt: now,
-    updatedAt: now,
-    variants: [
-      v("A", "Case study: how Acme shipped 2x faster", 500, 235, 28),
-      v("B", "Worth a 10-min call this week?", 500, 228, 41),
-      v("C", "Closing the loop — last note", 500, 198, 19),
-    ],
-  },
-  {
-    id: "ab4",
-    name: "Healthcare — Founder mention",
-    status: "paused",
-    metric: "open_rate",
-    winner: null,
-    createdAt: now,
-    updatedAt: now,
-    variants: [
-      v("A", "Compliance gap in your stack", 400, 196, 18),
-      v("B", "From the founder of OUTRENA", 400, 244, 24),
-    ],
-  },
-  {
-    id: "ab5",
-    name: "HR-Tech — Personalization depth",
-    status: "draft",
-    metric: "reply_rate",
-    winner: null,
-    createdAt: now,
-    updatedAt: now,
-    variants: [
-      v("A", "Noticed your hiring push", 0, 0, 0),
-      v("B", "Hiring + your 2025 roadmap", 0, 0, 0),
-    ],
-  },
+interface Sequence {
+  id: string;
+  campaignId: string;
+  touchNumber: number;
+  status: string;
+}
+
+const ELEMENT_OPTIONS: { value: AbTest["element"]; label: string }[] = [
+  { value: "subject", label: "Subject Line" },
+  { value: "body", label: "Email Body" },
+  { value: "sendTime", label: "Send Time" },
 ];
 
-const MOCK_SIG: SignificanceResult = {
-  winner: "B",
-  confidence: 0.96,
-  pValue: 0.041,
-  sampleSizeNote: "1,600 sends per arm — above the 1,000 minimum for 95% power.",
-  perVariant: [
-    { label: "A", sent: 800, opened: 384, replied: 48, openRate: 0.48, replyRate: 0.06 },
-    { label: "B", sent: 800, opened: 452, replied: 86, openRate: 0.565, replyRate: 0.1075 },
-  ],
+const STATUS_META: Record<
+  string,
+  { label: string; variant: "secondary" | "success" | "warning" | "outline" }
+> = {
+  draft: { label: "Draft", variant: "secondary" },
+  running: { label: "Running", variant: "success" },
+  paused: { label: "Paused", variant: "warning" },
+  completed: { label: "Completed", variant: "outline" },
 };
 
-/* ── Helpers ─────────────────────────────────────────────────────────────── */
-function statusBadge(status: string): { variant: "default" | "secondary" | "success" | "warning" | "destructive"; label: string } {
-  switch (status) {
-    case "running":
-      return { variant: "success", label: "Running" };
-    case "completed":
-      return { variant: "default", label: "Completed" };
-    case "paused":
-      return { variant: "warning", label: "Paused" };
-    default:
-      return { variant: "secondary", label: "Draft" };
-  }
-}
-function ChartTooltip({
-  active,
-  payload,
-  label,
-}: {
-  active?: boolean;
-  payload?: { name: string; value: number }[];
-  label?: string;
-}) {
-  if (!active || !payload || payload.length === 0) return null;
-  return (
-    <div className="rounded-md border bg-background px-3 py-2 text-xs shadow-md">
-      {label && <p className="mb-1 font-semibold">{label}</p>}
-      {payload.map((p) => (
-        <p key={p.name}>
-          {p.name}: {p.value}
-        </p>
-      ))}
-    </div>
-  );
+function statusMeta(status: string) {
+  return STATUS_META[status] ?? { label: status, variant: "secondary" as const };
 }
 
-/* ── New test dialog ─────────────────────────────────────────────────────── */
-interface VariantDraft {
-  label: string;
-  subject: string;
-  body: string;
+function pct(n: number): string {
+  return `${(n * 100).toFixed(1)}%`;
 }
-function NewTestDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
-  const queryClient = useQueryClient();
-  const [name, setName] = useState("");
-  const [campaignId, setCampaignId] = useState(""); // BUG-26 FIX
-  const [metric, setMetric] = useState("reply_rate");
-  const [variants, setVariants] = useState<VariantDraft[]>([
-    { label: "A", subject: "", body: "" },
-    { label: "B", subject: "", body: "" },
-  ]);
 
-  /* BUG-13 Fix B: Fetch campaigns for the dropdown instead of free-text input. */
-  const { data: campaigns } = useQuery<{ id: string; name: string }[]>({
-    queryKey: ["campaigns"],
-    queryFn: () => http.get<{ id: string; name: string }[]>("/api/v1/campaigns"),
+function normaliseList<T>(raw: unknown): T[] {
+  if (Array.isArray(raw)) return raw as T[];
+  if (raw && typeof raw === "object" && "items" in raw)
+    return (raw as { items: T[] }).items ?? [];
+  return [];
+}
+
+const EMPTY_FORM = {
+  name: "",
+  campaignId: "",
+  description: "",
+  element: "subject" as AbTest["element"],
+  variantALabel: "Variant A",
+  variantBLabel: "Variant B",
+  variantASubject: "",
+  variantBSubject: "",
+  variantABody: "",
+  variantBBody: "",
+  splitRatio: 0.5,
+  touchNumber: 1,
+};
+
+export function ABTestingPage() {
+  const qc = useQueryClient();
+  const [createOpen, setCreateOpen] = useState(false);
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [resultsTest, setResultsTest] = useState<AbTest | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AbTest | null>(null);
+
+  const testsQ = useQuery({
+    queryKey: ["ab-testing"],
+    queryFn: () =>
+      http.get<unknown>("/api/v1/ab-testing").then((r) => normaliseList<AbTest>(r)),
   });
+  const tests = testsQ.data ?? [];
 
-  function updateVariant(i: number, patch: Partial<VariantDraft>) {
-    setVariants((vs) => vs.map((v, idx) => (idx === i ? { ...v, ...patch } : v)));
-  }
-  function addVariant() {
-    const next = String.fromCharCode(65 + variants.length);
-    setVariants((vs) => [...vs, { label: next, subject: "", body: "" }]);
-  }
-  function removeVariant(i: number) {
-    setVariants((vs) => vs.filter((__, idx) => idx !== i));
+  const campaignsQ = useQuery({
+    queryKey: ["campaigns", "for-ab-testing"],
+    queryFn: () =>
+      http.get<unknown>("/api/v1/campaigns").then((r) => normaliseList<Campaign>(r)),
+  });
+  const campaigns = campaignsQ.data ?? [];
+
+  function campaignName(id: string): string {
+    return campaigns.find((c) => c.id === id)?.name ?? id;
   }
 
   const createMutation = useMutation({
-    mutationFn: (payload: { name: string; campaignId: string; metric: string; variants: VariantDraft[] }) =>
-      http.post<ABTest>("/api/v1/ab-testing", payload),
+    mutationFn: () =>
+      http.post<AbTest>("/api/v1/ab-testing", {
+        name: form.name,
+        campaignId: form.campaignId,
+        description: form.description || null,
+        element: form.element,
+        variantALabel: form.variantALabel,
+        variantBLabel: form.variantBLabel,
+        variantASubject: form.element === "subject" ? form.variantASubject || null : null,
+        variantBSubject: form.element === "subject" ? form.variantBSubject || null : null,
+        variantABody: form.element === "body" ? form.variantABody || null : null,
+        variantBBody: form.element === "body" ? form.variantBBody || null : null,
+        splitRatio: form.splitRatio,
+        touchNumber: form.touchNumber,
+      }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["ab-testing"] });
-      toast.success("Test created");
-      reset();
-      onOpenChange(false);
+      toast.success("A/B test created");
+      qc.invalidateQueries({ queryKey: ["ab-testing"] });
+      setCreateOpen(false);
+      setForm(EMPTY_FORM);
     },
-    onError: () => {
-      toast.error("Create API unavailable — not saved");
-      onOpenChange(false);
-    },
+    onError: () => toast.error("Failed to create test"),
   });
-
-  function reset() {
-    setName("");
-    setMetric("reply_rate");
-    setVariants([
-      { label: "A", subject: "", body: "" },
-      { label: "B", subject: "", body: "" },
-    ]);
-  }
-
-  function submit() {
-    // BUG-26 FIX: campaignId is required by backend
-    if (!name || variants.length < 2) {
-      toast.error("Add a name and at least 2 variants");
-      return;
-    }
-    createMutation.mutate({ name, campaignId: campaignId || "default", metric, variants });
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogClose onClose={() => onOpenChange(false)} />
-      <DialogHeader>
-        <DialogTitle>New A/B Test</DialogTitle>
-        <DialogDescription>Define the metric and 2+ variants to test.</DialogDescription>
-      </DialogHeader>
-      <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="nt-name">Test name</Label>
-            <Input id="nt-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Q4 SaaS — Opener angle" />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="nt-metric">Primary metric</Label>
-            <Select id="nt-metric" value={metric} onChange={(e) => setMetric(e.target.value)}>
-              <option value="open_rate">Open rate</option>
-              <option value="reply_rate">Reply rate</option>
-            </Select>
-          </div>
-        </div>
-        {/* BUG-13 Fix B: campaignId as select dropdown populated from campaigns API */}
-        <div className="space-y-1.5">
-          <Label htmlFor="nt-campaign">Campaign</Label>
-          <Select
-            id="nt-campaign"
-            value={campaignId}
-            onChange={(e) => setCampaignId(e.target.value)}
-          >
-            <option value="">Select a campaign…</option>
-            {((Array.isArray(campaigns) ? campaigns : ((campaigns as unknown as Record<string, unknown>)?.items ?? [])) as { id: string; name: string }[]).map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </Select>
-        </div>
-
-        <div className="space-y-3">
-          {variants.map((v, i) => (
-            <div key={i} className="rounded-md border p-3">
-              <div className="mb-2 flex items-center justify-between">
-                <Badge variant="secondary">Variant {v.label}</Badge>
-                {variants.length > 2 && (
-                  <ShadcnTooltip>
-                    <TooltipTrigger asChild>
-                      <Button size="icon" variant="ghost" onClick={() => removeVariant(i)} aria-label="Remove variant">
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Remove this variant (2 minimum required)</TooltipContent>
-                  </ShadcnTooltip>
-                )}
-              </div>
-              <div className="space-y-2">
-                <Input value={v.subject} onChange={(e) => updateVariant(i, { subject: e.target.value })} placeholder="Subject line" />
-                <Textarea value={v.body} onChange={(e) => updateVariant(i, { body: e.target.value })} placeholder="Body copy" className="min-h-[80px]" />
-              </div>
-            </div>
-          ))}
-          <Button variant="outline" size="sm" onClick={addVariant}>
-            <Plus className="h-4 w-4" />
-            Add variant
-          </Button>
-        </div>
-      </div>
-      <DialogFooter>
-        <Button variant="outline" onClick={() => onOpenChange(false)}>
-          Cancel
-        </Button>
-        <Button onClick={submit} disabled={createMutation.isPending}>
-          {createMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-          Create Test
-        </Button>
-      </DialogFooter>
-    </Dialog>
-  );
-}
-
-/* ── Significance dialog ─────────────────────────────────────────────────── */
-function SignificanceDialog({ test, onClose }: { test: ABTest | null; onClose: () => void }) {
-  const [result, setResult] = useState<SignificanceResult | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    setResult(null);
-  }, [test?.id]);
-
-  async function load() {
-    if (!test) return;
-    setLoading(true);
-    try {
-      const r = await http.get<SignificanceResult>(`/api/v1/ab-testing/${test.id}/significance`);
-      setResult(r);
-    } catch {
-      setResult({
-        ...MOCK_SIG,
-        perVariant: test.variants.map((v) => ({
-          label: v.label,
-          sent: v.sent,
-          opened: v.opened,
-          replied: v.replied,
-          openRate: v.sent ? v.opened / v.sent : 0,
-          replyRate: v.sent ? v.replied / v.sent : 0,
-        })),
-      });
-      toast.error("Significance API unavailable — showing computed stats");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  if (!test) return null;
-  const chartData = (result ?? MOCK_SIG).perVariant.map((pv) => ({
-    label: pv.label,
-    "Open Rate": Number((pv.openRate * 100).toFixed(1)),
-    "Reply Rate": Number((pv.replyRate * 100).toFixed(1)),
-  }));
-
-  return (
-    <Dialog open={!!test} onOpenChange={(o) => !o && onClose()}>
-      <DialogClose onClose={onClose} />
-      <DialogHeader>
-        <DialogTitle className="flex items-center gap-2">
-          <Sigma className="h-4 w-4" />
-          Significance — {test.name}
-        </DialogTitle>
-        <DialogDescription>Per-variant performance + statistical winner.</DialogDescription>
-      </DialogHeader>
-
-      {!result ? (
-        <div className="space-y-3 py-2">
-          <p className="text-sm text-muted-foreground">
-            Run significance to compute the winner, confidence & p-value.
-          </p>
-          <Button onClick={load} disabled={loading}>
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sigma className="h-4 w-4" />}
-            Compute Significance
-          </Button>
-        </div>
-      ) : (
-        <div className="space-y-4">
-          <div className="grid grid-cols-3 gap-3">
-            <div className="rounded-md border p-3">
-              <p className="text-xs text-muted-foreground">Winner</p>
-              <p className="mt-1 flex items-center gap-1 text-lg font-bold">
-                <Trophy className="h-4 w-4 text-amber-500" />
-                {result.winner ?? "—"}
-              </p>
-            </div>
-            <div className="rounded-md border p-3">
-              <p className="text-xs text-muted-foreground">Confidence</p>
-              <p className="mt-1 text-lg font-bold">{formatPercent(result.confidence)}</p>
-            </div>
-            <div className="rounded-md border p-3">
-              <p className="text-xs text-muted-foreground">p-value</p>
-              <p className="mt-1 text-lg font-bold">{result.pValue.toFixed(3)}</p>
-            </div>
-          </div>
-          <p className="text-xs text-muted-foreground">{result.sampleSizeNote}</p>
-
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Variant</TableHead>
-                <TableHead className="text-right">Sent</TableHead>
-                <TableHead className="text-right">Opened</TableHead>
-                <TableHead className="text-right">Replied</TableHead>
-                <TableHead className="text-right">Open %</TableHead>
-                <TableHead className="text-right">Reply %</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {result.perVariant.map((pv) => (
-                <TableRow key={pv.label}>
-                  <TableCell className="font-semibold">{pv.label}</TableCell>
-                  <TableCell className="text-right">{pv.sent}</TableCell>
-                  <TableCell className="text-right">{pv.opened}</TableCell>
-                  <TableCell className="text-right">{pv.replied}</TableCell>
-                  <TableCell className="text-right">{formatPercent(pv.openRate)}</TableCell>
-                  <TableCell className="text-right">{formatPercent(pv.replyRate)}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-
-          <div className="h-60 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" opacity={0.6} />
-                <XAxis dataKey="label" tick={{ fontSize: 12 }} stroke="#94a3b8" />
-                <YAxis tickFormatter={(v: number) => `${v}%`} tick={{ fontSize: 11 }} stroke="#94a3b8" />
-                <Tooltip content={<ChartTooltip />} />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Bar dataKey="Open Rate" fill="#10b981" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="Reply Rate" fill="#f59e0b" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-      )}
-    </Dialog>
-  );
-}
-
-/* ── Main page ───────────────────────────────────────────────────────────── */
-export function ABTestingPage() {
-  const queryClient = useQueryClient();
-  const [newOpen, setNewOpen] = useState(false);
-  const [sigTest, setSigTest] = useState<ABTest | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  const { data, isLoading } = useQuery({
-    queryKey: ["ab-testing"],
-    queryFn: () => http.get<ABTest[]>("/api/v1/ab-testing"),
-  });
-  const tests = Array.isArray(data) ? data : (Array.isArray((data as unknown as Record<string, unknown>)?.items) ? (data as unknown as { items: ABTest[] }).items : MOCK_TESTS);
 
   const startMutation = useMutation({
-    mutationFn: (id: string) => http.post<ABTest>(`/api/v1/ab-testing/${id}/start`),
-    onMutate: async (id) => {
-      await queryClient.cancelQueries({ queryKey: ["ab-testing"] });
-      const previous = queryClient.getQueryData<ABTest[]>(["ab-testing"]);
-      if (previous) {
-        const next = previous.map((t) => (t.id === id ? { ...t, status: "running" } : t));
-        queryClient.setQueryData<ABTest[]>(["ab-testing"], next);
-      }
-      return { previous };
+    mutationFn: (id: string) => http.post<AbTest>(`/api/v1/ab-testing/${id}/start`, {}),
+    onSuccess: () => {
+      toast.success("Test started");
+      qc.invalidateQueries({ queryKey: ["ab-testing"] });
     },
-    onError: (_e, _id, ctx) => {
-      if (ctx?.previous) queryClient.setQueryData<ABTest[]>(["ab-testing"], ctx.previous);
-      toast.error("Failed to start test");
-    },
-    onSuccess: () => toast.success("Test started"),
+    onError: () => toast.error("Failed to start test"),
   });
 
-  const selected = tests.find((t) => t.id === selectedId) ?? null;
-  const detailChart = useMemo(() => {
-    queryClient.invalidateQueries({ queryKey: ["ab-tests"] });
-    if (!selected) return [];
-    return selected.variants.map((v) => ({
-      label: v.label,
-      Sent: v.sent,
-      Opened: v.opened,
-      Replied: v.replied,
-    }));
-  }, [selected]);
+  const statusMutation = useMutation({
+    mutationFn: ({
+      id,
+      status,
+      endedAt,
+    }: {
+      id: string;
+      status: string;
+      endedAt?: string;
+    }) => http.put<AbTest>(`/api/v1/ab-testing/${id}`, { status, endedAt }),
+    onSuccess: (_res, { status }) => {
+      toast.success(`Test ${status}`);
+      qc.invalidateQueries({ queryKey: ["ab-testing"] });
+    },
+    onError: () => toast.error("Failed to update test"),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => http.delete(`/api/v1/ab-testing/${id}`),
+    onSuccess: () => {
+      toast.success("Test deleted");
+      qc.invalidateQueries({ queryKey: ["ab-testing"] });
+      setDeleteTarget(null);
+    },
+    onError: () => toast.error("Failed to delete test"),
+  });
+
+  function handleCreate() {
+    if (!form.name.trim() || !form.campaignId) {
+      toast.error("Name and campaign are required");
+      return;
+    }
+    createMutation.mutate();
+  }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 p-6">
       <PageHeader
         title="A/B Testing"
-        description="Test subject lines, angles & copy variants. Track significance live."
+        description="Test subject lines, email bodies, and send times against each other with statistical significance."
         actions={
-          <Button onClick={() => setNewOpen(true)}>
-            <Plus className="h-4 w-4" />
-            New Test
-          </Button>
+          <Dialog
+            open={createOpen}
+            onOpenChange={(o) => {
+              setCreateOpen(o);
+              if (!o) setForm(EMPTY_FORM);
+            }}
+          >
+            <DialogTrigger asChild>
+              <Button onClick={() => setCreateOpen(true)}>
+                <Plus className="h-4 w-4 mr-2" />
+                Create Test
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle>Create A/B Test</DialogTitle>
+                <DialogDescription>
+                  Split-test a single element between two variants on a
+                  chosen touch of the sequence.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label>Test Name</Label>
+                  <Input
+                    placeholder="e.g. Subject line - urgency vs curiosity"
+                    value={form.name}
+                    onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Campaign</Label>
+                  <Select
+                    value={form.campaignId}
+                    onChange={(e) => setForm((f) => ({ ...f, campaignId: e.target.value }))}
+                  >
+                    <option value="">Select a campaign…</option>
+                    {campaigns.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <Label>Element</Label>
+                    <Select
+                      value={form.element}
+                      onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          element: e.target.value as AbTest["element"],
+                        }))
+                      }
+                    >
+                      {ELEMENT_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Touch Number</Label>
+                    <Select
+                      value={String(form.touchNumber)}
+                      onChange={(e) =>
+                        setForm((f) => ({ ...f, touchNumber: Number(e.target.value) }))
+                      }
+                    >
+                      {[1, 2, 3, 4, 5, 6, 7].map((t) => (
+                        <option key={t} value={t}>
+                          Touch {t}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                </div>
+
+                {form.element === "sendTime" && (
+                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2">
+                    Send-time tests don't have dedicated per-variant time
+                    fields on the backend yet — this creates the test and
+                    tracks significance the same way, but variant content
+                    below is optional and won't drive a different send time.
+                  </p>
+                )}
+
+                {form.element === "subject" && (
+                  <div className="grid grid-cols-1 gap-3">
+                    <div className="space-y-2">
+                      <Label>{form.variantALabel} — Subject</Label>
+                      <Input
+                        value={form.variantASubject}
+                        onChange={(e) =>
+                          setForm((f) => ({ ...f, variantASubject: e.target.value }))
+                        }
+                        placeholder="Subject line for Variant A"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>{form.variantBLabel} — Subject</Label>
+                      <Input
+                        value={form.variantBSubject}
+                        onChange={(e) =>
+                          setForm((f) => ({ ...f, variantBSubject: e.target.value }))
+                        }
+                        placeholder="Subject line for Variant B"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {form.element === "body" && (
+                  <div className="grid grid-cols-1 gap-3">
+                    <div className="space-y-2">
+                      <Label>{form.variantALabel} — Body</Label>
+                      <Textarea
+                        value={form.variantABody}
+                        onChange={(e) =>
+                          setForm((f) => ({ ...f, variantABody: e.target.value }))
+                        }
+                        placeholder="Email body for Variant A"
+                        rows={4}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>{form.variantBLabel} — Body</Label>
+                      <Textarea
+                        value={form.variantBBody}
+                        onChange={(e) =>
+                          setForm((f) => ({ ...f, variantBBody: e.target.value }))
+                        }
+                        placeholder="Email body for Variant B"
+                        rows={4}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <Label>
+                    Split Ratio — {Math.round(form.splitRatio * 100)}% / {Math.round((1 - form.splitRatio) * 100)}%
+                  </Label>
+                  <Input
+                    type="range"
+                    min={0.1}
+                    max={0.9}
+                    step={0.05}
+                    value={form.splitRatio}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, splitRatio: parseFloat(e.target.value) }))
+                    }
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Fraction of prospects assigned to {form.variantALabel}.
+                  </p>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setCreateOpen(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={handleCreate} disabled={createMutation.isPending}>
+                  {createMutation.isPending ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
+                  ) : null}
+                  Create Test
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         }
       />
 
-      <Alert variant="default">
-        <Info className="h-4 w-4" />
-        <AlertTitle>Standalone experiment framework</AlertTitle>
-        <AlertDescription>
-          A/B Testing runs independently of Campaigns &amp; Sequences. Each test
-          holds 2+ variants (subject + body) and tracks open/reply rates per
-          variant until statistical significance is reached. Tests do not
-          auto-promote the winning variant into a Sequence — once a winner is
-          declared, copy the subject/body into Templates or Email Studio
-          manually to roll it out.
-        </AlertDescription>
-      </Alert>
-
-      <div className="grid gap-6 lg:grid-cols-3">
-        {/* Tests table */}
-        <Card className="lg:col-span-2">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <FlaskConical className="h-4 w-4" />
-              Tests
-            </CardTitle>
-            <CardDescription>{tests.length} tests across all campaigns.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <div className="space-y-2">
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <Skeleton key={i} className="h-12 w-full" />
-                ))}
-              </div>
-            ) : tests.length === 0 ? (
-              <EmptyState icon={<FlaskConical className="h-8 w-8" />} title="No tests yet" description="Create your first A/B test." />
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Name</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Metric</TableHead>
-                    <TableHead className="text-center">Variants</TableHead>
-                    <TableHead>Winner</TableHead>
-                    <TableHead className="text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {tests.map((t) => {
-                    const badge = statusBadge(t.status);
-                    return (
-                      <TableRow
-                        key={t.id}
-                        className={cn("cursor-pointer", selectedId === t.id && "bg-muted/50")}
-                        onClick={() => setSelectedId(t.id)}
-                      >
-                        <TableCell className="font-medium">{t.name}</TableCell>
-                        <TableCell>
-                          <Badge variant={badge.variant}>{badge.label}</Badge>
-                        </TableCell>
-                        <TableCell className="capitalize text-muted-foreground">
-                          {t.metric.replace("_", " ")}
-                        </TableCell>
-                        <TableCell className="text-center">{t.variants.length}</TableCell>
-                        <TableCell>{t.winner ? <Badge variant="success">{t.winner}</Badge> : "—"}</TableCell>
-                        <TableCell className="text-right">
-                          <div className="flex justify-end gap-1" onClick={(e) => e.stopPropagation()}>
-                            {(t.status === "draft" || t.status === "paused") && (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => startMutation.mutate(t.id)}
-                                disabled={startMutation.isPending}
-                              >
-                                <Play className="h-3.5 w-3.5" />
-                                Start
-                              </Button>
-                            )}
-                            <Button size="sm" variant="outline" onClick={() => setSigTest(t)}>
-                              <Sigma className="h-3.5 w-3.5" />
-                              Significance
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Detail drawer */}
+      {testsQ.isLoading ? (
+        <div className="space-y-3">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-24 w-full" />
+          ))}
+        </div>
+      ) : testsQ.isError ? (
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <ChartColumn className="h-4 w-4" />
-              Variant Comparison
-            </CardTitle>
-            <CardDescription>
-              {selected ? selected.name : "Select a test to inspect variants."}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {!selected ? (
-              <EmptyState icon={<ChartColumn className="h-8 w-8" />} title="No test selected" description="Click a row to view its variants." />
-            ) : (
-              <div className="space-y-4">
-                <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
-                  <Badge variant={statusBadge(selected.status).variant}>{statusBadge(selected.status).label}</Badge>
-                  <span>Updated {formatDateTime(selected.updatedAt)}</span>
-                </div>
-                <div className="h-56 w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={detailChart}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" opacity={0.6} />
-                      <XAxis dataKey="label" tick={{ fontSize: 12 }} stroke="#94a3b8" />
-                      <YAxis tick={{ fontSize: 11 }} stroke="#94a3b8" />
-                      <Tooltip content={<ChartTooltip />} />
-                      <Legend wrapperStyle={{ fontSize: 11 }} />
-                      <Bar dataKey="Sent" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
-                      <Bar dataKey="Opened" fill="#10b981" radius={[4, 4, 0, 0]} />
-                      <Bar dataKey="Replied" fill="#f59e0b" radius={[4, 4, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className="space-y-2">
-                  {selected.variants.map((v) => (
-                    <div key={v.id} className="rounded-md border p-2 text-sm">
-                      <div className="mb-1 flex items-center justify-between">
-                        <Badge variant="secondary">Variant {v.label}</Badge>
-                        <span className="text-xs text-muted-foreground">
-                          {v.sent} sent · {v.opened} open · {v.replied} reply
-                        </span>
-                      </div>
-                      <p className="font-medium">{v.subject || "(no subject)"}</p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+          <CardContent className="py-12 text-center">
+            <p className="text-muted-foreground">Failed to load A/B tests.</p>
+            <Button onClick={() => testsQ.refetch()} className="mt-4">
+              Retry
+            </Button>
           </CardContent>
         </Card>
-      </div>
+      ) : tests.length === 0 ? (
+        <EmptyState
+          icon={<FlaskConical className="h-6 w-6" />}
+          title="No A/B Tests Yet"
+          description="Create your first test to compare subject lines, bodies, or send times."
+          action={
+            <Button onClick={() => setCreateOpen(true)}>
+              <Plus className="h-4 w-4 mr-2" />
+              Create Test
+            </Button>
+          }
+        />
+      ) : (
+        <div className="space-y-3">
+          {tests.map((t) => {
+            const meta = statusMeta(t.status);
+            return (
+              <Card key={t.id}>
+                <CardContent className="py-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div
+                      className="flex-1 min-w-0 cursor-pointer"
+                      onClick={() => setResultsTest(t)}
+                    >
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-medium text-sm">{t.name}</span>
+                        <Badge variant={meta.variant} className="text-[10px]">
+                          {meta.label}
+                        </Badge>
+                        <Badge variant="outline" className="text-[10px]">
+                          {ELEMENT_OPTIONS.find((o) => o.value === t.element)?.label ??
+                            t.element}
+                        </Badge>
+                        <Badge variant="outline" className="text-[10px]">
+                          Touch {t.touchNumber}
+                        </Badge>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {campaignName(t.campaignId)}
+                        {t.description ? ` · ${t.description}` : ""}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground mt-1">
+                        {t.variantALabel} ({Math.round(t.splitRatio * 100)}%) vs{" "}
+                        {t.variantBLabel} ({Math.round((1 - t.splitRatio) * 100)}%)
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {t.status === "draft" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => startMutation.mutate(t.id)}
+                          disabled={startMutation.isPending}
+                        >
+                          <Play className="h-3.5 w-3.5 mr-1" />
+                          Start
+                        </Button>
+                      )}
+                      {t.status === "running" && (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() =>
+                              statusMutation.mutate({ id: t.id, status: "paused" })
+                            }
+                          >
+                            <Pause className="h-3.5 w-3.5 mr-1" />
+                            Pause
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() =>
+                              statusMutation.mutate({
+                                id: t.id,
+                                status: "completed",
+                                endedAt: new Date().toISOString(),
+                              })
+                            }
+                          >
+                            <Square className="h-3.5 w-3.5 mr-1" />
+                            Stop
+                          </Button>
+                        </>
+                      )}
+                      {t.status === "paused" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            statusMutation.mutate({ id: t.id, status: "running" })
+                          }
+                        >
+                          <Play className="h-3.5 w-3.5 mr-1" />
+                          Resume
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setResultsTest(t)}
+                      >
+                        Results
+                      </Button>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-8 w-8 text-red-500 hover:text-red-600"
+                        onClick={() => setDeleteTarget(t)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
 
-      <NewTestDialog open={newOpen} onOpenChange={setNewOpen} />
-      <SignificanceDialog test={sigTest} onClose={() => setSigTest(null)} />
+      {resultsTest && (
+        <ResultsDialog
+          test={resultsTest}
+          campaignName={campaignName(resultsTest.campaignId)}
+          onClose={() => setResultsTest(null)}
+        />
+      )}
+
+      <Dialog open={!!deleteTarget} onOpenChange={(o) => !o && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete A/B test?</DialogTitle>
+            <DialogDescription>
+              {deleteTarget
+                ? `"${deleteTarget.name}" will be permanently removed. This action cannot be undone.`
+                : "This A/B test will be permanently removed."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending ? "Deleting…" : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
+  );
+}
+
+/* ── Results dialog (AB-3) + Promote Winner (AB-4) ── */
+
+function ResultsDialog({
+  test,
+  campaignName,
+  onClose,
+}: {
+  test: AbTest;
+  campaignName: string;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const [promoting, setPromoting] = useState(false);
+
+  const sigQ = useQuery({
+    queryKey: ["ab-testing", test.id, "significance"],
+    queryFn: () =>
+      http.get<SignificanceResult>(`/api/v1/ab-testing/${test.id}/significance`),
+  });
+  const sig = sigQ.data;
+
+  const promoteMutation = useMutation({
+    mutationFn: async (winner: "A" | "B") => {
+      const winningSubject = winner === "A" ? test.variantASubject : test.variantBSubject;
+      const winningBody = winner === "A" ? test.variantABody : test.variantBBody;
+
+      const sequences = await http
+        .get<unknown>(
+          `/api/v1/sequences?campaign_id=${test.campaignId}&limit=500`,
+        )
+        .then((r) => normaliseList<Sequence>(r));
+
+      const targets = sequences.filter(
+        (s) =>
+          s.touchNumber === test.touchNumber &&
+          ["Draft", "QaFailed", "QaPassed", "Scheduled"].includes(s.status),
+      );
+
+      if (targets.length === 0) {
+        throw new Error("No unsent sequences found at this touch to promote to");
+      }
+
+      await Promise.all(
+        targets.map((s) =>
+          http.put(`/api/v1/sequences/${s.id}`, {
+            ...(winningSubject ? { subjectLine: winningSubject } : {}),
+            ...(winningBody ? { bodyCopy: winningBody } : {}),
+          }),
+        ),
+      );
+      return targets.length;
+    },
+    onSuccess: (count) => {
+      toast.success(`Winning variant applied to ${count} unsent touch(es)`);
+      qc.invalidateQueries({ queryKey: ["sequences"] });
+    },
+    onError: (err) =>
+      toast.error(err instanceof Error ? err.message : "Failed to promote winner"),
+    onSettled: () => setPromoting(false),
+  });
+
+  function handlePromote() {
+    if (!sig?.winner) return;
+    setPromoting(true);
+    promoteMutation.mutate(sig.winner);
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{test.name} — Results</DialogTitle>
+          <DialogDescription>
+            {campaignName} · Touch {test.touchNumber} ·{" "}
+            {ELEMENT_OPTIONS.find((o) => o.value === test.element)?.label}
+          </DialogDescription>
+        </DialogHeader>
+
+        {sigQ.isLoading ? (
+          <Skeleton className="h-48 w-full" />
+        ) : sig ? (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <VariantCard
+                label={test.variantALabel}
+                count={sig.variantACount}
+                successes={sig.variantASuccesses}
+                rate={sig.variantARate}
+                isWinner={sig.winner === "A"}
+              />
+              <VariantCard
+                label={test.variantBLabel}
+                count={sig.variantBCount}
+                successes={sig.variantBSuccesses}
+                rate={sig.variantBRate}
+                isWinner={sig.winner === "B"}
+              />
+            </div>
+
+            <div
+              className={`rounded-md border p-3 text-sm ${
+                sig.isSignificant
+                  ? "border-emerald-300 bg-emerald-50"
+                  : "border-amber-300 bg-amber-50"
+              }`}
+            >
+              <p className="font-medium">
+                {sig.isSignificant
+                  ? `Statistically significant (p = ${sig.pValue.toFixed(4)})`
+                  : `Not yet significant (p = ${sig.pValue.toFixed(4)})`}
+              </p>
+              <p className="text-xs text-muted-foreground mt-1">
+                z-score: {sig.zScore.toFixed(3)} · "successes" here means a
+                positive reply, per the backend's two-proportion z-test.
+              </p>
+              {!sig.isSignificant && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  Keep the test running to gather more sends — significance
+                  requires p &lt; 0.05.
+                </p>
+              )}
+            </div>
+
+            <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+              A per-prospect assignment breakdown isn't shown here — the
+              backend's significance endpoint returns aggregate stats only;
+              no endpoint exposes individual variant-assignment rows.
+            </div>
+
+            {sig.winner && (
+              <Button
+                onClick={handlePromote}
+                disabled={promoting || promoteMutation.isPending}
+                className="w-full"
+              >
+                {promoting ? (
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                ) : (
+                  <Rocket className="h-4 w-4 mr-2" />
+                )}
+                Promote Variant {sig.winner} to remaining unsent touches
+              </Button>
+            )}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground py-6 text-center">
+            No significance data available yet.
+          </p>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Close
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function VariantCard({
+  label,
+  count,
+  successes,
+  rate,
+  isWinner,
+}: {
+  label: string;
+  count: number;
+  successes: number;
+  rate: number;
+  isWinner: boolean;
+}) {
+  return (
+    <Card className={isWinner ? "border-amber-400 bg-amber-50/50" : ""}>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm flex items-center gap-1.5">
+          {label}
+          {isWinner && <Trophy className="h-4 w-4 text-amber-500" />}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-1">
+        <p className="text-2xl font-bold">{pct(rate)}</p>
+        <p className="text-xs text-muted-foreground">
+          {successes} positive replies / {count} sent
+        </p>
+      </CardContent>
+    </Card>
   );
 }

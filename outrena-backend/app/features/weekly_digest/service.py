@@ -1,23 +1,124 @@
-"""weekly_digest_service.py — Auto-generated weekly performance summary."""
+"""weekly_digest_service.py — Auto-generated weekly performance summary.
+
+FIX: summary generation now uses GlobalLlmConfig via a fresh public-schema
+session (same pattern as pipeline, meeting prep, and job change fixes)
+instead of get_llm_service().generate() which hits open.bigmodel.cn with
+no API key → 401 → [LLM-STUB].
+"""
 from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.campaign_models import Sequence
-from app.models.enums import EmailStatus
 from app.models.phase3_models import WeeklyDigest
-from app.services.llm_service import get_llm_service
+from app.services.llm_service import call_llm, LlmGatewayError
 
 logger = structlog.get_logger(__name__)
 
 
 class WeeklyDigestService:
+
+    # ── LLM config (same pattern as pipeline / meeting prep / job change) ──
+
+    @staticmethod
+    async def _get_llm_config():
+        from app.core.database import AsyncSessionLocal
+        from app.models.global_llm_config import GlobalLlmConfig
+        from app.services.secret_service import decrypt_at_rest
+
+        try:
+            async with AsyncSessionLocal() as pub_db:
+                await pub_db.execute(text('SET search_path TO "public"'))
+
+                result = await pub_db.execute(
+                    select(GlobalLlmConfig)
+                    .where(GlobalLlmConfig.is_active.is_(True))
+                    .where(GlobalLlmConfig.is_default.is_(True))
+                    .limit(1)
+                )
+                config = result.scalar_one_or_none()
+
+                if config is None:
+                    result = await pub_db.execute(
+                        select(GlobalLlmConfig)
+                        .where(GlobalLlmConfig.is_active.is_(True))
+                        .order_by(GlobalLlmConfig.id)
+                        .limit(1)
+                    )
+                    config = result.scalar_one_or_none()
+
+                if config is None:
+                    return None
+
+                api_key = decrypt_at_rest(config.api_key_encrypted)
+                return SimpleNamespace(
+                    provider=config.provider,
+                    name=config.display_name,
+                    modelId=config.model_name,
+                    apiKey=api_key,
+                    baseUrl=config.base_url,
+                    isActive=config.is_active,
+                    isDefault=config.is_default,
+                    settings="{}",
+                    global_llm_config_id=None,
+                )
+        except Exception as exc:
+            logger.warning("weekly_digest.llm_config.fetch_failed", error=str(exc))
+            return None
+
+    @staticmethod
+    async def _generate_summary(llm_config, sent: int, replied: int,
+                                 positive: int, bounced: int) -> str:
+        if llm_config is None:
+            return (
+                f"This week: {sent} emails sent, {replied} replies "
+                f"({(replied/sent*100):.1f}% reply rate), "
+                f"{positive} positive replies, {bounced} bounces."
+                if sent else
+                f"No emails sent this week. {bounced} bounces recorded."
+            )
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a concise outreach performance analyst. "
+                    "Write exactly 3 sentences. Be encouraging and specific. "
+                    "No markdown, no bullet points, plain prose only."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Write a 3-sentence weekly summary for an outreach team. "
+                    f"Stats: {sent} sent, {replied} replied "
+                    f"({(replied/sent*100):.1f}% reply rate), "
+                    f"{positive} positive replies, {bounced} bounced."
+                    if sent else
+                    f"Write a 3-sentence weekly summary. No emails were sent this week. "
+                    f"{bounced} bounces recorded."
+                ),
+            },
+        ]
+        try:
+            resp = await call_llm(llm_config, messages)
+            return resp.content.strip()
+        except LlmGatewayError as exc:
+            logger.warning("weekly_digest.llm_summary_failed", error=str(exc))
+            return (
+                f"This week: {sent} emails sent, {replied} replied, "
+                f"{positive} positive, {bounced} bounced."
+            )
+
+    # ── CRUD ───────────────────────────────────────────────────────────────
+
     async def list(
         self, db: AsyncSession, *, limit: int = 12, offset: int = 0
     ) -> list[WeeklyDigest]:
@@ -35,33 +136,34 @@ class WeeklyDigestService:
         )
         return result.scalar_one_or_none()
 
+    async def delete(self, db: AsyncSession, digest_id: str) -> bool:
+        item = await self.get(db, digest_id)
+        if item is None:
+            return False
+        await db.delete(item)
+        await db.commit()
+        return True
+
     async def generate(
         self, db: AsyncSession, week_start: datetime | None = None
     ) -> WeeklyDigest:
         """Compute + persist the weekly digest for the given (or current) week."""
         if week_start is None:
             today = datetime.now(timezone.utc)
-            week_start = today - timedelta(days=today.weekday())  # Monday
+            week_start = today - timedelta(days=today.weekday())
             week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
         week_end = week_start + timedelta(days=7)
+
         seqs_result = await db.execute(
-            select(Sequence).where(Sequence.sentAt >= week_start, Sequence.sentAt < week_end)
+            select(Sequence).where(
+                Sequence.sentAt >= week_start, Sequence.sentAt < week_end
+            )
         )
         sequences = list(seqs_result.scalars().all())
         sent = len(sequences)
         replied = sum(1 for s in sequences if s.repliedAt is not None)
         bounced = sum(1 for s in sequences if s.bouncedAt is not None)
 
-        # Wiring audit (Task 2-e): positive replies + meetings booked are now
-        # aggregated from the ReplyDraft table instead of the prior heuristic
-        # (`replied * 0.4` + `meetings = 0`). The MailBridge "replied" webhook
-        # auto-creates a ReplyDraft + runs AI categorization (Task 2-a), so
-        # each reply now carries a category in {interested, meeting_request,
-        # demo_request, positive_reply, negative_reply, not_interested, ooo,
-        # unsubscribe, other} — we count the first 4 as positive. Meetings
-        # booked = count of ReplyDraft.meetingBookedAt set within the window.
-        # Best-effort: fall back to the legacy heuristic if ReplyDraft rows
-        # can't be loaded (e.g. table not yet provisioned on a fresh tenant).
         positive = 0
         meetings = 0
         try:
@@ -77,41 +179,33 @@ class WeeklyDigestService:
                 )
                 reply_drafts = list(rd_result.scalars().all())
                 positive = sum(
-                    1
-                    for rd in reply_drafts
+                    1 for rd in reply_drafts
                     if (rd.category or "") in POSITIVE_CATEGORIES
                 )
                 meetings = sum(
-                    1
-                    for rd in reply_drafts
+                    1 for rd in reply_drafts
                     if rd.meetingBookedAt is not None
                     and week_start <= rd.meetingBookedAt < week_end
                 )
-        except Exception as exc:  # noqa: BLE001 — best-effort, never block the digest
+        except Exception as exc:
             logger.warning(
-                "weekly_digest.reply_draft_aggregation_failed",
-                error=str(exc),
+                "weekly_digest.reply_draft_aggregation_failed", error=str(exc)
             )
-            positive = int(replied * 0.4)  # legacy heuristic fallback
+            positive = int(replied * 0.4)
 
-        llm = get_llm_service()
-        summary_text = await llm.generate(
-            prompt=(
-                f"Write a 3-sentence weekly summary for an outreach team. "
-                f"This week: {sent} sent, {replied} replied, {positive} positive, "
-                f"{bounced} bounced. Be encouraging and specific."
-            )
+        # Generate summary using GlobalLlmConfig (not legacy LlmService)
+        llm_config = await self._get_llm_config()
+        summary_text = await self._generate_summary(
+            llm_config, sent, replied, positive, bounced
         )
+
         highlights = [
             f"Sent {sent} emails",
-            f"{replied} replies ({(replied/sent*100):.1f}% reply rate)" if sent else "No sends",
+            f"{replied} replies ({(replied/sent*100):.1f}% reply rate)" if sent else "No sends this week",
+            f"{positive} positive replies",
             f"{bounced} bounces",
         ]
-        # Three spec-required JSON columns for metrics (audit-A1 M-35).
-        # `highlights` (above) is the first; `topProspects` + `campaignPerformance`
-        # round out the trio. Phase 3 stubs these with the data we already have
-        # — Phase 4 will populate them with joined Campaign + Prospect rollups.
-        # Top prospects: rank by recency of reply (repliedAt not null) then sent.
+
         replied_seqs = [s for s in sequences if s.repliedAt is not None]
         top_prospects = [
             {
@@ -122,18 +216,17 @@ class WeeklyDigestService:
             }
             for s in replied_seqs[:10]
         ]
-        # Campaign performance: per-campaign sent/replied/bounced rollup.
+
         campaign_perf: dict[str, Any] = {}
         for s in sequences:
             cid = s.campaignId or "uncategorized"
-            entry = campaign_perf.setdefault(
-                cid, {"sent": 0, "replied": 0, "bounced": 0}
-            )
+            entry = campaign_perf.setdefault(cid, {"sent": 0, "replied": 0, "bounced": 0})
             entry["sent"] += 1
             if s.repliedAt is not None:
                 entry["replied"] += 1
             if s.bouncedAt is not None:
                 entry["bounced"] += 1
+
         digest = WeeklyDigest(
             weekStart=week_start,
             weekEnd=week_end,
@@ -152,61 +245,26 @@ class WeeklyDigestService:
         digest = await db.get(WeeklyDigest, digest.id)
         return digest
 
-    async def delete(self, db: AsyncSession, digest_id: str) -> bool:
-        item = await self.get(db, digest_id)
-        if item is None:
-            return False
-        await db.delete(item)
-        await db.commit()
-        return True
-
     async def send_pending(self, *, local_hour_gate: int | None = None) -> dict[str, Any]:
-        """Auto-generate the current week's digest for every active tenant.
-
-        Wiring audit (Task 2-e): the Celery beat task ``weekly_digest.send_pending``
-        (registered in ``app.worker.celery_app``) invoked this method, but it
-        didn't exist — the beat task gracefully caught the AttributeError and
-        logged a no-op message, so the Monday 08:00 UTC digest never landed
-        automatically. Users had to call ``POST /api/v1/weekly-digest/generate``
-        manually each week.
-
-        This implementation iterates every ACTIVE tenant in ``public.tenants``,
-        opens a session bound to that tenant's schema, and calls
-        ``self.generate(db, week_start=None)`` — which is idempotent in the
-        sense that it always inserts a fresh row (callers can de-dupe by
-        ``weekStart`` if they want a single digest per week; the model has no
-        UNIQUE constraint on weekStart, so successive runs produce successive
-        rows, which is acceptable for an audit trail).
-
-        Returns a dict ``{tenant_slug: {ok, digest_id|error}}`` for observability.
-        Best-effort: per-tenant failures are logged + collected — they never
-        abort the entire sweep.
-        """
-        from datetime import datetime, timezone
-        from sqlalchemy import text
-
+        """Auto-generate the current week's digest for every active tenant."""
+        from sqlalchemy import text as _text
         from app.core.database import AsyncSessionLocal
 
         results: dict[str, Any] = {}
         async with AsyncSessionLocal() as session:
-            await session.execute(text('SET search_path TO "public"'))
+            await session.execute(_text('SET search_path TO "public"'))
             rows = (
                 await session.execute(
-                    text(
+                    _text(
                         "SELECT slug, schema_name FROM public.tenants "
                         "WHERE deleted_at IS NULL AND status = 'ACTIVE'"
                     )
                 )
             ).fetchall()
 
-        # FR-059: recipient-local delivery. When local_hour_gate is set (the
-        # hourly Monday beat passes 9), only tenants whose configured local
-        # time is currently in that hour are processed this run; the others
-        # are picked up by a later hourly run. Tenant timezone comes from
-        # public.tenant_config.features JSONB ("timezone", IANA name);
-        # missing/invalid → UTC.
         if local_hour_gate is not None:
             from zoneinfo import ZoneInfo
+            import json as _json
 
             gated: list[Any] = []
             async with AsyncSessionLocal() as session:
@@ -215,7 +273,7 @@ class WeeklyDigestService:
                     try:
                         feat = (
                             await session.execute(
-                                text(
+                                _text(
                                     "SELECT tc.features FROM public.tenant_config tc "
                                     "JOIN public.tenants t ON t.tenant_id = tc.tenant_id "
                                     "WHERE t.slug = :slug"
@@ -224,15 +282,13 @@ class WeeklyDigestService:
                             )
                         ).scalar()
                         if isinstance(feat, str):
-                            import json as _json
-
                             feat = _json.loads(feat or "{}")
                         tz_name = (feat or {}).get("timezone") or "UTC"
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         tz_name = "UTC"
                     try:
                         local_hour = datetime.now(ZoneInfo(tz_name)).hour
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         local_hour = datetime.now(timezone.utc).hour
                     if local_hour == local_hour_gate:
                         gated.append(row)
@@ -249,17 +305,16 @@ class WeeklyDigestService:
             try:
                 async with AsyncSessionLocal() as session:
                     await session.execute(
-                        text(f'SET search_path TO "{schema}", public')
+                        _text(f'SET search_path TO "{schema}", public')
                     )
                     digest = await self.generate(session, week_start=None)
                     results[slug] = {
                         "ok": True,
                         "digest_id": getattr(digest, "id", None),
                         "week_start": digest.weekStart.isoformat()
-                        if digest.weekStart
-                        else None,
+                        if digest.weekStart else None,
                     }
-            except Exception as exc:  # noqa: BLE001 — per-tenant isolation
+            except Exception as exc:
                 logger.error(
                     "weekly_digest.send_pending.tenant_failed",
                     tenant=slug,

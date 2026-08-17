@@ -1,550 +1,713 @@
 /**
- * ReplyInboxPage.tsx — OUTRENA Phase 4 (Task 3-C)
- *
- * Reply triage with auto-pilot eligibility. Two-pane inbox + detail with
- * category filter, auto-pilot-only switch, categorize + auto-reply actions.
+ * ReplyInboxPage.tsx — Gap closure RI-1 through RI-8
+ * Layout matches Next.js reference: two-tab (Manual Review + Auto-Pilot),
+ * inline toolbar, draft list + detail panel side-by-side, inline deal card.
  */
-import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState, useEffect } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  AlertTriangle,
-  Bot,
-  CheckCircle2,
-  Inbox,
-  LogIn,
-  Send,
-  Sparkles,
-  Tag,
-} from "lucide-react";
-import { toast } from "sonner";
+  Bot, CheckCircle2, Send, Sparkles, FileDown, Eye, Info,
+  Loader2, MessageCircleReply, Zap, Ban, DollarSign, Clock,
+  ShieldAlert, XCircle,
+} from 'lucide-react';
+import { toast } from 'sonner';
 
-import { http } from "@/services/apiClient";
-import { cn, formatPercent, timeAgo, truncate } from "@/lib/utils";
-import type { ReplyDraft } from "@/types/common";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { http } from '@/services/apiClient';
+import { cn } from '@/lib/utils';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { EmptyState } from "@/components/ui/empty-state";
-import { PageHeader } from "@/components/ui/page-header";
-import { Progress } from "@/components/ui/progress";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { NativeSelect as Select } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
-import { StatCard } from "@/components/ui/stat-card";
-import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
-import { Label } from "@/components/ui/label";
+  Card, CardContent, CardDescription, CardHeader, CardTitle,
+} from '@/components/ui/card';
 import {
-  Dialog,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-  DialogClose,
-} from "@/components/ui/dialog";
+  Dialog, DialogContent, DialogDescription, DialogFooter,
+  DialogHeader, DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Textarea } from '@/components/ui/textarea';
 
-/* ── Types & mocks ──────────────────────────────────────────────────────── */
+// ─── Types ────────────────────────────────────────────────────────────────────
 
-const CATEGORIES = [
-  "positive",
-  "neutral",
-  "objection",
-  "not_interested",
-  "oof",
-] as const;
+interface ReplyDraft {
+  id: string;
+  sequenceId: string;
+  prospectId: string;
+  originalReply: string;
+  category: string;
+  summary: string | null;
+  suggestedAction: string | null;
+  draftBody: string | null;
+  status: string;
+  sentAt: string | null;
+  autoPilotEligible: boolean;
+  confidence: number | null;
+  autoSentAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
 
-const CATEGORY_VARIANT: Record<string, "success" | "secondary" | "warning" | "destructive" | "outline"> = {
-  positive: "success",
-  neutral: "secondary",
-  objection: "warning",
-  not_interested: "destructive",
-  oof: "outline",
+interface AutoPilotPreview {
+  eligible: ReplyDraft[];
+  count: number;
+}
+
+interface AutoPilotSendResult {
+  sent: number;
+  failed: number;
+  markedOnly: number;
+  total: number;
+}
+
+interface Prospect {
+  id: string;
+  firstName: string;
+  lastName: string;
+  company: string | null;
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const CATEGORY_COLORS: Record<string, string> = {
+  interested:      'bg-emerald-100 text-emerald-700',
+  positive_signal: 'bg-green-100 text-green-700',
+  meeting_request: 'bg-blue-100 text-blue-700',
+  needs_info:      'bg-amber-100 text-amber-700',
+  counter_proposal:'bg-purple-100 text-purple-700',
+  neutral:         'bg-gray-100 text-gray-700',
+  out_of_office:   'bg-sky-100 text-sky-700',
+  not_interested:  'bg-red-100 text-red-700',
+  positive:        'bg-emerald-100 text-emerald-700',
+  objection:       'bg-amber-100 text-amber-700',
+  unsubscribe:     'bg-rose-100 text-rose-700',
+  oof:             'bg-sky-100 text-sky-700',
+  other:           'bg-gray-100 text-gray-700',
 };
 
-const MOCK_REPLIES: (ReplyDraft & { prospectName: string })[] = [
-  {
-    id: "rd1",
-    prospectId: "p1",
-    sequenceId: "s1",
-    inboundMessage:
-      "Hey — this is interesting. We've been looking at reconciliation tools. Do you have a deck or a 15-min slot next week?",
-    category: "positive",
-    suggestedReply:
-      "Thanks Jordan! I've got Tuesday at 10am or Wednesday at 2pm PT open. I'll bring a 1-page deck with the 90-day ROI breakdown. Which works?",
-    confidence: 0.91,
-    autoPilotEligible: true,
-    status: "pending",
-    createdAt: "2025-01-10T14:23:00Z",
-    updatedAt: "2025-01-10T14:23:00Z",
-    prospectName: "Jordan Avery",
-  },
-  {
-    id: "rd2",
-    prospectId: "p2",
-    sequenceId: "s2",
-    inboundMessage: "Got it, thanks. Not now — ping me in Q2.",
-    category: "neutral",
-    suggestedReply: "Sounds good, Priya. I'll reach back out in April. Have a great quarter.",
-    confidence: 0.86,
-    autoPilotEligible: true,
-    status: "pending",
-    createdAt: "2025-01-10T11:02:00Z",
-    updatedAt: "2025-01-10T11:02:00Z",
-    prospectName: "Priya Shah",
-  },
-  {
-    id: "rd3",
-    prospectId: "p3",
-    sequenceId: "s3",
-    inboundMessage: "We already use Workday for this. Why switch?",
-    category: "objection",
-    suggestedReply:
-      "Totally fair — Workday is solid for GL. OUTRENA complements it by orchestrating reconciliation across subledgers + bank feeds. 15-min demo?",
-    confidence: 0.62,
-    autoPilotEligible: false,
-    status: "pending",
-    createdAt: "2025-01-09T18:45:00Z",
-    updatedAt: "2025-01-09T18:45:00Z",
-    prospectName: "Marcus Chen",
-  },
-  {
-    id: "rd4",
-    prospectId: "p4",
-    sequenceId: "s4",
-    inboundMessage: "Please remove me from your list.",
-    category: "not_interested",
-    suggestedReply: "Done — removing you now. Apologies for the interruption.",
-    confidence: 0.94,
-    autoPilotEligible: true,
-    status: "pending",
-    createdAt: "2025-01-09T09:15:00Z",
-    updatedAt: "2025-01-09T09:15:00Z",
-    prospectName: "Elena Rivera",
-  },
-  {
-    id: "rd5",
-    prospectId: "p5",
-    sequenceId: "s5",
-    inboundMessage: "Out of office until Jan 20. Will respond on return.",
-    category: "oof",
-    suggestedReply: "Thanks — I'll follow up after you're back.",
-    confidence: 0.97,
-    autoPilotEligible: true,
-    status: "pending",
-    createdAt: "2025-01-08T22:00:00Z",
-    updatedAt: "2025-01-08T22:00:00Z",
-    prospectName: "Tom Walsh",
-  },
-  {
-    id: "rd6",
-    prospectId: "p6",
-    sequenceId: "s6",
-    inboundMessage: "Yes — let's talk. I'm free Thursday afternoon.",
-    category: "positive",
-    suggestedReply: "Great — Thursday at 2pm PT works. I'll send a calendar invite shortly.",
-    confidence: 0.89,
-    autoPilotEligible: true,
-    status: "pending",
-    createdAt: "2025-01-08T15:30:00Z",
-    updatedAt: "2025-01-08T15:30:00Z",
-    prospectName: "Aisha Khan",
-  },
-  {
-    id: "rd7",
-    prospectId: "p7",
-    sequenceId: "s7",
-    inboundMessage: "What's pricing look like for a 200-person org?",
-    category: "positive",
-    suggestedReply:
-      "For 200 seats we typically land at $18k/yr, billed annually. Happy to walk through ROI in a quick call.",
-    confidence: 0.78,
-    autoPilotEligible: false,
-    status: "pending",
-    createdAt: "2025-01-07T10:11:00Z",
-    updatedAt: "2025-01-07T10:11:00Z",
-    prospectName: "Daniel Park",
-  },
-  {
-    id: "rd8",
-    prospectId: "p8",
-    sequenceId: "s8",
-    inboundMessage: "Not relevant right now, but thanks.",
-    category: "not_interested",
-    suggestedReply: "Understood — I'll close your sequence. Good luck with Q1.",
-    confidence: 0.88,
-    autoPilotEligible: true,
-    status: "pending",
-    createdAt: "2025-01-06T16:00:00Z",
-    updatedAt: "2025-01-06T16:00:00Z",
-    prospectName: "Sofia Mendoza",
-  },
-];
+const STATUS_COLORS: Record<string, string> = {
+  pending:   'bg-amber-100 text-amber-700',
+  approved:  'bg-blue-100 text-blue-700',
+  sent:      'bg-emerald-100 text-emerald-700',
+  dismissed: 'bg-gray-100 text-gray-600',
+  auto_sent: 'bg-violet-100 text-violet-700',
+};
 
-type ReplyRow = (typeof MOCK_REPLIES)[number];
+const POSITIVE_CATEGORIES = ['interested', 'meeting_request', 'positive_signal', 'positive'];
 
-/* ── Page ───────────────────────────────────────────────────────────────── */
+function normalise<T>(data: unknown): T[] {
+  if (!data) return [];
+  if (Array.isArray(data)) return data as T[];
+  return ((data as { items?: T[] }).items) ?? [];
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 export function ReplyInboxPage() {
   const qc = useQueryClient();
-  const [selectedId, setSelectedId] = useState<string | null>(MOCK_REPLIES[0].id);
-  const [categoryFilter, setCategoryFilter] = useState<string>("all");
-  const [autoPilotOnly, setAutoPilotOnly] = useState(false);
-  const [editedReply, setEditedReply] = useState<Record<string, string>>({});
-  const [logReplyOpen, setLogReplyOpen] = useState(false);
-  const [manualReply, setManualReply] = useState("");
 
-  // Check MailBridge connection status
-  const { data: mailbridgeStatus } = useQuery({
-    queryKey: ["mailbridge-status"],
-    queryFn: () => http.get<{ connected: boolean }>("/api/v1/mailbridge/status").catch(() => ({ connected: false })),
+  const { data: rawReplies, isLoading } = useQuery({
+    queryKey: ['reply-drafts'],
+    queryFn: () => http.get<unknown>('/api/v1/reply-drafts'),
+    refetchInterval: 30_000,
     retry: false,
+  });
+  const replies = normalise<ReplyDraft>(rawReplies);
+
+  const { data: autoPilotData } = useQuery({
+    queryKey: ['reply-drafts-autopilot'],
+    queryFn: () => http.get<AutoPilotPreview>('/api/v1/reply-drafts/auto-pilot'),
+    retry: false,
+  });
+
+  const { data: rawProspects } = useQuery({
+    queryKey: ['prospects-mini'],
+    queryFn: () => http.get<unknown>('/api/v1/prospects', { page: 1, page_size: 200 }),
     staleTime: 60_000,
   });
-  const mailbridgeConnected = mailbridgeStatus?.connected ?? false;
+  const prospects = normalise<Prospect>(rawProspects);
 
-  const { data: apiReplies, isLoading } = useQuery({
-    queryKey: ["reply-drafts"],
-    queryFn: () => http.get<ReplyDraft[]>("/api/v1/reply-drafts"),
-    retry: false,
+  const [selectedDraft, setSelectedDraft]         = useState<ReplyDraft | null>(null);
+  const [showAutoPilotOnly, setShowAutoPilotOnly] = useState(false);
+  const [createDealOpen, setCreateDealOpen]       = useState(false);
+  const [dealTitle, setDealTitle]                 = useState('');
+  const [dealValue, setDealValue]                 = useState('');
+  const [dealNotes, setDealNotes]                 = useState('');
+  const [dealNextAction, setDealNextAction]       = useState('');
+  const [dealSuggesting, setDealSuggesting]       = useState(false);
+
+  const [logOpen, setLogOpen]             = useState(false);
+  const [logProspectId, setLogProspectId] = useState('');
+  const [logSequenceId, setLogSequenceId] = useState('');
+  const [logReplyText, setLogReplyText]   = useState('');
+  const [logSubmitting, setLogSubmitting] = useState(false);
+
+  // Sequences for the selected prospect (for Log Reply sequenceId)
+  const { data: logSequencesRaw } = useQuery({
+    queryKey: ['sequences-for-log', logProspectId],
+    queryFn: () => http.get<unknown>('/api/v1/sequences', { prospect_id: logProspectId, limit: 50 }),
+    enabled: !!logProspectId,
+    staleTime: 30_000,
   });
-  const replies = (apiReplies ?? MOCK_REPLIES) as ReplyRow[];
+  const logSequences = normalise<{ id: string; touchNumber: number; angle: string }>(logSequencesRaw);
 
-  const filtered = useMemo(
-    () =>
-      replies.filter((r) => {
-        const matchesCat = categoryFilter === "all" || r.category === categoryFilter;
-        const matchesAuto = !autoPilotOnly || r.autoPilotEligible;
-        return matchesCat && matchesAuto;
-      }),
-    [replies, categoryFilter, autoPilotOnly],
+  const [apPreviewOpen, setApPreviewOpen]     = useState(false);
+  const [apPreviewLoading, setApPreviewLoading] = useState(false);
+  const [apPreview, setApPreview]             = useState<AutoPilotPreview | null>(null);
+  const [apConfirmOpen, setApConfirmOpen]     = useState(false);
+  const [apSending, setApSending]             = useState(false);
+  const [apResult, setApResult]               = useState<AutoPilotSendResult | null>(null);
+  const [apResultOpen, setApResultOpen]       = useState(false);
+
+  const filteredDrafts = useMemo(() =>
+    showAutoPilotOnly ? replies.filter((r) => r.autoPilotEligible) : replies,
+    [replies, showAutoPilotOnly]
   );
 
-  const selected =
-    replies.find((r) => r.id === selectedId) ?? filtered[0] ?? null;
+  const autoPilotStats = useMemo(() => ({
+    eligible:      replies.filter((r) => r.autoPilotEligible && r.status === 'pending').length,
+    autoSent:      replies.filter((r) => r.status === 'auto_sent').length,
+    pendingReview: replies.filter((r) => r.status === 'pending').length,
+    total:         replies.length,
+  }), [replies]);
 
-  const stats = useMemo(() => {
-    const total = replies.length;
-    const positive = replies.filter((r) => r.category === "positive").length;
-    const positiveRate = total ? positive / total : 0;
-    const autoSent = replies.filter((r) => r.status === "sent" && r.autoPilotEligible).length;
-    const avgConfidence =
-      total > 0
-        ? replies.reduce((sum, r) => sum + (r.confidence ?? 0), 0) / total
-        : 0;
-    return { total, positiveRate, autoSent, avgConfidence };
-  }, [replies]);
+  const pendingCount = replies.filter((r) => r.status === 'pending').length;
 
-  const categorizeMut = useMutation({
-    mutationFn: (id: string) =>
-      http.post<ReplyDraft>(`/api/v1/reply-drafts/${id}/reply-categorize`, {}),
-    onSuccess: () => {
-      toast.success("Reply re-categorized");
-      qc.invalidateQueries({ queryKey: ["reply-drafts"] });
-    },
-    onError: () => toast.error("Failed to categorize"),
+  useEffect(() => {
+    if (!selectedDraft && filteredDrafts.length > 0) {
+      setSelectedDraft(filteredDrafts[0]);
+    }
+  }, [filteredDrafts, selectedDraft]);
+
+  const approveMut = useMutation({
+    mutationFn: (id: string) => http.put(`/api/v1/reply-drafts/${id}`, { status: 'approved' }),
+    onSuccess: () => { toast.success('Approved'); qc.invalidateQueries({ queryKey: ['reply-drafts'] }); },
+    onError: () => toast.error('Approve failed'),
   });
 
-  const autoReplyMut = useMutation({
-    mutationFn: (id: string) =>
-      http.post<{ message: string }>(`/api/v1/reply-drafts/${id}/auto-reply`, {}),
-    onSuccess: () => {
-      toast.success("Auto-reply sent");
-      qc.invalidateQueries({ queryKey: ["reply-drafts"] });
-    },
-    onError: () => toast.error("Failed to send auto-reply"),
+  const sendMut = useMutation({
+    mutationFn: (id: string) => http.post(`/api/v1/reply-drafts/${id}/auto-reply`, { dryRun: false }),
+    onSuccess: () => { toast.success('Reply sent!'); setSelectedDraft(null); qc.invalidateQueries({ queryKey: ['reply-drafts'] }); },
+    onError: () => toast.error('Send failed'),
   });
 
-  function canAutoReply(r: ReplyRow | null): boolean {
-    return !!r && r.autoPilotEligible && (r.confidence ?? 0) >= 0.8;
-  }
+  const dismissMut = useMutation({
+    mutationFn: (id: string) => http.put(`/api/v1/reply-drafts/${id}`, { status: 'dismissed' }),
+    onSuccess: () => { toast.success('Dismissed'); qc.invalidateQueries({ queryKey: ['reply-drafts'] }); },
+    onError: () => toast.error('Dismiss failed'),
+  });
+
+  const createDealMut = useMutation({
+    mutationFn: (payload: { title: string; value: number; stage: string; notes?: string; prospectId?: string; source: string }) =>
+      http.post('/api/v1/deals', payload),
+    onSuccess: () => { toast.success('Deal created'); setCreateDealOpen(false); },
+    onError: () => toast.error('Failed to create deal'),
+  });
+
+  const handleExportCsv = () => {
+    const headers = ['id', 'category', 'status', 'confidence', 'autoPilotEligible', 'originalReply', 'draftBody', 'createdAt'];
+    const csv = [
+      headers.join(','),
+      ...replies.map((r) =>
+        headers.map((h) => {
+          const val = String((r as unknown as Record<string, unknown>)[h] ?? '');
+          return val.includes(',') ? `"${val.replace(/"/g, '""')}"` : val;
+        }).join(',')
+      ),
+    ].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `reply-drafts-${new Date().toISOString().split('T')[0]}.csv`; a.click();
+    URL.revokeObjectURL(url);
+    toast.success('CSV exported');
+  };
+
+  const handleLogReply = async () => {
+    if (!logReplyText.trim() || !logProspectId || !logSequenceId) { toast.error('Select a prospect, sequence, and enter reply text'); return; }
+    setLogSubmitting(true);
+    try {
+      await http.post('/api/v1/reply-drafts', { prospectId: logProspectId, sequenceId: logSequenceId, originalReply: logReplyText, category: 'other' });
+      toast.success('Reply logged');
+      setLogOpen(false); setLogProspectId(''); setLogSequenceId(''); setLogReplyText('');
+      qc.invalidateQueries({ queryKey: ['reply-drafts'] });
+    } catch { toast.error('Failed to log reply'); }
+    finally { setLogSubmitting(false); }
+  };
+
+  const handlePreviewAutoPilot = async () => {
+    setApPreviewLoading(true); setApPreviewOpen(true);
+    try {
+      const result = await http.get<AutoPilotPreview>('/api/v1/reply-drafts/auto-pilot');
+      setApPreview(result);
+    } catch { toast.error('Failed to load preview'); setApPreview({ eligible: [], count: 0 }); }
+    finally { setApPreviewLoading(false); }
+  };
+
+  const handleRunAutoPilot = async () => {
+    setApConfirmOpen(false); setApSending(true);
+    try {
+      const eligible = apPreview?.eligible ?? autoPilotData?.eligible ?? [];
+      const results = await Promise.allSettled(
+        eligible.map((d) => http.post(`/api/v1/reply-drafts/${d.id}/auto-reply`, { dryRun: false }))
+      );
+      const sent = results.filter((r) => r.status === 'fulfilled').length;
+      const failed = results.filter((r) => r.status === 'rejected').length;
+      setApResult({ sent, failed, markedOnly: 0, total: results.length });
+      setApResultOpen(true);
+      qc.invalidateQueries({ queryKey: ['reply-drafts'] });
+      qc.invalidateQueries({ queryKey: ['reply-drafts-autopilot'] });
+      if (sent > 0) toast.success(`Auto-Pilot sent ${sent} draft${sent === 1 ? '' : 's'}`);
+      if (failed > 0) toast.error(`${failed} draft${failed === 1 ? '' : 's'} failed`);
+    } catch { toast.error('Auto-Pilot run failed'); }
+    finally { setApSending(false); }
+  };
+
+  const openCreateDeal = async (draft: ReplyDraft) => {
+    setDealTitle(''); setDealValue(''); setDealNotes(''); setDealNextAction('');
+    setCreateDealOpen(true);
+    setDealSuggesting(true);
+    try {
+      const result = await http.post<{ suggestion?: string; nextAction?: string; dealTitle?: string; dealValue?: number; dealNotes?: string }>(
+        `/api/v1/deals/temp/deal-suggest`, { replyDraftId: draft.id }
+      );
+      setDealTitle(result.dealTitle ?? `${draft.category.replace(/_/g, ' ')} — Deal`);
+      setDealValue(String(result.dealValue ?? ''));
+      setDealNotes(result.dealNotes ?? result.suggestion ?? '');
+      setDealNextAction(result.nextAction ?? '');
+    } catch { /* suggestion failed silently */ }
+    finally { setDealSuggesting(false); }
+  };
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        title="Reply Inbox"
-        description="Triage inbound replies and trigger auto-pilot responses for high-confidence positives."
-        actions={
-          <Button variant="outline" size="sm" onClick={() => setLogReplyOpen(true)}>
-            <LogIn className="h-4 w-4" /> Log a reply
-          </Button>
-        }
-      />
+    <div className="space-y-4">
+      <Tabs defaultValue="manual" className="w-full">
+        <TabsList className="grid w-full max-w-md grid-cols-2">
+          <TabsTrigger value="manual">
+            <MessageCircleReply className="h-3.5 w-3.5 mr-1.5" /> Manual Review
+          </TabsTrigger>
+          <TabsTrigger value="autopilot">
+            <Bot className="h-3.5 w-3.5 mr-1.5" /> Auto-Pilot
+            {autoPilotStats.eligible > 0 && (
+              <Badge className="ml-1.5 bg-violet-100 text-violet-700 border-violet-200 text-[10px] px-1 py-0 border">
+                {autoPilotStats.eligible}
+              </Badge>
+            )}
+          </TabsTrigger>
+        </TabsList>
 
-      {/* MailBridge not connected warning — Help Guide §Reply Inbox */}
-      {!mailbridgeConnected && (
-        <div className="flex items-center gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-700 dark:text-amber-300">
-          <AlertTriangle className="h-5 w-5 shrink-0" />
-          <div>
-            <p className="font-medium">MailBridge not connected</p>
-            <p className="text-xs mt-0.5">Inbound replies won't appear here until MailBridge is set up. You can still log replies manually.</p>
+        {/* ── Manual Review Tab ─────────────────────────────────────────── */}
+        <TabsContent value="manual" className="space-y-4 mt-4">
+          <div className="flex items-center gap-3 flex-wrap">
+            {pendingCount > 0 && <Badge variant="default" className="text-xs">{pendingCount} pending</Badge>}
+            <span className="text-xs text-muted-foreground">Auto-refreshes every 30s</span>
+            <Button variant="outline" size="sm" onClick={() => toast.info('Go to Campaigns → Sequences and use the categorize button on a replied sequence')}>
+              <MessageCircleReply className="h-4 w-4 mr-1" /> Categorize Reply
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => setLogOpen(true)}>
+              <MessageCircleReply className="h-4 w-4 mr-1" /> Log a reply
+            </Button>
+            <Button variant="outline" size="sm" onClick={handleExportCsv} disabled={replies.length === 0}>
+              <FileDown className="h-4 w-4 mr-1" /> Export CSV
+            </Button>
+            <div className="ml-auto flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-1.5">
+              <Switch id="filter-ap" checked={showAutoPilotOnly} onCheckedChange={setShowAutoPilotOnly} />
+              <Label htmlFor="filter-ap" className="text-xs font-medium cursor-pointer flex items-center gap-1">
+                <Zap className="h-3 w-3 text-violet-600" /> Show only auto-pilot eligible drafts
+              </Label>
+            </div>
           </div>
-          <Button variant="outline" size="sm" className="ml-auto shrink-0" onClick={() => toast.info("Redirecting to MailBridge setup…")}>
-            Set up MailBridge
-          </Button>
-        </div>
-      )}
 
-      {/* Log a reply dialog — Help Guide §Reply Inbox: "Manual 'Log a reply' button" */}
-      <Dialog open={logReplyOpen} onOpenChange={setLogReplyOpen}>
-        <DialogClose onClose={() => setLogReplyOpen(false)} />
-        <DialogHeader>
-          <DialogTitle>Log a reply</DialogTitle>
-          <DialogDescription>
-            Paste an external reply that wasn't captured by MailBridge. It will be added to the inbox for triage.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="manual-reply">Reply text</Label>
-            <Textarea
-              id="manual-reply"
-              rows={6}
-              value={manualReply}
-              onChange={(e) => setManualReply(e.target.value)}
-              placeholder="Paste the prospect's reply here…"
-            />
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Draft list */}
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm flex items-center justify-between">
+                  <span>Reply Drafts {showAutoPilotOnly && <Badge variant="outline" className="ml-2 text-[10px]">filter: auto-pilot eligible</Badge>}</span>
+                  <span className="text-xs text-muted-foreground font-normal">{filteredDrafts.length} shown</span>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="p-0">
+                <div className="max-h-[600px] overflow-y-auto">
+                  {isLoading ? (
+                    <div className="p-6 text-center"><Loader2 className="h-5 w-5 animate-spin mx-auto" /></div>
+                  ) : filteredDrafts.length === 0 ? (
+                    <div className="p-6 text-center text-sm text-muted-foreground">
+                      {showAutoPilotOnly
+                        ? 'No auto-pilot eligible drafts. Eligible drafts are high-confidence positive replies.'
+                        : 'No reply drafts yet. When prospects reply, categorize them from the Sequences page to auto-generate draft responses.'
+                      }
+                    </div>
+                  ) : filteredDrafts.map((d) => (
+                    <button
+                      key={d.id}
+                      onClick={() => setSelectedDraft(d)}
+                      className={cn('w-full text-left p-3 border-b last:border-0 hover:bg-muted/30 transition-colors', selectedDraft?.id === d.id && 'bg-muted/50')}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className={cn('px-1.5 py-0.5 rounded text-[10px] font-medium', CATEGORY_COLORS[d.category] ?? 'bg-gray-100')}>
+                            {d.category.replace(/_/g, ' ')}
+                          </span>
+                          {d.autoPilotEligible && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-100 text-violet-700 flex items-center gap-0.5">
+                              <Zap className="h-2.5 w-2.5" /> auto-pilot
+                            </span>
+                          )}
+                        </div>
+                        <span className={cn('px-1.5 py-0.5 rounded text-[10px] shrink-0', STATUS_COLORS[d.status] ?? 'bg-gray-100')}>
+                          {d.status.replace('_', ' ')}
+                        </span>
+                      </div>
+                      <p className="text-xs font-medium mt-1.5 line-clamp-1">{d.originalReply}</p>
+                      {d.draftBody && <p className="text-xs text-muted-foreground mt-1 line-clamp-1">{d.draftBody}</p>}
+                      <p className="text-[10px] text-muted-foreground mt-1">{new Date(d.createdAt).toLocaleString()}</p>
+                    </button>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Detail panel */}
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="text-sm">Draft Detail</CardTitle></CardHeader>
+              <CardContent>
+                {!selectedDraft ? (
+                  <p className="text-sm text-muted-foreground">Select a draft to view details and take action.</p>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={cn('px-2 py-0.5 rounded text-xs font-medium', CATEGORY_COLORS[selectedDraft.category] ?? 'bg-gray-100')}>
+                        {selectedDraft.category.replace(/_/g, ' ')}
+                      </span>
+                      <span className={cn('px-2 py-0.5 rounded text-xs', STATUS_COLORS[selectedDraft.status] ?? 'bg-gray-100')}>
+                        {selectedDraft.status.replace('_', ' ')}
+                      </span>
+                      {selectedDraft.autoPilotEligible && (
+                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-violet-100 text-violet-700 flex items-center gap-1">
+                          <Zap className="h-3 w-3" /> auto-pilot eligible
+                        </span>
+                      )}
+                      {selectedDraft.summary && <span className="text-xs text-muted-foreground">{selectedDraft.summary}</span>}
+                      {selectedDraft.confidence != null && (
+                        <span className="text-xs text-muted-foreground">confidence: {Math.round(selectedDraft.confidence * 100)}%</span>
+                      )}
+                    </div>
+
+                    <div>
+                      <p className="text-xs font-medium mb-1">Original Reply</p>
+                      <div className="bg-muted/50 rounded-lg p-3 text-sm border">{selectedDraft.originalReply}</div>
+                    </div>
+
+                    {selectedDraft.suggestedAction && (
+                      <div>
+                        <p className="text-xs font-medium mb-1">Suggested Action</p>
+                        <p className="text-sm text-muted-foreground">{selectedDraft.suggestedAction}</p>
+                      </div>
+                    )}
+
+                    {selectedDraft.draftBody && (
+                      <div>
+                        <p className="text-xs font-medium mb-1">AI-Generated Draft</p>
+                        <div className="bg-emerald-50/50 border border-emerald-200 rounded-lg p-3 text-sm whitespace-pre-wrap">{selectedDraft.draftBody}</div>
+                      </div>
+                    )}
+
+                    <div className="flex gap-2 flex-wrap">
+                      {selectedDraft.status === 'pending' && (
+                        <>
+                          <Button size="sm" onClick={() => approveMut.mutate(selectedDraft.id)} disabled={approveMut.isPending}>
+                            <CheckCircle2 className="h-4 w-4 mr-1" /> Approve
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => sendMut.mutate(selectedDraft.id)} disabled={sendMut.isPending}>
+                            <Send className="h-4 w-4 mr-1" />{sendMut.isPending ? 'Sending…' : 'Send Now'}
+                          </Button>
+                          <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
+                            onClick={() => dismissMut.mutate(selectedDraft.id)} disabled={dismissMut.isPending}>
+                            <Ban className="h-4 w-4 mr-1" /> Dismiss
+                          </Button>
+                        </>
+                      )}
+                      {selectedDraft.status === 'approved' && (
+                        <Button size="sm" onClick={() => sendMut.mutate(selectedDraft.id)} disabled={sendMut.isPending}>
+                          <Send className="h-4 w-4 mr-1" />{sendMut.isPending ? 'Sending…' : 'Send Now'}
+                        </Button>
+                      )}
+                      {(selectedDraft.status === 'sent' || selectedDraft.status === 'auto_sent') && (
+                        <Badge className="bg-emerald-100 text-emerald-700">
+                          <CheckCircle2 className="h-3 w-3 mr-1" />
+                          {selectedDraft.status === 'auto_sent' ? 'Auto-Sent' : 'Sent'}
+                        </Badge>
+                      )}
+                      {POSITIVE_CATEGORIES.includes(selectedDraft.category) && (
+                        <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-300 hover:bg-emerald-50"
+                          onClick={() => openCreateDeal(selectedDraft)}>
+                          <DollarSign className="h-4 w-4 mr-1" />
+                          {dealSuggesting && createDealOpen ? 'Analyzing…' : 'Create Deal'}
+                        </Button>
+                      )}
+                    </div>
+
+                    {/* Inline deal form */}
+                    {createDealOpen && (
+                      <Card className="border-emerald-200 bg-emerald-50/50">
+                        <CardContent className="p-3 space-y-2">
+                          <p className="text-xs font-medium flex items-center gap-1">
+                            <Sparkles className="h-3 w-3" /> AI-Suggested Deal
+                          </p>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <Label className="text-xs">Deal Title</Label>
+                              <Input className="h-8 text-sm mt-1" value={dealTitle} onChange={(e) => setDealTitle(e.target.value)} />
+                            </div>
+                            <div>
+                              <Label className="text-xs">Value ($)</Label>
+                              <Input className="h-8 text-sm mt-1" type="number" placeholder="0" value={dealValue} onChange={(e) => setDealValue(e.target.value)} />
+                            </div>
+                          </div>
+                          {dealNotes && (
+                            <div>
+                              <Label className="text-xs">AI Notes</Label>
+                              <p className="text-xs text-muted-foreground mt-1 bg-white rounded p-2 border">{dealNotes}</p>
+                            </div>
+                          )}
+                          {dealNextAction && (
+                            <div>
+                              <Label className="text-xs">Suggested Next Action</Label>
+                              <p className="text-xs text-emerald-800 mt-1 bg-white rounded p-2 border border-emerald-200">{dealNextAction}</p>
+                            </div>
+                          )}
+                          <div className="flex gap-2">
+                            <Button size="sm" disabled={!dealTitle || createDealMut.isPending}
+                              onClick={() => createDealMut.mutate({ title: dealTitle, value: parseFloat(dealValue) || 0, stage: 'qualified', notes: dealNotes || undefined, prospectId: selectedDraft?.prospectId, source: 'cold_email' })}>
+                              {createDealMut.isPending ? 'Creating…' : 'Create Deal'}
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={() => setCreateDealOpen(false)}>Cancel</Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => { setLogReplyOpen(false); setManualReply(""); }}>Cancel</Button>
-          <Button
-            disabled={!manualReply.trim()}
-            onClick={() => {
-              toast.success("Reply logged to inbox");
-              setLogReplyOpen(false);
-              setManualReply("");
-              qc.invalidateQueries({ queryKey: ["reply-drafts"] });
-            }}
-          >
-            <LogIn className="h-4 w-4" /> Log reply
-          </Button>
-        </DialogFooter>
+
+          {/* Workflow info card */}
+          <Card className="border-blue-100 bg-blue-50/50">
+            <CardContent className="p-4">
+              <div className="flex items-start gap-3">
+                <Info className="h-4 w-4 text-blue-600 mt-0.5 shrink-0" />
+                <div className="text-xs text-blue-800 space-y-1">
+                  <p className="font-medium">Auto-Draft Reply Workflow</p>
+                  <p>When a prospect replies to your email: 1) Go to <b>Campaigns &gt; Sequences</b> and click the reply categorize button on a replied sequence. 2) AI categorizes the intent and generates a draft response. 3) Review, approve, and send — nothing goes out without your approval.</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ── Auto-Pilot Tab ─────────────────────────────────────────────── */}
+        <TabsContent value="autopilot" className="space-y-4 mt-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Card className="border-violet-200 bg-violet-50/30">
+              <CardContent className="p-4">
+                <div className="flex items-center gap-2 text-violet-700"><Zap className="h-4 w-4" /><span className="text-xs font-medium">Eligible</span></div>
+                <p className="text-2xl font-bold mt-1">{autoPilotStats.eligible}</p>
+                <p className="text-[11px] text-muted-foreground">Pending + auto-pilot eligible</p>
+              </CardContent>
+            </Card>
+            <Card className="border-emerald-200 bg-emerald-50/30">
+              <CardContent className="p-4">
+                <div className="flex items-center gap-2 text-emerald-700"><CheckCircle2 className="h-4 w-4" /><span className="text-xs font-medium">Auto-Sent</span></div>
+                <p className="text-2xl font-bold mt-1">{autoPilotStats.autoSent}</p>
+                <p className="text-[11px] text-muted-foreground">Already sent via Auto-Pilot</p>
+              </CardContent>
+            </Card>
+            <Card className="border-amber-200 bg-amber-50/30">
+              <CardContent className="p-4">
+                <div className="flex items-center gap-2 text-amber-700"><Clock className="h-4 w-4" /><span className="text-xs font-medium">Pending Review</span></div>
+                <p className="text-2xl font-bold mt-1">{autoPilotStats.pendingReview}</p>
+                <p className="text-[11px] text-muted-foreground">All drafts awaiting your action</p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4">
+                <div className="flex items-center gap-2 text-muted-foreground"><MessageCircleReply className="h-4 w-4" /><span className="text-xs font-medium">Total Drafts</span></div>
+                <p className="text-2xl font-bold mt-1">{autoPilotStats.total}</p>
+                <p className="text-[11px] text-muted-foreground">All reply drafts</p>
+              </CardContent>
+            </Card>
+          </div>
+
+          <Card className="border-violet-200 bg-gradient-to-br from-violet-50/60 to-white">
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2"><Bot className="h-4 w-4 text-violet-600" /> Auto-Pilot Reply Sender</CardTitle>
+              <CardDescription>
+                Auto-send high-confidence positive replies. Drafts with category <code className="text-[10px] bg-muted px-1 py-0.5 rounded">interested</code>, <code className="text-[10px] bg-muted px-1 py-0.5 rounded">meeting_request</code>, <code className="text-[10px] bg-muted px-1 py-0.5 rounded">positive</code> with confidence ≥ 80% are eligible.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" onClick={handlePreviewAutoPilot} disabled={apPreviewLoading}>
+                  {apPreviewLoading ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Eye className="h-4 w-4 mr-1.5" />}
+                  Preview Auto-Pilot
+                </Button>
+                <Button className="bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700 text-white"
+                  onClick={() => { if (autoPilotStats.eligible === 0) { toast.info('No eligible drafts to auto-send.'); return; } setApConfirmOpen(true); }}
+                  disabled={apSending}>
+                  {apSending ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Send className="h-4 w-4 mr-1.5" />}
+                  Run Auto-Pilot ({autoPilotStats.eligible} draft{autoPilotStats.eligible === 1 ? '' : 's'})
+                </Button>
+              </div>
+              {apSending && (
+                <div className="rounded-md bg-violet-50 border border-violet-200 p-3 text-xs text-violet-800 flex items-center gap-2">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Auto-Pilot is sending eligible drafts via MailBridge…
+                </div>
+              )}
+              <div className="rounded-md bg-blue-50 border border-blue-200 p-3 text-xs text-blue-800 space-y-1">
+                <p className="font-medium flex items-center gap-1.5"><Info className="h-3.5 w-3.5" /> How Auto-Pilot works</p>
+                <ol className="list-decimal list-inside space-y-0.5 ml-1">
+                  <li>Click <b>Preview Auto-Pilot</b> to dry-run — see exactly which drafts would be sent.</li>
+                  <li>Click <b>Run Auto-Pilot</b> to actually send. You'll get a confirmation dialog first.</li>
+                  <li>If MailBridge is connected, drafts are sent via your sending domain. Otherwise, drafts are marked <code className="text-[10px] bg-white px-1 py-0.5 rounded">auto_sent</code> but not delivered.</li>
+                  <li>Failed sends stay in <code className="text-[10px] bg-white px-1 py-0.5 rounded">pending</code> so you can retry manually.</li>
+                </ol>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+
+      {/* Log a Reply Dialog — with prospect selector */}
+      <Dialog open={logOpen} onOpenChange={setLogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Log a Reply</DialogTitle>
+            <DialogDescription>Paste an external reply that wasn't captured by MailBridge.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label>Prospect <span className="text-destructive">*</span></Label>
+              <Select value={logProspectId} onValueChange={(v) => { setLogProspectId(v); setLogSequenceId(''); }}>
+                <SelectTrigger><SelectValue placeholder="Select prospect…" /></SelectTrigger>
+                <SelectContent className="max-h-64">
+                  {prospects.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.firstName} {p.lastName}{p.company ? ` — ${p.company}` : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label>Sequence (Touch) <span className="text-destructive">*</span></Label>
+              <Select value={logSequenceId} onValueChange={setLogSequenceId} disabled={!logProspectId}>
+                <SelectTrigger><SelectValue placeholder={logProspectId ? 'Select sequence…' : 'Select a prospect first'} /></SelectTrigger>
+                <SelectContent className="max-h-64">
+                  {logSequences.map((s) => (
+                    <SelectItem key={s.id} value={s.id}>
+                      Touch {s.touchNumber} — {s.angle.replace(/_/g, ' ')}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label>Reply Text <span className="text-destructive">*</span></Label>
+              <Textarea rows={5} value={logReplyText} onChange={(e) => setLogReplyText(e.target.value)} placeholder="Paste the prospect's reply here…" />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setLogOpen(false)}>Cancel</Button>
+            <Button disabled={!logReplyText.trim() || !logProspectId || !logSequenceId || logSubmitting} onClick={handleLogReply}>
+              {logSubmitting && <Loader2 className="h-4 w-4 mr-1 animate-spin" />} Log Reply
+            </Button>
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="Total replies" value={stats.total} icon={<Inbox className="h-5 w-5" />} />
-        <StatCard
-          label="Positive rate"
-          value={formatPercent(stats.positiveRate)}
-          delta={{ value: "+4% vs last week", positive: true }}
-        />
-        <StatCard
-          label="Auto-pilot sent"
-          value={stats.autoSent}
-          icon={<Bot className="h-5 w-5" />}
-        />
-        <StatCard
-          label="Avg confidence"
-          value={formatPercent(stats.avgConfidence)}
-          icon={<Sparkles className="h-5 w-5" />}
-        />
-      </div>
-
-      <Card>
-        <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center">
-          <Select
-            value={categoryFilter}
-            onChange={(e) => setCategoryFilter(e.target.value)}
-            className="sm:w-48"
-          >
-            <option value="all">All categories</option>
-            {CATEGORIES.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </Select>
-          <label className="flex items-center gap-2 text-sm">
-            <Switch checked={autoPilotOnly} onCheckedChange={setAutoPilotOnly} />
-            Auto-Pilot eligible only
-          </label>
-        </CardContent>
-      </Card>
-
-      <div className="grid gap-4 lg:grid-cols-12">
-        {/* Inbox list */}
-        <Card className="lg:col-span-5">
-          <CardHeader>
-            <CardTitle className="text-base">Inbox</CardTitle>
-            <CardDescription>{filtered.length} replies</CardDescription>
-          </CardHeader>
-          <CardContent className="p-0">
-            {isLoading ? (
-              <div className="space-y-2 p-4">
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <Skeleton key={i} className="h-16 w-full" />
-                ))}
-              </div>
-            ) : filtered.length === 0 ? (
-              <EmptyState
-                icon={<Inbox className="h-6 w-6" />}
-                title="No replies match your filters"
-                description="Try widening the category or disabling the auto-pilot-only switch."
-              />
-            ) : (
-              <ScrollArea maxHeightClass="max-h-[32rem]">
-                <ul className="divide-y">
-                  {filtered.map((r) => {
-                    const isSelected = selected?.id === r.id;
-                    return (
-                      <li key={r.id}>
-                        <button
-                          type="button"
-                          onClick={() => setSelectedId(r.id)}
-                          className={cn(
-                            "w-full px-4 py-3 text-left transition-colors hover:bg-accent",
-                            isSelected && "bg-accent/50",
-                          )}
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="font-medium">{r.prospectName}</span>
-                            <span className="text-xs text-muted-foreground">
-                              {timeAgo(r.createdAt)}
-                            </span>
-                          </div>
-                          <p className="mt-1 text-sm text-muted-foreground">
-                            {truncate(r.inboundMessage, 80)}
-                          </p>
-                          <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                            {r.category && (
-                              <Badge variant={CATEGORY_VARIANT[r.category] ?? "secondary"}>
-                                {r.category}
-                              </Badge>
-                            )}
-                            {r.autoPilotEligible && (
-                              <Badge variant="outline" className="gap-1">
-                                <Bot className="h-3 w-3" /> Auto-Pilot
-                              </Badge>
-                            )}
-                            {r.confidence !== null && (
-                              <span className="text-xs text-muted-foreground">
-                                {formatPercent(r.confidence)} conf.
-                              </span>
-                            )}
-                          </div>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </ScrollArea>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Detail panel */}
-        <Card className="lg:col-span-7">
-          <CardHeader>
-            <CardTitle className="text-base">Reply detail</CardTitle>
-            {selected && (
-              <CardDescription>
-                {selected.prospectName} · {timeAgo(selected.createdAt)}
-              </CardDescription>
-            )}
-          </CardHeader>
-          <CardContent>
-            {!selected ? (
-              <EmptyState
-                icon={<Inbox className="h-6 w-6" />}
-                title="No reply selected"
-                description="Pick a reply from the inbox to triage."
-              />
-            ) : (
-              <div className="space-y-4">
-                <div className="rounded-md border bg-muted/30 p-3">
-                  <p className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">
-                    Inbound message
-                  </p>
-                  <p className="whitespace-pre-wrap text-sm">{selected.inboundMessage}</p>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-3 text-sm">
-                  <Badge variant={CATEGORY_VARIANT[selected.category ?? "neutral"] ?? "secondary"}>
-                    {selected.category ?? "uncategorized"}
-                  </Badge>
-                  {selected.autoPilotEligible && (
-                    <Badge variant="outline" className="gap-1">
-                      <Bot className="h-3 w-3" /> Auto-Pilot eligible
-                    </Badge>
-                  )}
-                  <div className="flex items-center gap-2">
-                    <span className="text-muted-foreground">Confidence</span>
-                    <Progress
-                      value={(selected.confidence ?? 0) * 100}
-                      className="w-32"
-                      indicatorClassName={
-                        (selected.confidence ?? 0) >= 0.8 ? "bg-emerald-600" : "bg-amber-500"
-                      }
-                    />
-                    <span className="font-medium">{formatPercent(selected.confidence ?? 0)}</span>
+      {/* Auto-Pilot Preview Dialog */}
+      <Dialog open={apPreviewOpen} onOpenChange={setApPreviewOpen}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><Eye className="h-4 w-4 text-violet-600" /> Auto-Pilot Preview (Dry-Run)</DialogTitle>
+            <DialogDescription>
+              {apPreviewLoading ? 'Loading…' : `${apPreview?.count ?? 0} draft${(apPreview?.count ?? 0) === 1 ? '' : 's'} would be sent.`}
+            </DialogDescription>
+          </DialogHeader>
+          {apPreviewLoading ? (
+            <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
+          ) : (
+            <div className="max-h-72 overflow-y-auto space-y-2">
+              {(apPreview?.eligible ?? []).length === 0
+                ? <p className="text-sm text-muted-foreground text-center py-4">No eligible drafts.</p>
+                : (apPreview?.eligible ?? []).map((d) => (
+                  <div key={d.id} className="p-3 rounded-lg border text-sm space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className={cn('px-1.5 py-0.5 rounded text-[10px] font-medium', CATEGORY_COLORS[d.category] ?? 'bg-gray-100')}>
+                        {d.category.replace(/_/g, ' ')}
+                      </span>
+                      <span className="text-xs text-muted-foreground">{d.confidence != null ? `${Math.round(d.confidence * 100)}% confidence` : ''}</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground line-clamp-2">{d.draftBody ?? d.originalReply}</p>
                   </div>
-                </div>
+                ))
+              }
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setApPreviewOpen(false)}>Close</Button>
+            <Button onClick={() => { setApPreviewOpen(false); setApConfirmOpen(true); }} disabled={(apPreview?.count ?? 0) === 0}>
+              Proceed to Send All
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
-                <div className="space-y-2">
-                  <label className="text-sm font-medium" htmlFor="suggested-reply">
-                    Suggested reply
-                  </label>
-                  <Textarea
-                    id="suggested-reply"
-                    rows={6}
-                    value={editedReply[selected.id] ?? selected.suggestedReply ?? ""}
-                    onChange={(e) =>
-                      setEditedReply((prev) => ({ ...prev, [selected.id]: e.target.value }))
-                    }
-                  />
-                </div>
+      {/* Auto-Pilot Confirm Dialog */}
+      <Dialog open={apConfirmOpen} onOpenChange={setApConfirmOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4 text-amber-600" /> Confirm Auto-Pilot Send</DialogTitle>
+            <DialogDescription>
+              This will send <strong>{autoPilotStats.eligible}</strong> eligible draft{autoPilotStats.eligible === 1 ? '' : 's'} via MailBridge. Cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setApConfirmOpen(false)}>Cancel</Button>
+            <Button className="bg-violet-600 hover:bg-violet-700 text-white" onClick={handleRunAutoPilot} disabled={apSending}>
+              {apSending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Send className="h-4 w-4 mr-1" />} Run Auto-Pilot
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    variant="outline"
-                    onClick={() => categorizeMut.mutate(selected.id)}
-                    disabled={categorizeMut.isPending}
-                  >
-                    <Tag className="h-4 w-4" />
-                    {categorizeMut.isPending ? "Categorizing…" : "Categorize"}
-                  </Button>
-                  <Button
-                    onClick={() => autoReplyMut.mutate(selected.id)}
-                    disabled={!canAutoReply(selected) || autoReplyMut.isPending}
-                    title={
-                      !canAutoReply(selected)
-                        ? "Auto-reply requires auto-pilot eligibility and ≥ 80% confidence"
-                        : ""
-                    }
-                  >
-                    {autoReplyMut.isPending ? (
-                      <>
-                        <Send className="h-4 w-4 animate-spin" /> Sending…
-                      </>
-                    ) : (
-                      <>
-                        <Bot className="h-4 w-4" /> Send Auto-Reply
-                      </>
-                    )}
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    onClick={() => toast.success("Reply opened in MailBridge composer")}
-                  >
-                    <CheckCircle2 className="h-4 w-4" /> Edit &amp; Send Manual
-                  </Button>
+      {/* Auto-Pilot Result Dialog */}
+      <Dialog open={apResultOpen} onOpenChange={setApResultOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {(apResult?.failed ?? 0) === 0 ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <XCircle className="h-4 w-4 text-red-600" />}
+              Auto-Pilot Results
+            </DialogTitle>
+            <DialogDescription>Send run complete.</DialogDescription>
+          </DialogHeader>
+          {apResult && (
+            <div className="grid grid-cols-3 gap-4 py-2">
+              {[{ label: 'Sent', value: apResult.sent, color: 'text-emerald-600' }, { label: 'Failed', value: apResult.failed, color: 'text-red-600' }, { label: 'Total', value: apResult.total, color: 'text-foreground' }].map((s) => (
+                <div key={s.label} className="text-center p-3 rounded-lg border">
+                  <p className={cn('text-2xl font-bold', s.color)}>{s.value}</p>
+                  <p className="text-xs text-muted-foreground mt-1">{s.label}</p>
                 </div>
-                {!canAutoReply(selected) && (
-                  <p className="text-xs text-muted-foreground">
-                    Auto-reply is gated: requires auto-pilot eligibility AND confidence ≥ 80%.
-                  </p>
-                )}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+              ))}
+            </div>
+          )}
+          <DialogFooter><Button onClick={() => setApResultOpen(false)}>Done</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

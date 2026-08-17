@@ -1,521 +1,540 @@
 /**
  * ContentIdeasPage.tsx — Content ideas CRUD + AI generate.
  *
- * Grid of idea cards (title, topic, angle, format, status, score, createdAt).
- * Filter by status + format. "Generate Ideas" dialog (topic, audience, count).
- * Click a card → edit dialog (title, angle, outline, status).
+ * Matches Next.js reference design:
+ *   - Card layout: status badge, "AI" badge (if generated), angle tag,
+ *     title, body excerpt, date — with edit/delete icons top-right
+ *   - Top actions: "AI Suggest Ideas" (generate dialog), "+ Manual Idea"
+ *     (quick create), status filter
+ *   - Generate dialog: topic, audience, count → POST /content-ideas/generate
+ *   - Manual Idea dialog: title, angle, body → POST /content-ideas
+ *   - Edit dialog: title, angle, body, status, isFavorite
+ *   - Delete confirmation
  */
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  FileText,
+  Heart,
   Lightbulb,
   Loader2,
   Pencil,
   Plus,
   Sparkles,
+  Star,
   Trash2,
-  Video,
 } from "lucide-react";
 import { toast } from "sonner";
+
 import { http } from "@/services/apiClient";
+import { cn, formatDate, truncate } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
-  CardDescription,
   CardFooter,
   CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import { NativeSelect as Select } from "@/components/ui/select";
-import { Progress } from "@/components/ui/progress";
 import {
   Dialog,
-  DialogClose,
+  DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
-import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { PageHeader } from "@/components/ui/page-header";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Info } from "lucide-react";
-import { cn, formatDate } from "@/lib/utils";
+import { Textarea } from "@/components/ui/textarea";
 
-/* ── Types ───────────────────────────────────────────────────────────────── */
-type IdeaFormat = "blog" | "post" | "whitepaper" | "video";
-type IdeaStatus = "idea" | "drafting" | "published";
+/* ── Backend types ──────────────────────────────────────────────────────── */
 
-interface ContentIdea {
+interface ContentIdeaResponse {
   id: string;
+  icpProfileId: string | null;
   title: string;
-  topic: string;
-  angle: string;
-  outline: string;
-  format: IdeaFormat;
-  status: IdeaStatus;
-  score: number;
+  angle: string | null;
+  body: string;
+  status: string;
+  isFavorite: boolean;
+  generatedAt: string;
   createdAt: string;
+  updatedAt: string;
 }
 
-interface GeneratedIdea {
-  title: string;
-  angle: string;
-  outline: string;
+interface ContentIdeaGenerateResponse {
+  ideas: ContentIdeaResponse[];
 }
 
-/* ── Mock data ───────────────────────────────────────────────────────────── */
-const now = new Date().toISOString();
-const MOCK_IDEAS: ContentIdea[] = [
-  { id: "ci1", title: "Why reply speed beats pitch perfection", topic: "Outbound", angle: "Contrarian", outline: "Open with the 5-min reply stat…", format: "blog", status: "published", score: 92, createdAt: now },
-  { id: "ci2", title: "The ICP checklist that cut our bounce 3x", topic: "Deliverability", angle: "How-to", outline: "Step 1: audit bounce reasons…", format: "whitepaper", status: "drafting", score: 78, createdAt: now },
-  { id: "ci3", title: "3 subject lines that got 60%+ opens", topic: "Copywriting", angle: "Tactical", outline: "Line 1: funding reference…", format: "post", status: "idea", score: 84, createdAt: now },
-  { id: "ci4", title: "Multi-threading: from 1 to 4 champions", topic: "Pipeline", angle: "Framework", outline: "Map stakeholders first…", format: "video", status: "idea", score: 71, createdAt: now },
-  { id: "ci5", title: "Stop sending on Fridays", topic: "Cadence", angle: "Data-driven", outline: "Engagement drops 22% after 3pm…", format: "post", status: "published", score: 88, createdAt: now },
-  { id: "ci6", title: "Personalization at scale without AI slop", topic: "Personalization", angle: "How-to", outline: "Tier personalization by signal…", format: "blog", status: "drafting", score: 80, createdAt: now },
-  { id: "ci7", title: "The breakup email that actually wins deals", topic: "Cadence", angle: "Contrarian", outline: "Breakup ≠ goodbye…", format: "post", status: "idea", score: 76, createdAt: now },
-  { id: "ci8", title: "ICP scoring: a rep's field guide", topic: "Prospecting", angle: "Framework", outline: "Firmographic + intent + timing…", format: "whitepaper", status: "published", score: 90, createdAt: now },
-];
+/* ── Status config ──────────────────────────────────────────────────────── */
 
-/* ── Helpers ─────────────────────────────────────────────────────────────── */
-const FORMAT_META: Record<IdeaFormat, { label: string; icon: typeof FileText }> = {
-  blog: { label: "Blog", icon: FileText },
-  post: { label: "Post", icon: FileText },
-  whitepaper: { label: "Whitepaper", icon: FileText },
-  video: { label: "Video", icon: Video },
+const STATUS_CHIP: Record<string, string> = {
+  idea:      "bg-slate-100 text-slate-700 border-slate-200",
+  draft:     "bg-slate-100 text-slate-700 border-slate-200",
+  drafting:  "bg-amber-100 text-amber-700 border-amber-200",
+  published: "bg-emerald-100 text-emerald-700 border-emerald-200",
 };
-function statusBadge(status: IdeaStatus): { variant: "secondary" | "warning" | "success"; label: string } {
-  if (status === "published") return { variant: "success", label: "Published" };
-  if (status === "drafting") return { variant: "warning", label: "Drafting" };
-  return { variant: "secondary", label: "Idea" };
-}
-function scoreColor(score: number): string {
-  if (score >= 85) return "text-emerald-600";
-  if (score >= 70) return "text-amber-600";
-  return "text-rose-600";
-}
 
 /* ── Generate dialog ─────────────────────────────────────────────────────── */
-function GenerateDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
-  const queryClient = useQueryClient();
+
+function GenerateDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+}) {
+  const qc = useQueryClient();
   const [topic, setTopic] = useState("");
   const [audience, setAudience] = useState("");
   const [count, setCount] = useState("3");
-  const [generated, setGenerated] = useState<GeneratedIdea[]>([]);
-
-  const genMutation = useMutation({
-    mutationFn: (payload: { topic: string; audience: string; count: number }) =>
-      http.post<GeneratedIdea[]>("/api/v1/content-ideas/generate", payload),
-    onSuccess: (data) => {
-      const ideas = Array.isArray(data) ? data : (data as { ideas?: GeneratedIdea[] })?.ideas ?? [];
-      setGenerated(ideas);
-      queryClient.invalidateQueries({ queryKey: ["content-ideas"] });
-      toast.success(`Generated ${ideas.length} ideas`);
-    },
-    onError: (error: unknown) => {
-      // BUG-27 FIX: show actual error message instead of silently swallowing
-      const msg = (error as { message?: string })?.message ?? "Generate failed";
-      toast.error(`Content idea generate failed: ${msg}`);
-      // Fallback to mock only in development
-      const n = Math.max(1, Math.min(5, Number(count) || 3));
-      const mock: GeneratedIdea[] = Array.from({ length: n }).map((_, i) => ({
-        title: `${topic || "Untitled"} — angle #${i + 1}`,
-        angle: ["Contrarian", "How-to", "Data-driven", "Tactical", "Framework"][i % 5],
-        outline: `Hook: ${topic} for ${audience || "your audience"}.\nBody: 3 evidence points + 1 example.\nCTA: invite to a 15-min review.`,
-      }));
-      setGenerated(mock);
-    },
-  });
+  const [preview, setPreview] = useState<ContentIdeaResponse[]>([]);
 
   function reset() {
-    setTopic("");
-    setAudience("");
-    setCount("3");
-    setGenerated([]);
+    setTopic(""); setAudience(""); setCount("3"); setPreview([]);
   }
 
-  function run() {
-    if (!topic) {
-      toast.error("Enter a topic first");
-      return;
-    }
-    genMutation.mutate({ topic, audience, count: Number(count) || 3 });
+  const genMut = useMutation({
+    mutationFn: (body: { topic: string; audience: string; count: number }) =>
+      http.post<ContentIdeaGenerateResponse>("/api/v1/content-ideas/generate", body),
+    onSuccess: (data) => {
+      const ideas = data.ideas ?? [];
+      setPreview(ideas);
+      qc.invalidateQueries({ queryKey: ["content-ideas"] });
+      toast.success(`${ideas.length} idea${ideas.length !== 1 ? "s" : ""} generated`);
+    },
+    onError: () => toast.error("Failed to generate ideas"),
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) reset(); onOpenChange(o); }}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Sparkles className="h-4 w-4" /> AI Suggest Ideas
+          </DialogTitle>
+          <DialogDescription>
+            AI-drafted content angles based on topic and audience. Ideas are
+            automatically saved to your library.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="g-topic">Topic *</Label>
+            <Input id="g-topic" value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              placeholder="e.g. Outbound reply speed, ICP scoring" />
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="col-span-2 space-y-1.5">
+              <Label htmlFor="g-aud">Target Audience</Label>
+              <Input id="g-aud" value={audience}
+                onChange={(e) => setAudience(e.target.value)}
+                placeholder="e.g. VP Sales, SaaS" />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="g-cnt">Count (1–5)</Label>
+              <Input id="g-cnt" type="number" min={1} max={5} value={count}
+                onChange={(e) => setCount(e.target.value)} />
+            </div>
+          </div>
+          {preview.length > 0 && (
+            <div className="max-h-56 space-y-2 overflow-y-auto rounded-md border p-2">
+              {preview.map((idea) => (
+                <div key={idea.id} className="rounded-md bg-muted/40 p-2 text-sm">
+                  <p className="font-semibold">{idea.title}</p>
+                  {idea.angle && (
+                    <p className="text-xs text-muted-foreground">Angle: {idea.angle}</p>
+                  )}
+                  <p className="mt-1 text-xs text-muted-foreground whitespace-pre-wrap">
+                    {truncate(idea.body, 120)}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => { reset(); onOpenChange(false); }}>
+            {preview.length > 0 ? "Done" : "Cancel"}
+          </Button>
+          <Button onClick={() => {
+            if (!topic.trim()) { toast.error("Enter a topic first"); return; }
+            genMut.mutate({ topic: topic.trim(), audience: audience.trim(),
+              count: Math.max(1, Math.min(5, Number(count) || 3)) });
+          }} disabled={genMut.isPending}>
+            {genMut.isPending
+              ? <Loader2 className="h-4 w-4 animate-spin" />
+              : <Sparkles className="h-4 w-4" />}
+            Generate
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/* ── Manual Idea dialog ──────────────────────────────────────────────────── */
+
+function ManualIdeaDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+}) {
+  const qc = useQueryClient();
+  const [title, setTitle] = useState("");
+  const [angle, setAngle] = useState("");
+  const [body, setBody] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  function reset() { setTitle(""); setAngle(""); setBody(""); }
+
+  async function submit() {
+    if (!title.trim()) { toast.error("Title is required"); return; }
+    setSaving(true);
+    try {
+      await http.post("/api/v1/content-ideas", {
+        title: title.trim(),
+        angle: angle.trim() || null,
+        body: body.trim() || title.trim(),
+        isFavorite: false,
+      });
+      toast.success("Idea added");
+      qc.invalidateQueries({ queryKey: ["content-ideas"] });
+      reset();
+      onOpenChange(false);
+    } catch { toast.error("Failed to add idea"); }
+    finally { setSaving(false); }
   }
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) reset(); onOpenChange(o); }}>
-      <DialogClose onClose={() => { reset(); onOpenChange(false); }} />
-      <DialogHeader>
-        <DialogTitle className="flex items-center gap-2">
-          <Sparkles className="h-4 w-4" />
-          Generate Ideas
-        </DialogTitle>
-        <DialogDescription>AI-drafted content angles from a topic & audience.</DialogDescription>
-      </DialogHeader>
-
-      <div className="space-y-3">
-        <div className="space-y-1.5">
-          <Label htmlFor="g-topic">Topic</Label>
-          <Input id="g-topic" value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="Outbound reply speed" />
-        </div>
-        <div className="grid grid-cols-3 gap-3">
-          <div className="col-span-2 space-y-1.5">
-            <Label htmlFor="g-aud">Audience</Label>
-            <Input id="g-aud" value={audience} onChange={(e) => setAudience(e.target.value)} placeholder="VP Sales, SaaS" />
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Manual Idea</DialogTitle>
+          <DialogDescription>Add a content idea directly to your library.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="m-title">Title *</Label>
+            <Input id="m-title" value={title} onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g. Why reply speed beats pitch perfection" />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="g-cnt">Count</Label>
-            <Input id="g-cnt" type="number" min={1} max={5} value={count} onChange={(e) => setCount(e.target.value)} />
+            <Label htmlFor="m-angle">Angle</Label>
+            <Input id="m-angle" value={angle} onChange={(e) => setAngle(e.target.value)}
+              placeholder="e.g. Contrarian, How-to, Data-driven" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="m-body">Body / Outline</Label>
+            <Textarea id="m-body" value={body} onChange={(e) => setBody(e.target.value)}
+              rows={4} placeholder="Describe what this content will cover…" />
           </div>
         </div>
-
-        {generated.length > 0 && (
-          <div className="max-h-60 space-y-2 overflow-y-auto rounded-md border p-2">
-            {generated.map((g, i) => (
-              <div key={i} className="rounded-md bg-muted/40 p-2 text-sm">
-                <p className="font-semibold">{g.title}</p>
-                <p className="text-xs text-muted-foreground">Angle: {g.angle}</p>
-                <p className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">{g.outline}</p>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <DialogFooter>
-        <Button variant="outline" onClick={() => { reset(); onOpenChange(false); }}>
-          {generated.length > 0 ? "Done" : "Cancel"}
-        </Button>
-        <Button onClick={run} disabled={genMutation.isPending}>
-          {genMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-          Generate
-        </Button>
-      </DialogFooter>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => { reset(); onOpenChange(false); }}>Cancel</Button>
+          <Button onClick={submit} disabled={saving || !title.trim()}>
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+            Add Idea
+          </Button>
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   );
 }
 
 /* ── Edit dialog ─────────────────────────────────────────────────────────── */
-function EditDialog({ idea, onClose }: { idea: ContentIdea | null; onClose: () => void }) {
-  const queryClient = useQueryClient();
+
+function EditDialog({
+  idea, onClose,
+}: {
+  idea: ContentIdeaResponse | null;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
   const [title, setTitle] = useState("");
   const [angle, setAngle] = useState("");
-  const [outline, setOutline] = useState("");
-  const [status, setStatus] = useState<IdeaStatus>("idea");
+  const [body, setBody] = useState("");
+  const [status, setStatus] = useState("idea");
+  const [isFavorite, setIsFavorite] = useState(false);
 
   useEffect(() => {
     if (idea) {
-      setTitle(idea.title);
-      setAngle(idea.angle);
-      setOutline(idea.outline);
-      setStatus(idea.status);
+      setTitle(idea.title); setAngle(idea.angle ?? "");
+      setBody(idea.body); setStatus(idea.status); setIsFavorite(idea.isFavorite);
     }
-  }, [idea]);
+  }, [idea?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const saveMutation = useMutation({
-    mutationFn: (payload: Partial<ContentIdea>) =>
-      http.put<ContentIdea>(`/api/v1/content-ideas/${idea?.id ?? ""}`, payload),
+  const saveMut = useMutation({
+    mutationFn: (payload: object) =>
+      http.put<ContentIdeaResponse>(`/api/v1/content-ideas/${idea?.id ?? ""}`, payload),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["content-ideas"] });
-      toast.success("Idea updated");
-      onClose();
+      qc.invalidateQueries({ queryKey: ["content-ideas"] });
+      toast.success("Idea updated"); onClose();
     },
-    onError: () => {
-      toast.error("Update API unavailable — change not saved");
-      onClose();
-    },
+    onError: () => toast.error("Failed to update idea"),
   });
 
   if (!idea) return null;
-  function save() {
-    saveMutation.mutate({ title, angle, outline, status });
-  }
 
   return (
-    <Dialog open={!!idea} onOpenChange={(o) => !o && onClose()}>
-      <DialogClose onClose={onClose} />
-      <DialogHeader>
-        <DialogTitle>Edit Idea</DialogTitle>
-        <DialogDescription>{idea.topic} · {FORMAT_META[idea.format].label}</DialogDescription>
-      </DialogHeader>
-      <div className="space-y-3">
-        <div className="space-y-1.5">
-          <Label htmlFor="e-title">Title</Label>
-          <Input id="e-title" value={title} onChange={(e) => setTitle(e.target.value)} />
-        </div>
-        <div className="grid grid-cols-2 gap-3">
+    <Dialog open={Boolean(idea)} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Edit Idea</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
           <div className="space-y-1.5">
-            <Label htmlFor="e-angle">Angle</Label>
-            <Input id="e-angle" value={angle} onChange={(e) => setAngle(e.target.value)} />
+            <Label htmlFor="e-title">Title</Label>
+            <Input id="e-title" value={title} onChange={(e) => setTitle(e.target.value)} />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="e-status">Status</Label>
-            <Select id="e-status" value={status} onChange={(e) => setStatus(e.target.value as IdeaStatus)}>
-              <option value="idea">Idea</option>
-              <option value="drafting">Drafting</option>
-              <option value="published">Published</option>
-            </Select>
+            <Label htmlFor="e-angle">Angle / Tag</Label>
+            <Input id="e-angle" value={angle} onChange={(e) => setAngle(e.target.value)}
+              placeholder="e.g. Contrarian, How-to, funding" />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label>Status</Label>
+              <Select value={status} onValueChange={setStatus}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="idea">Idea</SelectItem>
+                  <SelectItem value="drafting">Drafting</SelectItem>
+                  <SelectItem value="published">Published</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Favourite</Label>
+              <Button variant={isFavorite ? "default" : "outline"} className="w-full"
+                onClick={() => setIsFavorite((f) => !f)}>
+                <Star className="h-4 w-4" />
+                {isFavorite ? "Favourited" : "Mark favourite"}
+              </Button>
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="e-body">Body / Outline</Label>
+            <Textarea id="e-body" value={body} onChange={(e) => setBody(e.target.value)} rows={5} />
           </div>
         </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="e-outline">Outline</Label>
-          <Textarea id="e-outline" value={outline} onChange={(e) => setOutline(e.target.value)} className="min-h-[120px]" />
-        </div>
-      </div>
-      <DialogFooter>
-        <Button variant="outline" onClick={onClose}>Cancel</Button>
-        <Button onClick={save} disabled={saveMutation.isPending}>
-          {saveMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-          Save
-        </Button>
-      </DialogFooter>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={() => saveMut.mutate({
+            title: title.trim(), angle: angle.trim() || null,
+            body: body.trim(), status, isFavorite,
+          })} disabled={saveMut.isPending || !title.trim()}>
+            {saveMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   );
 }
 
 /* ── Main page ───────────────────────────────────────────────────────────── */
+
 export function ContentIdeasPage() {
-  const queryClient = useQueryClient();
+  const qc = useQueryClient();
   const [genOpen, setGenOpen] = useState(false);
-  const [editIdea, setEditIdea] = useState<ContentIdea | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<ContentIdea | null>(null);
-  const [statusFilter, setStatusFilter] = useState<"all" | IdeaStatus>("all");
-  const [formatFilter, setFormatFilter] = useState<"all" | IdeaFormat>("all");
+  const [manualOpen, setManualOpen] = useState(false);
+  const [editIdea, setEditIdea] = useState<ContentIdeaResponse | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ContentIdeaResponse | null>(null);
+  const [statusFilter, setStatusFilter] = useState("all");
 
-  const { data, isLoading, isError, refetch } = useQuery({
+  const { data: ideas = [], isLoading } = useQuery<ContentIdeaResponse[]>({
     queryKey: ["content-ideas"],
-    queryFn: () => http.get<ContentIdea[]>("/api/v1/content-ideas"),
+    queryFn: () => http.get<ContentIdeaResponse[]>("/api/v1/content-ideas"),
+    retry: false,
   });
-  const ideas = data ?? MOCK_IDEAS;
 
-  const filtered = useMemo(
-    () =>
-      ideas.filter(
-        (i) =>
-          (statusFilter === "all" || i.status === statusFilter) &&
-          (formatFilter === "all" || i.format === formatFilter),
-      ),
-    [ideas, statusFilter, formatFilter],
-  );
-
-  const deleteMutation = useMutation({
+  const deleteMut = useMutation({
     mutationFn: (id: string) => http.delete(`/api/v1/content-ideas/${id}`),
     onMutate: async (id) => {
-      await queryClient.cancelQueries({ queryKey: ["content-ideas"] });
-      const previous = queryClient.getQueryData<ContentIdea[]>(["content-ideas"]);
-      if (previous) {
-        queryClient.setQueryData<ContentIdea[]>(
-          ["content-ideas"],
-          previous.filter((i) => i.id !== id),
-        );
-      }
-      return { previous };
+      await qc.cancelQueries({ queryKey: ["content-ideas"] });
+      const prev = qc.getQueryData<ContentIdeaResponse[]>(["content-ideas"]);
+      if (prev) qc.setQueryData(["content-ideas"], prev.filter((i) => i.id !== id));
+      return { prev };
     },
     onError: (_e, _id, ctx) => {
-      if (ctx?.previous) queryClient.setQueryData<ContentIdea[]>(["content-ideas"], ctx.previous);
-      toast.error("Delete failed — reverted");
+      if (ctx?.prev) qc.setQueryData(["content-ideas"], ctx.prev);
+      toast.error("Delete failed");
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["content-ideas"] });
-      toast.success("Idea deleted");
-      setDeleteTarget(null);
+      qc.invalidateQueries({ queryKey: ["content-ideas"] });
+      toast.success("Idea deleted"); setDeleteTarget(null);
     },
   });
+
+  const filtered = useMemo(
+    () => ideas.filter((i) => statusFilter === "all" || i.status === statusFilter),
+    [ideas, statusFilter]
+  );
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Content Ideas"
-        description="Capture, score & draft content angles. AI-generate fresh ideas from a topic."
+        description="Capture, draft, and manage content angles for LinkedIn posts, blog articles, and outreach hooks."
         actions={
-          <Button onClick={() => setGenOpen(true)}>
-            <Sparkles className="h-4 w-4" />
-            Generate Ideas
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button onClick={() => setGenOpen(true)}>
+              <Sparkles className="h-4 w-4" /> AI Suggest Ideas
+            </Button>
+            <Button variant="outline" onClick={() => setManualOpen(true)}>
+              <Plus className="h-4 w-4" /> Manual Idea
+            </Button>
+          </div>
         }
       />
 
-      <Alert variant="default">
-        <Info className="h-4 w-4" />
-        <AlertTitle>Standalone tool — not part of the outreach pipeline</AlertTitle>
-        <AlertDescription>
-          Content Ideas is a scratchpad for marketing &amp; SDR teams to brainstorm
-          LinkedIn posts, blog angles, and outreach hooks. Ideas here don&apos;t feed
-          into Campaigns or Sequences — they&apos;re a separate creative workspace.
-          Use Generate to spin up fresh angles from a topic, score them, and export
-          drafts when ready.
-        </AlertDescription>
-      </Alert>
+      {/* Filter row */}
+      <div className="flex items-center gap-3">
+        <Select value={statusFilter} onValueChange={setStatusFilter}>
+          <SelectTrigger className="w-[160px]">
+            <SelectValue placeholder="All statuses" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All statuses</SelectItem>
+            <SelectItem value="idea">Idea</SelectItem>
+            <SelectItem value="draft">Draft</SelectItem>
+            <SelectItem value="drafting">Drafting</SelectItem>
+            <SelectItem value="published">Published</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-sm text-muted-foreground">
+          {filtered.length} of {ideas.length} idea{ideas.length !== 1 ? "s" : ""}
+        </p>
+      </div>
 
-      {/* Filters */}
-      <Card>
-        <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-end">
-          <div className="flex-1 space-y-1.5">
-            <Label htmlFor="f-status">Status</Label>
-            <Select id="f-status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as "all" | IdeaStatus)}>
-              <option value="all">All statuses</option>
-              <option value="idea">Idea</option>
-              <option value="drafting">Drafting</option>
-              <option value="published">Published</option>
-            </Select>
-          </div>
-          <div className="flex-1 space-y-1.5">
-            <Label htmlFor="f-format">Format</Label>
-            <Select id="f-format" value={formatFilter} onChange={(e) => setFormatFilter(e.target.value as "all" | IdeaFormat)}>
-              <option value="all">All formats</option>
-              <option value="blog">Blog</option>
-              <option value="post">Post</option>
-              <option value="whitepaper">Whitepaper</option>
-              <option value="video">Video</option>
-            </Select>
-          </div>
-          <div className="text-sm text-muted-foreground">
-            {filtered.length} of {ideas.length} ideas
-          </div>
-        </CardContent>
-      </Card>
-
-      {isError ? (
-        <Card>
-          <CardContent className="py-12 text-center">
-            <p className="text-muted-foreground">
-              Failed to load content ideas. Please try again.
-            </p>
-            <Button onClick={() => refetch()} className="mt-4">
-              Retry
-            </Button>
-          </CardContent>
-        </Card>
-      ) : isLoading ? (
+      {/* Grid */}
+      {isLoading ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="h-48" />
+            <Skeleton key={i} className="h-52 w-full" />
           ))}
         </div>
       ) : filtered.length === 0 ? (
-        <EmptyState
-          icon={<Lightbulb className="h-8 w-8" />}
-          title="No ideas match"
-          description="Try clearing filters or generating new ideas."
-          action={
-            <Button onClick={() => setGenOpen(true)}>
-              <Plus className="h-4 w-4" />
-              Generate Ideas
-            </Button>
-          }
-        />
+        <Card>
+          <CardContent className="py-12">
+            <EmptyState
+              icon={<Lightbulb className="h-10 w-10" />}
+              title={ideas.length > 0 ? "No ideas match the filter" : "No content ideas yet"}
+              description={
+                ideas.length > 0
+                  ? "Try clearing the status filter."
+                  : "Click \"AI Suggest Ideas\" to generate content angles, or add one manually."
+              }
+              action={ideas.length === 0 ? (
+                <Button size="sm" onClick={() => setGenOpen(true)}>
+                  <Sparkles className="h-4 w-4" /> AI Suggest Ideas
+                </Button>
+              ) : undefined}
+            />
+          </CardContent>
+        </Card>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {filtered.map((idea) => {
-            const fmt = FORMAT_META[idea.format];
-            const Icon = fmt.icon;
-            const badge = statusBadge(idea.status);
-            return (
-              <Card
-                key={idea.id}
-                className="group flex cursor-pointer flex-col transition-shadow hover:shadow-md"
-                onClick={() => setEditIdea(idea)}
-              >
-                <CardHeader className="pb-2">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="flex h-8 w-8 items-center justify-center rounded-md bg-muted">
-                        <Icon className="h-4 w-4 text-muted-foreground" />
-                      </span>
-                      <Badge variant="outline">{fmt.label}</Badge>
-                    </div>
-                    <Badge variant={badge.variant}>{badge.label}</Badge>
-                  </div>
-                  <CardTitle className="mt-2 text-base leading-snug">{idea.title}</CardTitle>
-                  <CardDescription className="text-xs">
-                    {idea.topic} · {idea.angle}
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="flex-1 space-y-2">
-                  <p className="line-clamp-2 text-sm text-muted-foreground">{idea.outline}</p>
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-muted-foreground">Score</span>
-                      <span className={cn("font-bold", scoreColor(idea.score))}>{idea.score}</span>
-                    </div>
-                    <Progress value={idea.score} indicatorClassName={cn(idea.score >= 85 ? "bg-emerald-500" : idea.score >= 70 ? "bg-amber-500" : "bg-rose-500")} />
-                  </div>
-                </CardContent>
-                <CardFooter className="justify-between border-t pt-3">
-                  <span className="text-xs text-muted-foreground">{formatDate(idea.createdAt)}</span>
-                  <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button size="icon" variant="ghost" onClick={() => setEditIdea(idea)} aria-label="Edit">
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>Edit idea</TooltipContent>
-                    </Tooltip>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          onClick={() => setDeleteTarget(idea)}
-                          aria-label="Delete"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>Delete idea</TooltipContent>
-                    </Tooltip>
-                  </div>
-                </CardFooter>
-              </Card>
-            );
-          })}
+          {filtered.map((idea) => (
+            <Card key={idea.id}
+              className="group flex flex-col hover:shadow-md transition-shadow relative"
+            >
+              {/* Top-right action icons — shown on hover */}
+              <div className="absolute top-3 right-3 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+                <button
+                  className="rounded p-1 hover:bg-muted"
+                  onClick={(e) => { e.stopPropagation(); setEditIdea(idea); }}
+                >
+                  <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
+                </button>
+                <button
+                  className="rounded p-1 hover:bg-muted"
+                  onClick={(e) => { e.stopPropagation(); setDeleteTarget(idea); }}
+                >
+                  <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                </button>
+              </div>
+
+              <CardHeader className="pb-2 pr-14">
+                {/* Tag row: status, AI badge, angle tag */}
+                <div className="flex flex-wrap items-center gap-1.5 mb-2">
+                  <span className={cn(
+                    "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium",
+                    STATUS_CHIP[idea.status] ?? STATUS_CHIP.idea
+                  )}>
+                    {idea.status}
+                  </span>
+                  {/* AI badge — shown when generated (no icpProfileId means AI-generated via topic) */}
+                  <span className="inline-flex items-center gap-0.5 rounded-full bg-violet-100 border border-violet-200 px-2 py-0.5 text-[10px] font-medium text-violet-700">
+                    <Sparkles className="h-2.5 w-2.5" /> AI
+                  </span>
+                  {idea.angle && (
+                    <span className="inline-flex items-center rounded-full bg-slate-100 border border-slate-200 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                      {idea.angle}
+                    </span>
+                  )}
+                  {idea.isFavorite && (
+                    <Heart className="h-3.5 w-3.5 fill-rose-500 text-rose-500 ml-auto" />
+                  )}
+                </div>
+                {/* Title */}
+                <h3 className="text-sm font-semibold leading-snug cursor-pointer hover:text-primary"
+                  onClick={() => setEditIdea(idea)}>
+                  {idea.title}
+                </h3>
+              </CardHeader>
+
+              <CardContent className="flex-1 pb-2">
+                <p className="text-xs text-muted-foreground line-clamp-3 leading-relaxed">
+                  {idea.body}
+                </p>
+              </CardContent>
+
+              <CardFooter className="pt-2 border-t">
+                <span className="text-[11px] text-muted-foreground">
+                  {formatDate(idea.generatedAt)}
+                </span>
+              </CardFooter>
+            </Card>
+          ))}
         </div>
       )}
 
       <GenerateDialog open={genOpen} onOpenChange={setGenOpen} />
+      <ManualIdeaDialog open={manualOpen} onOpenChange={setManualOpen} />
       <EditDialog idea={editIdea} onClose={() => setEditIdea(null)} />
 
-      {/* Delete confirmation dialog */}
-      <Dialog
-        open={!!deleteTarget}
-        onOpenChange={(o) => !o && setDeleteTarget(null)}
-      >
-        <DialogClose onClose={() => setDeleteTarget(null)} />
-        <DialogHeader>
-          <DialogTitle>Delete content idea?</DialogTitle>
-          <DialogDescription>
-            {deleteTarget?.title
-              ? `Idea "${deleteTarget.title}" will be permanently removed. This action cannot be undone.`
-              : "This content idea will be permanently removed. This action cannot be undone."}
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => setDeleteTarget(null)}>
-            Cancel
-          </Button>
-          <Button
-            variant="destructive"
-            onClick={() =>
-              deleteTarget && deleteMutation.mutate(deleteTarget.id)
-            }
-            disabled={deleteMutation.isPending}
-          >
-            {deleteMutation.isPending ? "Deleting…" : "Delete"}
-          </Button>
-        </DialogFooter>
+      {/* Delete confirmation */}
+      <Dialog open={Boolean(deleteTarget)} onOpenChange={(o) => !o && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete content idea?</DialogTitle>
+            <DialogDescription>
+              "{deleteTarget?.title}" will be permanently removed.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+            <Button variant="destructive"
+              onClick={() => deleteTarget && deleteMut.mutate(deleteTarget.id)}
+              disabled={deleteMut.isPending}>
+              {deleteMut.isPending ? "Deleting…" : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
     </div>
   );

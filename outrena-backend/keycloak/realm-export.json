@@ -145,9 +145,10 @@
         {
           "name": "role",
           "protocol": "openid-connect",
-          "protocolMapper": "oidc-realm-role-mapper",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
           "consentRequired": false,
           "config": {
+            "user.attribute": "role",
             "claim.name": "role",
             "jsonType.label": "String",
             "id.token.claim": "true",
@@ -232,7 +233,12 @@
         "/platform-admins"
       ],
       "attributes": {
-        "tenant_slug": []
+        "tenant_slug": [
+          "platform"
+        ],
+        "role": [
+          "SUPER_ADMIN"
+        ]
       },
       "requiredActions": []
     },
@@ -259,6 +265,9 @@
       "attributes": {
         "tenant_slug": [
           "acme"
+        ],
+        "role": [
+          "TENANT_ADMIN"
         ]
       },
       "requiredActions": []
@@ -283,6 +292,9 @@
       "attributes": {
         "tenant_slug": [
           "acme"
+        ],
+        "role": [
+          "MANAGER"
         ]
       },
       "requiredActions": []
@@ -307,6 +319,9 @@
       "attributes": {
         "tenant_slug": [
           "acme"
+        ],
+        "role": [
+          "REP"
         ]
       },
       "requiredActions": []
@@ -331,6 +346,9 @@
       "attributes": {
         "tenant_slug": [
           "globex"
+        ],
+        "role": [
+          "TENANT_ADMIN"
         ]
       },
       "requiredActions": []

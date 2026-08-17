@@ -1,164 +1,100 @@
 /**
- * SystemParamsPage.tsx — manage 30+ tenant system parameters.
+ * SystemParamsPage.tsx — manage the 31 seeded tenant system parameters.
  *
- * API:
- *   GET /api/v1/system-params    → SystemParam[]
- *   PUT /api/v1/system-params/{key} → SystemParam   (single update)
+ * API (verified against app/features/system_params/router.py + schemas):
+ *   GET  /api/v1/system-params?category=  -> SystemParamResponse[]
+ *   PUT  /api/v1/system-params/:key         { value } -> SystemParamResponse
+ *   POST /api/v1/system-params/reset        -> { resetCount, message } (resets ALL)
  *
- * Two-column layout: left = category sidebar list, right = form of inputs for
- * that category's params. Each param has key, label, value, type
- * (string/number/boolean/json). Save button → PUT all params in the active
- * category.
+ * CORRECTIONS vs. the previous version: the previous page invented its own
+ * shape (type: string|number|boolean|json, 4 hardcoded categories, 13 fake
+ * MOCK_PARAMS) that doesn't match the real backend at all. The actual
+ * SystemParamResponse has: key, category, label, description, impact,
+ * valueType, value, defaultValue, minValue, maxValue, unit, isAdvanced.
+ * The real 31 seeded params use 6 categories (analytics, email, llm,
+ * mailbridge, prospecting, scheduler) - verified directly against
+ * param_defs.py. Categories are derived dynamically from fetched data so
+ * this never drifts from the backend again.
+ *
+ * Backend behavior note: `update_value` silently returns the UNCHANGED row
+ * (200 OK, no error) if a numeric value falls outside [minValue, maxValue]
+ * - it does not raise. This page checks the returned value against what was
+ * sent and surfaces a client-side error when the save was silently rejected.
+ *
+ * SP-1: Grouped category cards (collapsible, count + modified badges).
+ * SP-2: Per-param editor: label, value control, description, impact, range, save.
+ * SP-3: Per-param save + reset, plus bulk "Save all changes" and "Reset All".
  */
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Save, Settings } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  Info,
+  Loader2,
+  RotateCcw,
+  Save,
+  Search,
+} from "lucide-react";
 import { toast } from "sonner";
 import { http } from "@/services/apiClient";
 import { PageHeader } from "@/components/ui/page-header";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
-type ParamType = "string" | "number" | "boolean" | "json";
+/* Types (aligned with SystemParamResponse) */
 
 interface SystemParam {
+  id: string;
   key: string;
-  label: string;
   category: string;
-  value: string; // serialised — parsed by `type`
-  type: ParamType;
-  description?: string;
+  label: string;
+  description: string;
+  impact: string;
+  valueType: "string" | "number" | "boolean" | "json";
+  value: string;
+  defaultValue: string;
+  minValue: string | null;
+  maxValue: string | null;
+  unit: string | null;
+  isAdvanced: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
-const CATEGORIES = ["autopilot", "email", "scoring", "limits"] as const;
-type Category = (typeof CATEGORIES)[number];
+function categoryLabel(category: string): string {
+  return category.charAt(0).toUpperCase() + category.slice(1);
+}
 
-const MOCK_PARAMS: SystemParam[] = [
-  // autopilot
-  {
-    key: "autopilot.daily_cap",
-    label: "Daily Prospect Cap",
-    category: "autopilot",
-    value: "200",
-    type: "number",
-    description: "Max new prospects sourced per autopilot run per day.",
-  },
-  {
-    key: "autopilot.enrich_enabled",
-    label: "Auto-Enrich Prospects",
-    category: "autopilot",
-    value: "true",
-    type: "boolean",
-    description: "Enrich new prospects with email + LinkedIn immediately.",
-  },
-  {
-    key: "autopilot.cron",
-    label: "Schedule (cron)",
-    category: "autopilot",
-    value: "0 8 * * 1-5",
-    type: "string",
-    description: "When the autopilot pipeline runs (weekdays 8am UTC).",
-  },
-  // email
-  {
-    key: "email.qa_threshold",
-    label: "QA Score Threshold",
-    category: "email",
-    value: "0.75",
-    type: "number",
-    description: "Minimum QA score for an email to auto-pass.",
-  },
-  {
-    key: "email.max_touches",
-    label: "Max Touches per Sequence",
-    category: "email",
-    value: "7",
-    type: "number",
-    description: "Hard ceiling on touches in any single sequence.",
-  },
-  {
-    key: "email.default_sender_name",
-    label: "Default Sender Name",
-    category: "email",
-    value: "Outrena Team",
-    type: "string",
-  },
-  {
-    key: "email.unsubscribe_footer",
-    label: "Unsubscribe Footer (JSON)",
-    category: "email",
-    value: '{"enabled": true, "text": "Reply STOP to unsubscribe"}',
-    type: "json",
-  },
-  // scoring
-  {
-    key: "scoring.icp_weight",
-    label: "ICP Match Weight",
-    category: "scoring",
-    value: "0.5",
-    type: "number",
-  },
-  {
-    key: "scoring.intent_weight",
-    label: "Intent Signal Weight",
-    category: "scoring",
-    value: "0.3",
-    type: "number",
-  },
-  {
-    key: "scoring.seniority_boost",
-    label: "Seniority Boost (JSON)",
-    category: "scoring",
-    value: '{"C_Suite": 1.2, "Director": 1.0, "IC": 0.6}',
-    type: "json",
-  },
-  // limits
-  {
-    key: "limits.tenant_daily_sends",
-    label: "Tenant Daily Send Limit",
-    category: "limits",
-    value: "5000",
-    type: "number",
-  },
-  {
-    key: "limits.per_domain_hourly",
-    label: "Per-Domain Hourly Limit",
-    category: "limits",
-    value: "120",
-    type: "number",
-  },
-  {
-    key: "limits.warmup_enabled",
-    label: "Auto-Warmup New Domains",
-    category: "limits",
-    value: "true",
-    type: "boolean",
-  },
-];
-
-function validateValue(p: SystemParam): string | null {
-  if (p.type === "number") {
-    if (Number.isNaN(Number(p.value))) return "Must be a number";
+function validateDraft(p: SystemParam, draft: string): string | null {
+  if (p.valueType === "number") {
+    if (draft.trim() === "" || Number.isNaN(Number(draft))) return "Must be a number";
+    const n = Number(draft);
+    if (p.minValue !== null && n < Number(p.minValue))
+      return `Must be >= ${p.minValue}${p.unit ? ` ${p.unit}` : ""}`;
+    if (p.maxValue !== null && n > Number(p.maxValue))
+      return `Must be <= ${p.maxValue}${p.unit ? ` ${p.unit}` : ""}`;
   }
-  if (p.type === "boolean") {
-    if (p.value !== "true" && p.value !== "false") return "Must be true or false";
+  if (p.valueType === "boolean" && draft !== "true" && draft !== "false") {
+    return "Must be true or false";
   }
-  if (p.type === "json") {
+  if (p.valueType === "json") {
     try {
-      JSON.parse(p.value);
+      JSON.parse(draft);
     } catch {
       return "Invalid JSON";
     }
@@ -166,238 +102,517 @@ function validateValue(p: SystemParam): string | null {
   return null;
 }
 
+function normaliseParams(raw: unknown): SystemParam[] {
+  if (Array.isArray(raw)) return raw as SystemParam[];
+  if (raw && typeof raw === "object" && "items" in raw)
+    return (raw as { items: SystemParam[] }).items ?? [];
+  return [];
+}
+
 export function SystemParamsPage() {
   const queryClient = useQueryClient();
-  const [activeCategory, setActiveCategory] = useState<Category>("autopilot");
+  const [search, setSearch] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
+    new Set(),
+  );
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [savingKey, setSavingKey] = useState<string | null>(null);
+  const [resetAllOpen, setResetAllOpen] = useState(false);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["system-params"],
-    queryFn: () => http.get<SystemParam[]>("/api/v1/system-params"),
+    queryFn: () =>
+      http.get<unknown>("/api/v1/system-params").then(normaliseParams),
   });
 
-  // BUG-03 FIX: empty API response falls through to mock ([] is truthy, ?? does not catch it)
-  const params = (data && data.length > 0) ? data : MOCK_PARAMS;
+  const params = data ?? [];
 
-  // Initialise drafts when params load or category changes.
-  useEffect(() => {
-    const next: Record<string, string> = {};
-    params.forEach((p) => {
-      next[p.key] = drafts[p.key] ?? p.value;
+  const categories = useMemo(
+    () => [...new Set(params.map((p) => p.category))].sort(),
+    [params],
+  );
+
+  const modifiedCount = params.filter((p) => p.value !== p.defaultValue).length;
+  const advancedCount = params.filter((p) => p.isAdvanced).length;
+
+  const filtered = useMemo(() => {
+    return params.filter((p) => {
+      if (!showAdvanced && p.isAdvanced) return false;
+      if (search) {
+        const q = search.toLowerCase();
+        return (
+          p.label.toLowerCase().includes(q) ||
+          p.key.toLowerCase().includes(q) ||
+          p.description.toLowerCase().includes(q) ||
+          p.category.toLowerCase().includes(q)
+        );
+      }
+      return true;
     });
-    setDrafts(next);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data]);
+  }, [params, search, showAdvanced]);
 
   const byCategory = useMemo(() => {
     const map: Record<string, SystemParam[]> = {};
-    params.forEach((p) => {
+    filtered.forEach((p) => {
       (map[p.category] ??= []).push(p);
     });
     return map;
-  }, [params]);
-
-  const activeParams = byCategory[activeCategory] ?? [];
+  }, [filtered]);
 
   const saveMutation = useMutation({
-    mutationFn: async (changedParams: SystemParam[]) => {
-      // Backend only supports PUT /system-params/{key} for single params.
-      // Iterate and call each individually.
-      const results: SystemParam[] = [];
-      for (const p of changedParams) {
-        const res = await http.put<SystemParam>(
-          `/api/v1/system-params/${encodeURIComponent(p.key)}`,
-          { value: p.value },
-        );
-        results.push(res);
-      }
-      return results;
+    mutationFn: async ({ key, value }: { key: string; value: string }) => {
+      const res = await http.put<SystemParam>(
+        `/api/v1/system-params/${encodeURIComponent(key)}`,
+        { value },
+      );
+      return { requested: value, result: res };
     },
-    onSuccess: () => {
-      toast.success("Parameters saved");
+    onSuccess: ({ requested, result }) => {
+      if (result.value !== requested) {
+        toast.error(
+          `"${result.label}" was not updated - value outside allowed range (${result.minValue ?? "-inf"} to ${result.maxValue ?? "inf"}).`,
+        );
+      } else {
+        toast.success(`Updated "${result.key}" - takes effect within 60s`);
+      }
+      setDrafts((d) => {
+        const next = { ...d };
+        delete next[result.key];
+        return next;
+      });
       queryClient.invalidateQueries({ queryKey: ["system-params"] });
     },
-    onError: () => toast.error("Failed to save parameters"),
+    onError: () => toast.error("Failed to update parameter"),
+    onSettled: () => setSavingKey(null),
   });
+
+  const resetOneMutation = useMutation({
+    mutationFn: ({ key, defaultValue }: { key: string; defaultValue: string }) =>
+      http.put<SystemParam>(`/api/v1/system-params/${encodeURIComponent(key)}`, {
+        value: defaultValue,
+      }),
+    onSuccess: (res) => {
+      toast.success(`Reset "${res.key}" to default`);
+      setDrafts((d) => {
+        const next = { ...d };
+        delete next[res.key];
+        return next;
+      });
+      queryClient.invalidateQueries({ queryKey: ["system-params"] });
+    },
+    onError: () => toast.error("Failed to reset parameter"),
+  });
+
+  const resetAllMutation = useMutation({
+    mutationFn: () =>
+      http.post<{ resetCount: number; message: string }>(
+        "/api/v1/system-params/reset",
+        {},
+      ),
+    onSuccess: (res) => {
+      toast.success(
+        res.message || `${res.resetCount} parameters reset to defaults`,
+      );
+      setDrafts({});
+      queryClient.invalidateQueries({ queryKey: ["system-params"] });
+      setResetAllOpen(false);
+    },
+    onError: () => toast.error("Failed to reset all parameters"),
+  });
+
+  function toggleCategory(cat: string) {
+    setExpandedCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(cat)) next.delete(cat);
+      else next.add(cat);
+      return next;
+    });
+  }
 
   function setDraft(key: string, value: string) {
     setDrafts((d) => ({ ...d, [key]: value }));
   }
 
-  function handleSave() {
-    const payload = activeParams.map((p) => ({
-      ...p,
-      value: drafts[p.key] ?? p.value,
-    }));
-    // Validate
-    for (const p of payload) {
-      const err = validateValue(p);
+  function handleSaveOne(p: SystemParam) {
+    const draft = drafts[p.key];
+    if (draft === undefined) return;
+    const err = validateDraft(p, draft);
+    if (err) {
+      toast.error(`${p.label}: ${err}`);
+      return;
+    }
+    setSavingKey(p.key);
+    saveMutation.mutate({ key: p.key, value: draft });
+  }
+
+  function handleSaveAllDirty() {
+    const dirty = params.filter(
+      (p) => drafts[p.key] !== undefined && drafts[p.key] !== p.value,
+    );
+    if (dirty.length === 0) return;
+    for (const p of dirty) {
+      const err = validateDraft(p, drafts[p.key]);
       if (err) {
         toast.error(`${p.label}: ${err}`);
         return;
       }
     }
-    saveMutation.mutate(payload);
+    dirty.forEach((p) => saveMutation.mutate({ key: p.key, value: drafts[p.key] }));
   }
 
-  function isDirty(p: SystemParam): boolean {
-    return (drafts[p.key] ?? p.value) !== p.value;
-  }
+  const dirtyCount = params.filter(
+    (p) => drafts[p.key] !== undefined && drafts[p.key] !== p.value,
+  ).length;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 p-6">
       <PageHeader
         title="System Parameters"
-        description="Tune the operational knobs that control autopilot, email, scoring, and limits."
+        description="Every statistical threshold, benchmark, and tunable number in the platform is stored here. Changes take effect within 60 seconds - no redeploy needed."
+        actions={
+          <div className="flex items-center gap-2">
+            {dirtyCount > 0 && (
+              <Button onClick={handleSaveAllDirty} disabled={saveMutation.isPending}>
+                <Save className="h-4 w-4 mr-2" />
+                Save {dirtyCount} change{dirtyCount > 1 ? "s" : ""}
+              </Button>
+            )}
+            <Dialog open={resetAllOpen} onOpenChange={setResetAllOpen}>
+              <Button
+                variant="outline"
+                onClick={() => setResetAllOpen(true)}
+              >
+                <RotateCcw className="h-4 w-4 mr-2" />
+                Reset All
+              </Button>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Reset all system parameters?</DialogTitle>
+                  <DialogDescription>
+                    All {params.length} parameters - thresholds, benchmarks,
+                    and rate limits across every category - will be restored
+                    to their code-level defaults. This affects live platform
+                    behavior within 60 seconds and cannot be undone.
+                  </DialogDescription>
+                </DialogHeader>
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setResetAllOpen(false)}>
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    onClick={() => resetAllMutation.mutate()}
+                    disabled={resetAllMutation.isPending}
+                  >
+                    {resetAllMutation.isPending ? "Resetting..." : "Reset all parameters"}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </div>
+        }
       />
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[16rem_1fr]">
-        {/* Category sidebar */}
-        <Card className="h-fit">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm">Categories</CardTitle>
-          </CardHeader>
-          <CardContent className="p-2">
-            <nav className="space-y-1">
-              {CATEGORIES.map((c) => {
-                const count = byCategory[c]?.length ?? 0;
-                return (
-                  <button
-                    key={c}
-                    type="button"
-                    onClick={() => setActiveCategory(c)}
-                    className={cn(
-                      "flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors",
-                      activeCategory === c
-                        ? "bg-accent font-medium text-accent-foreground"
-                        : "hover:bg-accent/50",
-                    )}
-                  >
-                    <span className="capitalize">{c}</span>
-                    <Badge variant="secondary" className="text-xs">
-                      {count}
-                    </Badge>
-                  </button>
-                );
-              })}
-            </nav>
+      {isError ? (
+        <Card>
+          <CardContent className="py-12 text-center">
+            <p className="text-muted-foreground">
+              Failed to load system parameters.
+            </p>
+            <Button onClick={() => refetch()} className="mt-4">
+              Retry
+            </Button>
           </CardContent>
         </Card>
+      ) : isLoading ? (
+        <div className="space-y-3">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-16 w-full" />
+          ))}
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Card>
+              <CardContent className="p-4">
+                <div className="text-xs text-muted-foreground">
+                  Total Parameters
+                </div>
+                <div className="text-2xl font-bold mt-1">{params.length}</div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4">
+                <div className="text-xs text-muted-foreground">Categories</div>
+                <div className="text-2xl font-bold mt-1">
+                  {categories.length}
+                </div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4">
+                <div className="text-xs text-muted-foreground">
+                  Modified from Default
+                </div>
+                <div className="text-2xl font-bold mt-1 text-amber-600">
+                  {modifiedCount}
+                </div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4">
+                <div className="text-xs text-muted-foreground">
+                  Advanced (hidden)
+                </div>
+                <div className="text-2xl font-bold mt-1 text-muted-foreground">
+                  {advancedCount}
+                </div>
+              </CardContent>
+            </Card>
+          </div>
 
-        {/* Active category form */}
-        <Card>
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <div className="space-y-1">
-              <CardTitle className="capitalize">{activeCategory}</CardTitle>
-              <CardDescription>
-                {activeParams.length} parameter
-                {activeParams.length === 1 ? "" : "s"} in this category.
-              </CardDescription>
-            </div>
-            <Button
-              onClick={handleSave}
-              disabled={
-                saveMutation.isPending ||
-                !activeParams.some(isDirty)
-              }
-            >
-              <Save className="h-4 w-4" />
-              Save changes
-            </Button>
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <div className="space-y-4">
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <Skeleton key={i} className="h-16 w-full" />
-                ))}
-              </div>
-            ) : activeParams.length === 0 ? (
-              <div className="flex flex-col items-center justify-center gap-2 rounded-md border border-dashed p-10 text-center">
-                <Settings className="h-6 w-6 text-muted-foreground" />
-                <p className="text-sm text-muted-foreground">
-                  No parameters in this category.
+          <Card className="border-amber-200 bg-amber-50/50">
+            <CardContent className="p-4 flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+              <div className="text-sm text-amber-900">
+                <p className="font-medium">
+                  These parameters control core platform behavior.
+                </p>
+                <p className="text-xs mt-1 text-amber-800">
+                  Read the "Impact" note before saving - each parameter
+                  explains exactly what happens if you modify it. Changes
+                  take effect within 60 seconds via the in-memory cache.
                 </p>
               </div>
-            ) : (
-              <div className="space-y-5">
-                {activeParams.map((p) => {
-                  const draftValue = drafts[p.key] ?? p.value;
-                  const err = validateValue({ ...p, value: draftValue });
-                  const dirty = isDirty(p);
-                  return (
-                    <div
-                      key={p.key}
-                      className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_2fr]"
-                    >
-                      <div className="space-y-1">
-                        <Label
-                          htmlFor={p.key}
-                          className="flex items-center gap-2"
-                        >
-                          {p.label}
-                          {dirty && (
-                            <Badge variant="warning" className="text-[10px]">
-                              edited
-                            </Badge>
-                          )}
-                        </Label>
-                        <p className="font-mono text-[11px] text-muted-foreground">
-                          {p.key}
-                        </p>
-                        {p.description && (
-                          <p className="text-xs text-muted-foreground">
-                            {p.description}
-                          </p>
-                        )}
-                      </div>
+            </CardContent>
+          </Card>
 
-                      <div className="space-y-1">
-                        {p.type === "boolean" ? (
-                          <div className="flex items-center gap-3 rounded-md border p-3">
-                            <Switch
-                              checked={draftValue === "true"}
-                              onCheckedChange={(c) =>
-                                setDraft(p.key, String(c))
-                              }
-                            />
-                            <span className="text-sm">
-                              {draftValue === "true" ? "Enabled" : "Disabled"}
-                            </span>
-                          </div>
-                        ) : p.type === "json" ? (
-                          <Textarea
-                            id={p.key}
-                            value={draftValue}
-                            onChange={(e) => setDraft(p.key, e.target.value)}
-                            className={cn(
-                              "min-h-[6rem] font-mono text-xs",
-                              err && "border-red-500",
-                            )}
-                          />
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex-1 min-w-[200px] relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Search parameters by name, key, or description..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-9"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={showAdvanced}
+                onCheckedChange={setShowAdvanced}
+                id="advanced"
+              />
+              <Label htmlFor="advanced" className="text-xs cursor-pointer">
+                Show advanced params
+              </Label>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {Object.entries(byCategory).map(([category, catParams]) => {
+              const isExpanded = expandedCategories.has(category) || !!search;
+              const catModified = catParams.filter(
+                (p) => p.value !== p.defaultValue,
+              ).length;
+              return (
+                <Card key={category}>
+                  <div
+                    className="pb-3 pt-6 px-6 cursor-pointer"
+                    onClick={() => toggleCategory(category)}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        {isExpanded ? (
+                          <ChevronDown className="h-4 w-4" />
                         ) : (
-                          <Input
-                            id={p.key}
-                            type={p.type === "number" ? "number" : "text"}
-                            value={draftValue}
-                            onChange={(e) => setDraft(p.key, e.target.value)}
-                            className={err ? "border-red-500" : ""}
-                          />
+                          <ChevronRight className="h-4 w-4" />
                         )}
-                        {err && (
-                          <p className="text-xs text-red-600">{err}</p>
+                        <CardTitle className="text-base">
+                          {categoryLabel(category)}
+                        </CardTitle>
+                        <Badge variant="secondary" className="text-xs">
+                          {catParams.length}
+                        </Badge>
+                        {catModified > 0 && (
+                          <Badge
+                            variant="outline"
+                            className="text-xs text-amber-700 border-amber-300 bg-amber-50"
+                          >
+                            {catModified} modified
+                          </Badge>
                         )}
-                        <p className="text-[11px] uppercase text-muted-foreground">
-                          type: {p.type}
-                        </p>
                       </div>
                     </div>
-                  );
-                })}
-              </div>
+                  </div>
+                  {isExpanded && (
+                    <CardContent className="pt-0">
+                      <div className="space-y-3">
+                        {catParams.map((p) => (
+                          <ParamRow
+                            key={p.key}
+                            param={p}
+                            draft={drafts[p.key]}
+                            onEdit={(val) => setDraft(p.key, val)}
+                            onSave={() => handleSaveOne(p)}
+                            onReset={() =>
+                              resetOneMutation.mutate({
+                                key: p.key,
+                                defaultValue: p.defaultValue,
+                              })
+                            }
+                            saving={savingKey === p.key}
+                          />
+                        ))}
+                      </div>
+                    </CardContent>
+                  )}
+                </Card>
+              );
+            })}
+          </div>
+
+          {filtered.length === 0 && (
+            <Card>
+              <CardContent className="p-8 text-center text-muted-foreground">
+                <Info className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                <p>No parameters match your search.</p>
+              </CardContent>
+            </Card>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ParamRow({
+  param,
+  draft,
+  onEdit,
+  onSave,
+  onReset,
+  saving,
+}: {
+  param: SystemParam;
+  draft: string | undefined;
+  onEdit: (val: string) => void;
+  onSave: () => void;
+  onReset: () => void;
+  saving: boolean;
+}) {
+  const isModified = param.value !== param.defaultValue;
+  const currentValue = draft !== undefined ? draft : param.value;
+  const isEditing = draft !== undefined && draft !== param.value;
+  const err = isEditing ? validateDraft(param, draft) : null;
+
+  return (
+    <div
+      className={`border rounded-lg p-4 ${
+        isModified ? "border-amber-200 bg-amber-50/30" : "border-border"
+      }`}
+    >
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-2 space-y-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h4 className="font-semibold text-sm">{param.label}</h4>
+            {param.isAdvanced && (
+              <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                advanced
+              </Badge>
             )}
-          </CardContent>
-        </Card>
+            {isModified && (
+              <Badge
+                variant="outline"
+                className="text-[10px] text-amber-700 border-amber-300 bg-amber-50"
+              >
+                modified
+              </Badge>
+            )}
+            <code className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded font-mono">
+              {param.key}
+            </code>
+          </div>
+          <p className="text-xs text-muted-foreground">{param.description}</p>
+          <div className="text-xs p-2 rounded bg-muted/50 border border-border">
+            <span className="font-medium text-foreground">
+              Impact if changed:{" "}
+            </span>
+            <span className="text-muted-foreground">{param.impact}</span>
+          </div>
+          {param.minValue !== null && param.maxValue !== null && (
+            <p className="text-[10px] text-muted-foreground">
+              Allowed range: {param.minValue} - {param.maxValue}{" "}
+              {param.unit || ""}
+            </p>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <Label className="text-xs">
+            Current value{" "}
+            {param.unit && (
+              <span className="text-muted-foreground">({param.unit})</span>
+            )}
+          </Label>
+          <div className="flex items-center gap-2">
+            {param.valueType === "boolean" ? (
+              <div className="flex items-center gap-3 rounded-md border p-2 flex-1">
+                <Switch
+                  checked={currentValue === "true"}
+                  onCheckedChange={(c) => onEdit(String(c))}
+                />
+                <span className="text-sm">
+                  {currentValue === "true" ? "Enabled" : "Disabled"}
+                </span>
+              </div>
+            ) : param.valueType === "json" ? (
+              <textarea
+                value={currentValue}
+                onChange={(e) => onEdit(e.target.value)}
+                className={`flex-1 min-h-[6rem] p-2 font-mono text-xs border rounded-md ${
+                  err ? "border-red-500" : "border-border"
+                }`}
+              />
+            ) : (
+              <Input
+                type={param.valueType === "number" ? "number" : "text"}
+                value={currentValue}
+                onChange={(e) => onEdit(e.target.value)}
+                min={param.minValue ?? undefined}
+                max={param.maxValue ?? undefined}
+                step={param.valueType === "number" ? "any" : undefined}
+                className={`font-mono text-sm ${err ? "border-red-500" : ""}`}
+              />
+            )}
+            {isEditing && (
+              <Button size="sm" onClick={onSave} disabled={saving || !!err}>
+                {saving ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Save className="h-3 w-3" />
+                )}
+              </Button>
+            )}
+            {isModified && !isEditing && (
+              <Button size="sm" variant="outline" onClick={onReset} title="Reset to default">
+                <RotateCcw className="h-3 w-3" />
+              </Button>
+            )}
+          </div>
+          {err && <p className="text-xs text-red-600">{err}</p>}
+          {isModified && (
+            <p className="text-[10px] text-amber-700">
+              Default was: <code className="font-mono">{param.defaultValue}</code>
+            </p>
+          )}
+          {isEditing && !err && (
+            <p className="text-[10px] text-blue-600">
+              Press save to apply - takes effect within 60s
+            </p>
+          )}
+        </div>
       </div>
     </div>
   );

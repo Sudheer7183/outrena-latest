@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html>
+<head><title>Silent SSO</title></head>
+<body>
+<script>
+  // Required by keycloak-js when silentCheckSsoRedirectUri is configured.
+  // This page is loaded in a hidden iframe; it posts the SSO result back to
+  // the parent window so the main app can silently re-establish the session
+  // without a visible page reload.
+  parent.postMessage(location.href, location.origin);
+</script>
+</body>
+</html>
