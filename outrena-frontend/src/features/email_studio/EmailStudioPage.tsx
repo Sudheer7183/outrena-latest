@@ -369,15 +369,54 @@ export function EmailStudioPage() {
     await handleGenerate();
   }, [generatedEmail, handleGenerate]);
 
-  const handleQaScore = useCallback(async () => {
+  // const handleQaScore = useCallback(async () => {
+  //   if (!editedBody) { toast.error('No email to score'); return; }
+  //   setScoring(true);
+  //   try {
+  //     const result = await http.post<{ qa?: QaResult } & Partial<QaResult>>(
+  //       '/api/v1/email-studio/qa-score',
+  //       { email_body: editedBody, subject: editedSubject, llm_config_id: resolvedLlmId },
+  //     );
+  //     const qa: QaResult = result.qa ?? (result as QaResult);
+  //     setQaResult(qa);
+  //     if (qa.rewrite) {
+  //       setEditedBody(qa.rewrite);
+  //       toast.success(`Score: ${qa.totalScore}/100 — Auto-rewritten!`);
+  //     } else {
+  //       toast.success(`Score: ${qa.totalScore}/100 — ${qa.totalScore >= 80 ? 'Passed!' : 'Needs improvement'}`);
+  //     }
+  //   } catch (err: unknown) {
+  //     toast.error(err instanceof Error ? err.message : 'QA scoring failed');
+  //   } finally { setScoring(false); }
+  // }, [editedBody, editedSubject, resolvedLlmId]);
+
+
+    const handleQaScore = useCallback(async () => {
     if (!editedBody) { toast.error('No email to score'); return; }
     setScoring(true);
     try {
-      const result = await http.post<{ qa?: QaResult } & Partial<QaResult>>(
+      const result = await http.post<Record<string, unknown>>(
         '/api/v1/email-studio/qa-score',
         { email_body: editedBody, subject: editedSubject, llm_config_id: resolvedLlmId },
       );
-      const qa: QaResult = result.qa ?? (result as QaResult);
+
+      // API returns { total_score, max_score, dimensions: [{name, score, max_points}], flags, suggested_rewrite }
+      // Map to the flat QaResult interface the UI expects.
+      const dims = (result.dimensions as Array<{ name: string; score: number; max_points: number }>) ?? [];
+      const findDim = (keywords: string[]) =>
+        dims.find(d => keywords.some(k => d.name.toLowerCase().includes(k)))?.score ?? 0;
+
+      const qa: QaResult = (result.qa as QaResult) ?? {
+        totalScore:       (result.total_score as number) ?? (result.totalScore as number) ?? 0,
+        signalRelevance:  findDim(['signal']),
+        messageMarketFit: findDim(['fit', 'market']),
+        clarity:          findDim(['clarity']),
+        proof:            findDim(['proof']),
+        lengthTone:       findDim(['tone', 'length']),
+        flags:            (result.flags as string[]) ?? [],
+        rewrite:          (result.suggested_rewrite as string) ?? (result.rewrite as string) ?? null,
+      };
+
       setQaResult(qa);
       if (qa.rewrite) {
         setEditedBody(qa.rewrite);
@@ -389,7 +428,6 @@ export function EmailStudioPage() {
       toast.error(err instanceof Error ? err.message : 'QA scoring failed');
     } finally { setScoring(false); }
   }, [editedBody, editedSubject, resolvedLlmId]);
-
   const handleSubjectLines = useCallback(async () => {
     if (!editedBody) { toast.error('Generate an email first'); return; }
     setGenSubjects(true);
@@ -464,10 +502,35 @@ export function EmailStudioPage() {
     setComplianceLoading(true);
     setComplianceResult(null);
     try {
-      const result = await http.post<ComplianceResult>(
+      const raw = await http.post<Record<string, unknown>>(
         '/api/v1/email-studio/compliance-check',
         { body: editedBody, angle: touchAngle, seniority: selectedProspect?.seniority ?? 'IC' },
       );
+
+      // API returns { findings: [{rule, status, detail}], isCompliant, score }
+      // Map to the ComplianceResult interface the UI expects.
+      const findings = (raw.findings as Array<{ rule: string; status: string; detail: string }>) ?? [];
+      const errors   = findings.filter(f => f.status === 'fail');
+      const warnings = findings.filter(f => f.status === 'warn');
+      const wc       = editedBody.split(/\s+/).filter(Boolean).length;
+
+      const result: ComplianceResult = (raw.passed !== undefined && raw.wordCount !== undefined)
+        ? (raw as unknown as ComplianceResult)
+        : {
+            passed:      errors.length === 0,
+            compliant:   (raw.isCompliant as boolean) ?? errors.length === 0,
+            wordCount:   wc,
+            wordLimit:   150,
+            totalErrors:   errors.length,
+            totalWarnings: warnings.length,
+            violations: errors.map(f => ({
+              rule:     f.rule,
+              message:  f.detail,
+              severity: 'error' as const,
+            })),
+            complianceIssues: warnings.map(f => f.detail),
+          };
+
       setComplianceResult(result);
       if (result.passed && result.compliant) {
         toast.success('All rules passed — CAN-SPAM compliant');
@@ -482,6 +545,7 @@ export function EmailStudioPage() {
     } finally { setComplianceLoading(false); }
   }, [editedBody, touchAngle, selectedProspect]);
 
+  
   const handleCopyToClipboard = useCallback(() => {
     const text = abSubjectEnabled
       ? `Subject A: ${editedSubject}\nSubject B: ${editedSubjectB}\n\n${editedBody}`

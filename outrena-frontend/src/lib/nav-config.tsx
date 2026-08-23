@@ -697,7 +697,7 @@
 
 import {
   LayoutDashboard,
-  HelpCircle,
+  // HelpCircle,
   Cpu,
   FileText,
   Settings2,
@@ -767,8 +767,8 @@ export const NAV_SECTIONS: NavSection[] = [
     defaultCollapsed: false,
     items: [
       { label: "Dashboard",         path: "/",                  icon: LayoutDashboard, minimumRole: "REP" },
-      { label: "Manager Dashboard", path: "/manager-dashboard", icon: Users2,          minimumRole: "MANAGER" },
-      { label: "Help Guide",        path: "/help-guide",        icon: HelpCircle,      minimumRole: "REP", highlight: true },
+      // { label: "Manager Dashboard", path: "/manager-dashboard", icon: Users2,          minimumRole: "MANAGER" },
+      // { label: "Help Guide",        path: "/help-guide",        icon: HelpCircle,      minimumRole: "REP", highlight: true },
     ],
   },
  

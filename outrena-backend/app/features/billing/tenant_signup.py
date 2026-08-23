@@ -1,75 +1,142 @@
 """
-tenant_signup.py — Self-serve tenant signup request router.
+tenant_signup.py — Public self-serve signup endpoints.
 
-Endpoints (no auth, no tenant):
-  POST /tenant-signup                  → submit a signup request (201)
-  GET  /tenant-signup/{id}/status      → poll for review status
+Routes (all under /api/v1/tenant-signup, exempt from TenantMiddleware):
 
-Submitted requests sit in PENDING_APPROVAL until a SUPER_ADMIN approves
-or rejects via /platform/admin/signups/{id}/approve|reject.
+  POST /api/v1/tenant-signup
+    Submit a new signup request. No auth required.
+    Body: TenantSignupSubmitRequest
+    Response 201: TenantSignupSubmitResponse
 
-Phase 8 (dual-path integrations): the signup payload now carries an
-optional ``integration_mode`` field ("platform_managed" |
-"tenant_managed", default "tenant_managed") that flows through to
-``tenant_config.integration_mode`` at provisioning time.
+  GET /api/v1/tenant-signup/plans
+    Return the active plan catalog for the signup form.
+    No auth required.
+    Response 200: list[PlanCatalogItem]
+
+  GET /api/v1/tenant-signup/check-subdomain?subdomain=<value>
+    Real-time availability check for the subdomain field.
+    No auth required.
+    Response 200: SubdomainAvailabilityResponse
+
+These endpoints are intentionally unauthenticated — they are the entry
+point for prospective tenants who do not yet have an account.
 """
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, EmailStr, field_validator
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db_public
+from app.core.database import AsyncSessionLocal
 from app.features.billing.tenant_signup_service import TenantSignupService
-from app.utils.slug import validate_slug
+from app.utils.slug import validate_slug, SlugValidationError
 
-router = APIRouter(prefix="/tenant-signup", tags=["Tenant Signup"])
-_service = TenantSignupService()
+router = APIRouter(prefix="/tenant-signup", tags=["signup"])
 
 
-class SignupRequest(BaseModel):
-    company_name: str = Field(..., min_length=1, max_length=255)
-    subdomain: str = Field(..., min_length=3, max_length=63)
+# ── DB dependency (public schema, no tenant required) ───────────────────────
+
+async def _get_db_public() -> AsyncGenerator[AsyncSession, None]:
+    """Public-schema session — no tenant middleware resolution needed."""
+    async with AsyncSessionLocal() as session:
+        await session.execute(text('SET search_path TO "public"'))
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+# ── Request / response schemas ───────────────────────────────────────────────
+
+class TenantSignupSubmitRequest(BaseModel):
+    company_name: str
+    subdomain: str
     owner_email: EmailStr
-    owner_first_name: str = Field(..., min_length=1, max_length=120)
-    owner_last_name: str = Field(..., min_length=1, max_length=120)
-    plan_id: int = Field(..., ge=1)
-    # NEW (Phase 8) — requested integrations mode at signup time.
-    # "platform_managed" | "tenant_managed" (default).
-    integration_mode: str = Field(
-        default="tenant_managed", pattern="^(platform_managed|tenant_managed)$"
-    )
+    owner_first_name: str
+    owner_last_name: str
+    plan_id: int
+    integration_mode: str = "tenant_managed"
 
     @field_validator("subdomain")
     @classmethod
-    def _slug_rules(cls, value: str) -> str:
-        return validate_slug(value)
+    def _validate_subdomain(cls, value: str) -> str:
+        try:
+            return validate_slug(value.strip().lower())
+        except SlugValidationError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @field_validator("integration_mode")
+    @classmethod
+    def _validate_integration_mode(cls, value: str) -> str:
+        if value not in ("platform_managed", "tenant_managed"):
+            raise ValueError(
+                "integration_mode must be 'platform_managed' or 'tenant_managed'."
+            )
+        return value
+
+    @field_validator("company_name", "owner_first_name", "owner_last_name")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("This field must not be blank.")
+        return value.strip()
 
 
-class SignupCreatedResponse(BaseModel):
-    signup_id: int
-    status: str = "pending_approval"
-
-
-class SignupStatusResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    signup_id: int
+class TenantSignupSubmitResponse(BaseModel):
+    id: int
+    subdomain: str
     status: str
-    tenant_slug: str | None
-    rejection_reason: str | None
     created_at: datetime
+    message: str
 
 
-@router.post("", response_model=SignupCreatedResponse, status_code=status.HTTP_201_CREATED)
+class PlanCatalogItem(BaseModel):
+    id: int
+    name: str
+    display_name: str
+    description: str
+    price_monthly_cents: int
+    price_yearly_cents: int
+    seat_limit: int
+    feature_flags: dict[str, Any]
+
+
+class SubdomainAvailabilityResponse(BaseModel):
+    subdomain: str
+    available: bool
+    reason: str | None
+
+
+# ── Endpoints ────────────────────────────────────────────────────────────────
+
+_service = TenantSignupService()
+
+
+@router.post(
+    "",
+    response_model=TenantSignupSubmitResponse,
+    status_code=201,
+    summary="Submit a self-serve tenant signup request",
+)
 async def submit_signup(
-    body: SignupRequest,
-    db: AsyncSession = Depends(get_db_public),
-) -> SignupCreatedResponse:
-    """Submit a self-serve tenant signup request for SUPER_ADMIN review."""
-    signup_id = await _service.create_signup(
+    body: TenantSignupSubmitRequest,
+    db: AsyncSession = Depends(_get_db_public),
+) -> TenantSignupSubmitResponse:
+    """
+    Submit a new tenant signup request. No authentication required.
+
+    The request is queued as PENDING_APPROVAL. A SUPER_ADMIN must approve
+    it via /api/platform/admin/signups/{id}/approve to trigger provisioning.
+    The submitter will receive an email invitation when their account is ready.
+    """
+    result = await _service.create_signup(
         db,
         company_name=body.company_name,
         subdomain=body.subdomain,
@@ -79,17 +146,34 @@ async def submit_signup(
         plan_id=body.plan_id,
         integration_mode=body.integration_mode,
     )
-    return SignupCreatedResponse(signup_id=signup_id)
+    return TenantSignupSubmitResponse(**result)
 
 
-@router.get("/{signup_id}/status", response_model=SignupStatusResponse)
-async def get_signup_status(
-    signup_id: int,
-    db: AsyncSession = Depends(get_db_public),
-) -> SignupStatusResponse:
-    """Poll the review status of a signup request."""
-    result = await _service.get_signup_status(db, signup_id)
-    return SignupStatusResponse(**result)
+@router.get(
+    "/plans",
+    response_model=list[PlanCatalogItem],
+    summary="List active plans for the signup form",
+)
+async def list_plans(
+    db: AsyncSession = Depends(_get_db_public),
+) -> list[PlanCatalogItem]:
+    """Return all active plans ordered by sort_order for the plan selector."""
+    plans = await _service.get_plan_catalog(db)
+    return [PlanCatalogItem(**p) for p in plans]
 
 
-__all__ = ["router"]
+@router.get(
+    "/check-subdomain",
+    response_model=SubdomainAvailabilityResponse,
+    summary="Check subdomain availability in real time",
+)
+async def check_subdomain(
+    subdomain: str = Query(..., min_length=3, max_length=63),
+    db: AsyncSession = Depends(_get_db_public),
+) -> SubdomainAvailabilityResponse:
+    """
+    Returns whether a subdomain is available for use as a tenant identifier.
+    Used by the signup form for real-time validation as the user types.
+    """
+    result = await _service.check_subdomain_availability(db, subdomain)
+    return SubdomainAvailabilityResponse(**result)

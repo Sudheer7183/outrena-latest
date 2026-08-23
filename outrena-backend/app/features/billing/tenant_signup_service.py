@@ -1,27 +1,44 @@
 """
-tenant_signup_service.py — Self-serve tenant signup request lifecycle.
+tenant_signup_service.py — Self-serve signup request persistence layer.
 
-Prospective tenants submit a signup request from the public landing page
-(POST /api/v1/tenant-signup). The request sits in PENDING_APPROVAL until
-a SUPER_ADMIN reviews it via /platform/admin/signups/{id}/approve or
-/reject. The actual provisioning (calling TenantProvisioningService) is
-done by platform_admin_service.approve_signup — this service only owns
-the queue row + the public status check.
+Handles the public-facing POST /api/v1/tenant-signup endpoint. This is
+deliberately thin: it validates inputs, persists the TenantSignupRequest
+row, and returns. No provisioning happens here — a SUPER_ADMIN must
+approve via PlatformAdminService.approve_signup().
+
+Validation rules:
+  - subdomain must pass slug validation (3-63 chars, lowercase alnum + hyphens)
+  - subdomain must not already exist in public.tenants OR public.tenant_signup_requests
+  - owner_email must be a valid email
+  - plan_id must reference an active plan in public.plans
+
+DB notes:
+  - Uses get_db_public() — search_path is "public" for this session.
+  - Calls db.flush() (NOT db.commit()) to get the server-generated id and
+    created_at without releasing the connection; the caller (FastAPI dep)
+    commits via session.commit() in the finally block of get_db_public().
+  - Never calls db.refresh() after flush — captures id and created_at
+    as plain values from the ORM object while the session is still open.
 """
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Any
+
 import structlog
+from fastapi import HTTPException, status
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.plan import Plan
 from app.models.tenant_signup import TenantSignupRequest
-from app.features.subdomain.service import is_slug_available
+from app.utils.slug import SlugValidationError, validate_slug
 
 logger = structlog.get_logger(__name__)
 
 
 class TenantSignupService:
-    """Create + read tenant signup requests."""
+    """Persists and validates self-serve signup requests."""
 
     async def create_signup(
         self,
@@ -34,101 +51,191 @@ class TenantSignupService:
         owner_last_name: str,
         plan_id: int,
         integration_mode: str = "tenant_managed",
-    ) -> int:
-        """Create a PENDING_APPROVAL signup request. Returns the new row id.
-
-        409 if the subdomain is already allocated or already requested by a
-        pending signup.
+    ) -> dict[str, Any]:
         """
-        from fastapi import HTTPException, status
+        Validate and persist a new signup request.
 
-        subdomain = subdomain.strip().lower()
-        # Normalize + validate integration_mode (defense-in-depth).
+        Returns a dict with the new signup's id, subdomain, and status.
+        Raises HTTP 422 for validation failures, 409 for conflicts.
+        """
+        # ── 1. Validate slug format ──────────────────────────────────────────
+        try:
+            subdomain = validate_slug(subdomain.strip().lower())
+        except SlugValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+        # ── 2. Validate integration_mode ─────────────────────────────────────
         if integration_mode not in ("platform_managed", "tenant_managed"):
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=(
-                    "integration_mode must be 'platform_managed' or "
-                    "'tenant_managed'."
+                    "integration_mode must be 'platform_managed' or 'tenant_managed'."
                 ),
             )
-        available, reason = await is_slug_available(subdomain, db)
-        if not available:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=reason)
 
-        # Also block if a PENDING_APPROVAL signup already holds this subdomain.
-        existing = await db.execute(
-            text(
-                "SELECT id FROM public.tenant_signup_requests "
-                "WHERE subdomain = :slug AND status = 'PENDING_APPROVAL'"
-            ),
-            {"slug": subdomain},
-        )
-        if existing.fetchone() is not None:
+        # ── 3. Check subdomain is not already taken by an active tenant ───────
+        existing_tenant = (
+            await db.execute(
+                text(
+                    "SELECT 1 FROM public.tenants WHERE slug = :slug AND deleted_at IS NULL"
+                ),
+                {"slug": subdomain},
+            )
+        ).fetchone()
+        if existing_tenant:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"Subdomain '{subdomain}' is already requested and pending review.",
+                detail=f"Subdomain '{subdomain}' is already taken.",
             )
 
-        row = TenantSignupRequest(
-            company_name=company_name,
+        # ── 4. Check subdomain not pending in the signup queue ────────────────
+        existing_request = (
+            await db.execute(
+                select(TenantSignupRequest).where(
+                    TenantSignupRequest.subdomain == subdomain,
+                    TenantSignupRequest.status.in_(
+                        ("PENDING_APPROVAL", "APPROVED")
+                    ),
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_request:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"A signup request for '{subdomain}' is already pending review."
+                ),
+            )
+
+        # ── 5. Validate plan exists and is active ─────────────────────────────
+        plan = (
+            await db.execute(
+                select(Plan).where(Plan.id == plan_id, Plan.is_active.is_(True))
+            )
+        ).scalar_one_or_none()
+        if plan is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Plan id={plan_id} does not exist or is not active.",
+            )
+
+        # ── 6. Persist the signup request ─────────────────────────────────────
+        signup = TenantSignupRequest(
+            company_name=company_name.strip(),
             subdomain=subdomain,
-            owner_email=owner_email,
-            owner_first_name=owner_first_name,
-            owner_last_name=owner_last_name,
+            owner_email=owner_email.strip().lower(),
+            owner_first_name=owner_first_name.strip(),
+            owner_last_name=owner_last_name.strip(),
             plan_id=plan_id,
             status="PENDING_APPROVAL",
             integration_mode=integration_mode,
         )
-        db.add(row)
-        await db.commit()
-        row = await db.get(TenantSignupRequest, row.id)
+        db.add(signup)
+
+        # flush to populate server-generated columns (id, created_at) without
+        # releasing the connection back to the pool (which would strip
+        # search_path). The get_db_public() dependency commits on exit.
+        await db.flush()
+
+        # Capture plain values NOW — never call db.refresh() after commit.
+        signup_id: int = signup.id
+        signup_subdomain: str = signup.subdomain
+        signup_status: str = signup.status
+        signup_created_at: datetime = signup.created_at
+
         logger.info(
             "tenant_signup.created",
-            signup_id=row.id,
-            subdomain=subdomain,
-            company=company_name,
-            integration_mode=integration_mode,
+            signup_id=signup_id,
+            subdomain=signup_subdomain,
+            plan_id=plan_id,
         )
-        # Notification: in production this would push to email/Slack. Today
-        # it just lands in the structlog stream so the platform team can
-        # triage from the admin UI without wiring a notification pipeline.
-        return row.id
 
-    async def get_signup_status(
-        self, db: AsyncSession, signup_id: int
-    ) -> dict[str, object]:
-        """Return the public status view of a signup (no PII for rejected)."""
-        from fastapi import HTTPException, status
-        row = (
+        return {
+            "id": signup_id,
+            "subdomain": signup_subdomain,
+            "status": signup_status,
+            "created_at": signup_created_at,
+            "message": (
+                "Your signup request has been received. "
+                "You will receive an email once it has been reviewed."
+            ),
+        }
+
+    async def get_plan_catalog(self, db: AsyncSession) -> list[dict[str, Any]]:
+        """Return all active plans for the signup form's plan selector."""
+        plans = (
+            await db.execute(
+                select(Plan)
+                .where(Plan.is_active.is_(True))
+                .order_by(Plan.sort_order.asc())
+            )
+        ).scalars().all()
+        return [
+            {
+                "id": p.id,
+                "name": p.name,
+                "display_name": p.display_name,
+                "description": p.description,
+                "price_monthly_cents": p.price_monthly_cents,
+                "price_yearly_cents": p.price_yearly_cents,
+                "seat_limit": p.seat_limit,
+                "feature_flags": p.feature_flags,
+            }
+            for p in plans
+        ]
+
+    async def check_subdomain_availability(
+        self, db: AsyncSession, subdomain: str
+    ) -> dict[str, Any]:
+        """
+        Quick availability check used by the signup form's real-time
+        subdomain field validator (GET /api/v1/tenant-signup/check-subdomain).
+        """
+        subdomain = subdomain.strip().lower()
+
+        # Format validation first — gives a reason without hitting the DB.
+        try:
+            validate_slug(subdomain)
+        except SlugValidationError as exc:
+            return {"subdomain": subdomain, "available": False, "reason": str(exc)}
+
+        # Active tenant check.
+        taken_by_tenant = (
+            await db.execute(
+                text(
+                    "SELECT 1 FROM public.tenants "
+                    "WHERE slug = :slug AND deleted_at IS NULL"
+                ),
+                {"slug": subdomain},
+            )
+        ).fetchone()
+        if taken_by_tenant:
+            return {
+                "subdomain": subdomain,
+                "available": False,
+                "reason": "This subdomain is already in use.",
+            }
+
+        # Pending signup check.
+        pending = (
             await db.execute(
                 select(TenantSignupRequest).where(
-                    TenantSignupRequest.id == signup_id
+                    TenantSignupRequest.subdomain == subdomain,
+                    TenantSignupRequest.status.in_(("PENDING_APPROVAL", "APPROVED")),
                 )
             )
         ).scalar_one_or_none()
-        if row is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Signup request not found.",
-            )
-        # Look up tenant slug if provisioned.
-        tenant_slug: str | None = None
-        if row.tenant_id is not None:
-            ts = await db.execute(
-                text("SELECT slug FROM public.tenants WHERE tenant_id = :tid"),
-                {"tid": row.tenant_id},
-            )
-            t = ts.fetchone()
-            if t is not None:
-                tenant_slug = t.slug
-        return {
-            "signup_id": row.id,
-            "status": row.status,
-            "tenant_slug": tenant_slug,
-            "rejection_reason": row.rejection_reason if row.status == "REJECTED" else None,
-            "created_at": row.created_at,
-        }
+        if pending:
+            return {
+                "subdomain": subdomain,
+                "available": False,
+                "reason": "This subdomain has a pending signup request.",
+            }
+
+        return {"subdomain": subdomain, "available": True, "reason": None}
 
 
 __all__ = ["TenantSignupService"]

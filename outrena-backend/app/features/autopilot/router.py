@@ -728,48 +728,170 @@ _RUNNING: set[str] = set()
 _PROGRESS: dict[str, tuple[int, str]] = {}
 
 
-async def _resolve_llm_config(pub_db: AsyncSession):
-    """Resolve the default active GlobalLlmConfig on the public-schema session."""
+# async def _resolve_llm_config(pub_db: AsyncSession):
+#     """Resolve the default active GlobalLlmConfig on the public-schema session."""
+#     from types import SimpleNamespace
+
+#     try:
+#         from app.models.global_llm_config import GlobalLlmConfig
+#         from app.services.secret_service import decrypt_at_rest
+
+#         result = await pub_db.execute(
+#             select(GlobalLlmConfig)
+#             .where(GlobalLlmConfig.is_active.is_(True))
+#             .where(GlobalLlmConfig.is_default.is_(True))
+#             .limit(1)
+#         )
+#         row = result.scalar_one_or_none()
+
+#         if row is None:
+#             result = await pub_db.execute(
+#                 select(GlobalLlmConfig)
+#                 .where(GlobalLlmConfig.is_active.is_(True))
+#                 .order_by(GlobalLlmConfig.id)
+#                 .limit(1)
+#             )
+#             row = result.scalar_one_or_none()
+
+#         if row is None:
+#             return None
+
+#         api_key = decrypt_at_rest(row.api_key_encrypted)
+
+#         return SimpleNamespace(
+#             id=row.id,
+#             name=row.display_name,
+#             provider=row.provider,
+#             modelId=row.model_name,   # cast_llm_config() reads .modelId, not .model
+#             apiKey=api_key,
+#             baseUrl=row.base_url,
+#             maxTokens=row.max_tokens,
+#             temperature=row.temperature,
+#             isActive=True,
+#             isDefault=row.is_default,
+#             settings=None,
+#         )
+#     except Exception as exc:  # noqa: BLE001
+#         import structlog
+#         structlog.get_logger(__name__).error(
+#             "autopilot.router.llm_resolve_failed", error=str(exc)
+#         )
+#         return None
+
+
+
+# async def _resolve_llm_config(pub_db: AsyncSession):
+#     """Resolve the best active LLM config using the standard 3-tier fallback.
+
+#     FIX: Previously only queried public.global_llm_config, which is empty
+#     when the tenant configured their LLM via Settings → LLM Models (which
+#     writes to the tenant schema acme.llm_config, not the public schema).
+#     Now delegates to get_default_llm_config() which checks:
+#       Tier 1 — tenant LlmConfig (isDefault=True, isActive=True) — key decrypted
+#       Tier 2 — any active tenant LlmConfig row — key decrypted
+#       Tier 3 — public.global_llm_config (platform-managed) — key decrypted
+#     The pub_db session is still accepted for signature compatibility but
+#     get_default_llm_config opens its own sessions as needed.
+#     """
+#     from types import SimpleNamespace
+#     import json as _json
+
+#     try:
+#         from app.services.llm_service import get_default_llm_config
+
+#         # get_default_llm_config needs a tenant-schema session for Tier 1/2.
+#         # pub_db has search_path=public so it can only serve Tier 3.
+#         # Open a fresh session via the tenant-aware path instead.
+#         # We borrow the tenant schema from pub_db's info if available,
+#         # otherwise fall back to pub_db for Tier 3 only.
+#         cfg = await get_default_llm_config(pub_db)
+#         if cfg is None:
+#             return None
+
+#         # get_default_llm_config already returns a SimpleNamespace with
+#         # decrypted apiKey for tenant rows, or a fully resolved shim for
+#         # global rows. Normalise to the shape autopilot expects.
+#         raw_settings = getattr(cfg, "settings", None) or "{}"
+#         if isinstance(raw_settings, dict):
+#             settings_dict = raw_settings
+#         else:
+#             try:
+#                 settings_dict = _json.loads(raw_settings)
+#             except Exception:
+#                 settings_dict = {}
+
+#         return SimpleNamespace(
+#             id=getattr(cfg, "id", None),
+#             name=getattr(cfg, "name", ""),
+#             provider=cfg.provider,
+#             modelId=cfg.modelId,
+#             apiKey=cfg.apiKey,
+#             baseUrl=getattr(cfg, "baseUrl", None) or "",
+#             maxTokens=int(settings_dict.get("max_tokens", 1024)),
+#             temperature=float(settings_dict.get("temperature", 0.7)),
+#             isActive=getattr(cfg, "isActive", True),
+#             isDefault=getattr(cfg, "isDefault", False),
+#             settings=raw_settings if isinstance(raw_settings, str) else _json.dumps(settings_dict),
+#         )
+#     except Exception as exc:  # noqa: BLE001
+#         import structlog
+#         structlog.get_logger(__name__).error(
+#             "autopilot.router.llm_resolve_failed", error=str(exc)
+#         )
+#         return None
+
+async def _resolve_llm_config(pub_db: AsyncSession, schema_name: str | None = None):
+    """Resolve the best active LLM config using the standard 3-tier fallback.
+
+    FIX: Opens a tenant-schema session when schema_name is provided so
+    get_default_llm_config() can reach Tier 1/2 (tenant LlmConfig rows).
+    Previously only pub_db (search_path=public) was used, which can only
+    reach Tier 3 (public.global_llm_config) — empty for tenants who
+    configured their LLM via Settings → LLM Models.
+    """
     from types import SimpleNamespace
+    import json as _json
+    from sqlalchemy import text as _text
+    from app.core.database import AsyncSessionLocal
+    from app.services.llm_service import get_default_llm_config
 
     try:
-        from app.models.global_llm_config import GlobalLlmConfig
-        from app.services.secret_service import decrypt_at_rest
+        # Open a tenant-schema session so get_default_llm_config reaches
+        # the tenant LlmConfig table (Tier 1 / Tier 2).
+        if schema_name and schema_name != "public":
+            async with AsyncSessionLocal() as tenant_db:
+                await tenant_db.execute(
+                    _text(f'SET search_path TO "{schema_name}", public')
+                )
+                cfg = await get_default_llm_config(tenant_db)
+        else:
+            # No tenant schema available — try public only (Tier 3).
+            cfg = await get_default_llm_config(pub_db)
 
-        result = await pub_db.execute(
-            select(GlobalLlmConfig)
-            .where(GlobalLlmConfig.is_active.is_(True))
-            .where(GlobalLlmConfig.is_default.is_(True))
-            .limit(1)
-        )
-        row = result.scalar_one_or_none()
-
-        if row is None:
-            result = await pub_db.execute(
-                select(GlobalLlmConfig)
-                .where(GlobalLlmConfig.is_active.is_(True))
-                .order_by(GlobalLlmConfig.id)
-                .limit(1)
-            )
-            row = result.scalar_one_or_none()
-
-        if row is None:
+        if cfg is None:
             return None
 
-        api_key = decrypt_at_rest(row.api_key_encrypted)
+        raw_settings = getattr(cfg, "settings", None) or "{}"
+        if isinstance(raw_settings, dict):
+            settings_dict = raw_settings
+        else:
+            try:
+                settings_dict = _json.loads(raw_settings)
+            except Exception:
+                settings_dict = {}
 
         return SimpleNamespace(
-            id=row.id,
-            name=row.display_name,
-            provider=row.provider,
-            modelId=row.model_name,   # cast_llm_config() reads .modelId, not .model
-            apiKey=api_key,
-            baseUrl=row.base_url,
-            maxTokens=row.max_tokens,
-            temperature=row.temperature,
-            isActive=True,
-            isDefault=row.is_default,
-            settings=None,
+            id=getattr(cfg, "id", None),
+            name=getattr(cfg, "name", ""),
+            provider=cfg.provider,
+            modelId=cfg.modelId,
+            apiKey=cfg.apiKey,
+            baseUrl=getattr(cfg, "baseUrl", None) or "",
+            maxTokens=int(settings_dict.get("max_tokens", 1024)),
+            temperature=float(settings_dict.get("temperature", 0.7)),
+            isActive=getattr(cfg, "isActive", True),
+            isDefault=getattr(cfg, "isDefault", False),
+            settings=raw_settings if isinstance(raw_settings, str) else _json.dumps(settings_dict),
         )
     except Exception as exc:  # noqa: BLE001
         import structlog
@@ -777,7 +899,6 @@ async def _resolve_llm_config(pub_db: AsyncSession):
             "autopilot.router.llm_resolve_failed", error=str(exc)
         )
         return None
-
 
 @router.post(
     "",
@@ -795,7 +916,12 @@ async def enqueue_autopilot(
     Start an autopilot pipeline run in the background and return
     immediately. Poll GET /autopilot/{task_id} for the result.
     """
-    llm_cfg = await _resolve_llm_config(pub_db)
+    # llm_cfg = await _resolve_llm_config(pub_db)
+    _tenant = getattr(request.state, "tenant", None)
+    schema_name: str = (
+        getattr(_tenant, "schema_name", None) if _tenant else None
+    ) or "public"
+    llm_cfg = await _resolve_llm_config(pub_db, schema_name=schema_name)
     if llm_cfg is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

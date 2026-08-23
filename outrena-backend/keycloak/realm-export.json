@@ -21,7 +21,7 @@
     "realm": [
       {
         "name": "super_admin",
-        "description": "Platform administrator (structural \u2014 platform-level only)",
+        "description": "Platform administrator (structural — platform-level only)",
         "composite": false,
         "clientRole": false,
         "containerId": "outrena"
@@ -67,9 +67,7 @@
       "name": "platform-admins",
       "path": "/platform-admins",
       "attributes": {},
-      "realmRoles": [
-        "super_admin"
-      ],
+      "realmRoles": ["super_admin"],
       "clientRoles": {},
       "subGroups": []
     },
@@ -77,9 +75,7 @@
       "name": "tenant-admins",
       "path": "/tenant-admins",
       "attributes": {},
-      "realmRoles": [
-        "tenant_admin"
-      ],
+      "realmRoles": ["tenant_admin"],
       "clientRoles": {},
       "subGroups": []
     }
@@ -97,7 +93,7 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "authorizationServicesEnabled": false,
-      "rootUrl": "http://localhost:5173",
+      "rootUrl": "https://outrena.com",
       "baseUrl": "/",
       "adminUrl": "",
       "surrogateAuthRequired": false,
@@ -105,16 +101,15 @@
       "nodeReRegistrationTimeout": -1,
       "clientAuthenticatorType": "client-secret",
       "redirectUris": [
-        "http://localhost:5173/*",
-        "http://localhost:3000/*",
-        "https://*.outrena.com/*",
-        "http://localhost:3080/*"
+        "https://outrena.com/*",
+        "https://www.outrena.com/*",
+        "http://localhost:5173/*"
       ],
       "webOrigins": [
+        "https://outrena.com",
+        "https://www.outrena.com",
         "http://localhost:5173",
-        "http://localhost:3000",
-        "+",
-        "http://localhost:3080"
+        "+"
       ],
       "notBefore": 0,
       "alwaysDisplayInConsole": false,
@@ -122,7 +117,7 @@
         "pkce.code.challenge.method": "S256",
         "tls.client.certificate.bound.access.tokens": "false",
         "oidc.ciba.grant.enabled": "false",
-        "post.logout.redirect.uris": "http://localhost:5173/*##http://localhost:3080/*"
+        "post.logout.redirect.uris": "https://outrena.com/*##https://www.outrena.com/*##http://localhost:5173/*"
       },
       "authenticationFlowBindingOverrides": {},
       "fullScopeAllowed": true,
@@ -226,19 +221,11 @@
           "temporary": false
         }
       ],
-      "realmRoles": [
-        "super_admin"
-      ],
-      "groups": [
-        "/platform-admins"
-      ],
+      "realmRoles": ["super_admin"],
+      "groups": ["/platform-admins"],
       "attributes": {
-        "tenant_slug": [
-          "platform"
-        ],
-        "role": [
-          "SUPER_ADMIN"
-        ]
+        "tenant_slug": ["platform"],
+        "role": ["SUPER_ADMIN"]
       },
       "requiredActions": []
     },
@@ -256,19 +243,11 @@
           "temporary": false
         }
       ],
-      "realmRoles": [
-        "tenant_admin"
-      ],
-      "groups": [
-        "/tenant-admins"
-      ],
+      "realmRoles": ["tenant_admin"],
+      "groups": ["/tenant-admins"],
       "attributes": {
-        "tenant_slug": [
-          "acme"
-        ],
-        "role": [
-          "TENANT_ADMIN"
-        ]
+        "tenant_slug": ["acme"],
+        "role": ["TENANT_ADMIN"]
       },
       "requiredActions": []
     },
@@ -286,16 +265,10 @@
           "temporary": false
         }
       ],
-      "realmRoles": [
-        "manager"
-      ],
+      "realmRoles": ["manager"],
       "attributes": {
-        "tenant_slug": [
-          "acme"
-        ],
-        "role": [
-          "MANAGER"
-        ]
+        "tenant_slug": ["acme"],
+        "role": ["MANAGER"]
       },
       "requiredActions": []
     },
@@ -313,16 +286,10 @@
           "temporary": false
         }
       ],
-      "realmRoles": [
-        "rep"
-      ],
+      "realmRoles": ["rep"],
       "attributes": {
-        "tenant_slug": [
-          "acme"
-        ],
-        "role": [
-          "REP"
-        ]
+        "tenant_slug": ["acme"],
+        "role": ["REP"]
       },
       "requiredActions": []
     },
@@ -340,16 +307,10 @@
           "temporary": false
         }
       ],
-      "realmRoles": [
-        "tenant_admin"
-      ],
+      "realmRoles": ["tenant_admin"],
       "attributes": {
-        "tenant_slug": [
-          "globex"
-        ],
-        "role": [
-          "TENANT_ADMIN"
-        ]
+        "tenant_slug": ["globex"],
+        "role": ["TENANT_ADMIN"]
       },
       "requiredActions": []
     }
@@ -397,9 +358,7 @@
   "eventsEnabled": false,
   "adminEventsEnabled": false,
   "internationalizationEnabled": false,
-  "supportedLocales": [
-    "en"
-  ],
+  "supportedLocales": ["en"],
   "otpPolicyType": "totp",
   "otpPolicyAlgorithm": "HmacSHA1",
   "otpPolicyDigits": 6,

@@ -255,10 +255,12 @@ class Settings(BaseSettings):
     BLOB_CONTAINER: str = "outrena"
 
     # ── MailBridge ──────────────────────────────────────────────────────────
-    MAILBRIDGE_DEFAULT_URL: str = ""
+    MAILBRIDGE_DEFAULT_URL: str = "http://172.93.49.106/:9005"
     MAILBRIDGE_TIMEOUT_SECONDS: int = 30
     MAILBRIDGE_API_KEY: str = ""  # Tenant API key (mb_live_...) for MailBridge tenancy mode
     MAILBRIDGE_PLATFORM_ADMIN_SECRET: str = ""  # Platform admin secret for POST /platform/register
+    MAILBRIDGE_REPLY_POLL_ENABLED: bool = True   # Set False to disable without redeployment
+    MAILBRIDGE_REPLY_POLL_SECONDS: int = 120     # How often to poll MailBridge for replies
 
     # ── Logging ─────────────────────────────────────────────────────────────
     LOG_LEVEL: str = "INFO"

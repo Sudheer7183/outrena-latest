@@ -2599,7 +2599,7 @@ export function CampaignsPage() {
                   <div className="space-y-1"><Label className="text-xs">Display Name *</Label><Input placeholder="e.g. Gmail via MailBridge" value={mbForm.name} onChange={(e) => setMbForm((f) => ({ ...f, name: e.target.value }))} /></div>
                   <div className="space-y-1">
                     <Label className="text-xs">MailBridge Server URL *</Label>
-                    <Input placeholder="e.g. http://164.52.216.131:9000" value={mbForm.baseUrl} onChange={(e) => setMbForm((f) => ({ ...f, baseUrl: e.target.value }))} />
+                    <Input placeholder="e.g. http://172.93.49.106:9000" value={mbForm.baseUrl} onChange={(e) => setMbForm((f) => ({ ...f, baseUrl: e.target.value }))} />
                     <p className="text-xs text-muted-foreground">Base URL of your MailBridge FastAPI server (Swagger at /docs)</p>
                   </div>
                   <div className="space-y-1">

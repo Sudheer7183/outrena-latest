@@ -3455,6 +3455,107 @@ def get_model_for_task(task: str, config: LlmConfigModel) -> str:
     return config.modelId
 
 
+# async def get_default_llm_config(db: AsyncSession) -> LlmConfigModel | None:
+#     """
+#     Fetch the best available LLM config using a 3-tier fallback:
+
+#     Tier 1 — Tenant LlmConfig with isDefault=True and isActive=True.
+#     Tier 2 — Any active tenant LlmConfig row (first created).
+#     Tier 3 — public.global_llm_config (platform-managed key, Fernet-encrypted).
+#               Decrypts api_key_encrypted and returns a SimpleNamespace shim
+#               that satisfies the same interface as LlmConfigModel so call_llm()
+#               works without modification.
+
+#     FIX: Previously only queried the tenant LlmConfig table. When that table is
+#     empty (tenants who configured their LLM via Setup → LLM Models, which writes
+#     to public.global_llm_config), this function returned None and every LLM call
+#     failed with "no_llm_config". The fix adds Tier 3 as a transparent fallback.
+#     """
+#     # Tier 1: tenant default
+#     result = await db.execute(
+#         select(LlmConfigModel)
+#         .where(LlmConfigModel.isDefault.is_(True))
+#         .where(LlmConfigModel.isActive.is_(True))
+#         .order_by(LlmConfigModel.createdAt.asc())
+#         .limit(1)
+#     )
+#     row = result.scalar_one_or_none()
+#     if row is not None:
+#         return row
+
+#     # Tier 2: any active tenant config
+#     result = await db.execute(
+#         select(LlmConfigModel)
+#         .where(LlmConfigModel.isActive.is_(True))
+#         .order_by(LlmConfigModel.createdAt.asc())
+#         .limit(1)
+#     )
+#     row = result.scalar_one_or_none()
+#     if row is not None:
+#         return row
+
+#     # Tier 3: platform GlobalLlmConfig (public schema, Fernet-encrypted key).
+#     # Opens a fresh session locked to public schema so the SET search_path on
+#     # the tenant db session does not interfere.
+#     try:
+#         from types import SimpleNamespace
+#         from app.core.database import AsyncSessionLocal
+#         from app.models.global_llm_config import GlobalLlmConfig
+#         from app.services.secret_service import decrypt_at_rest
+#         from sqlalchemy import text as _text
+
+#         async with AsyncSessionLocal() as pub_db:
+#             await pub_db.execute(_text('SET search_path TO "public"'))
+
+#             # Prefer the row marked is_default; fall back to any active row
+#             g_result = await pub_db.execute(
+#                 select(GlobalLlmConfig)
+#                 .where(GlobalLlmConfig.is_active.is_(True))
+#                 .where(GlobalLlmConfig.is_default.is_(True))
+#                 .order_by(GlobalLlmConfig.id.asc())
+#                 .limit(1)
+#             )
+#             g_row = g_result.scalar_one_or_none()
+
+#             if g_row is None:
+#                 g_result = await pub_db.execute(
+#                     select(GlobalLlmConfig)
+#                     .where(GlobalLlmConfig.is_active.is_(True))
+#                     .order_by(GlobalLlmConfig.id.asc())
+#                     .limit(1)
+#                 )
+#                 g_row = g_result.scalar_one_or_none()
+
+#             if g_row is None:
+#                 return None
+
+#             # Decrypt the Fernet-encrypted API key
+#             try:
+#                 plaintext_key = decrypt_at_rest(g_row.api_key_encrypted)
+#             except Exception:
+#                 plaintext_key = g_row.api_key_encrypted  # already plaintext fallback
+
+#             # Return a SimpleNamespace shim that satisfies cast_llm_config()
+#             # which reads: provider, modelId, apiKey, baseUrl, settings, isActive
+#             return SimpleNamespace(
+#                 id=str(g_row.id),
+#                 name=g_row.display_name,
+#                 provider=g_row.provider,
+#                 modelId=g_row.model_name,
+#                 apiKey=plaintext_key,
+#                 baseUrl=g_row.base_url or "",
+#                 isDefault=g_row.is_default,
+#                 isActive=g_row.is_active,
+#                 settings={"max_tokens": g_row.max_tokens, "temperature": g_row.temperature},
+#                 modelTier="standard",
+#                 global_llm_config_id=g_row.id,
+#             )
+#     except Exception as exc:
+#         logger.warning("get_default_llm_config.global_fallback_failed", error=str(exc))
+#         return None
+
+
+
 async def get_default_llm_config(db: AsyncSession) -> LlmConfigModel | None:
     """
     Fetch the best available LLM config using a 3-tier fallback:
@@ -3466,11 +3567,50 @@ async def get_default_llm_config(db: AsyncSession) -> LlmConfigModel | None:
               that satisfies the same interface as LlmConfigModel so call_llm()
               works without modification.
 
-    FIX: Previously only queried the tenant LlmConfig table. When that table is
-    empty (tenants who configured their LLM via Setup → LLM Models, which writes
-    to public.global_llm_config), this function returned None and every LLM call
-    failed with "no_llm_config". The fix adds Tier 3 as a transparent fallback.
+    FIX: Tier 1 and Tier 2 now decrypt the Fernet-encrypted apiKey column
+    before returning — previously the raw ciphertext was passed directly to
+    the provider as a Bearer token, causing 401 Unauthorized on every call.
+    The tenant_service.test_llm path always decrypted correctly (it calls
+    decrypt_at_rest explicitly); this function was the only path that did not.
     """
+    from types import SimpleNamespace
+    from app.services.secret_service import decrypt_at_rest as _decrypt
+
+    def _tenant_row_to_shim(row: LlmConfigModel) -> SimpleNamespace:
+        """Wrap a tenant LlmConfig row in a SimpleNamespace with the API key
+        decrypted so call_llm() receives the plaintext key, not the ciphertext."""
+        import json as _json
+        raw_settings = row.settings
+        if isinstance(raw_settings, str):
+            try:
+                settings_dict = _json.loads(raw_settings)
+            except Exception:
+                settings_dict = {}
+        elif isinstance(raw_settings, dict):
+            settings_dict = raw_settings
+        else:
+            settings_dict = {}
+
+        try:
+            plaintext_key = _decrypt(row.apiKey) if row.apiKey else None
+        except Exception:
+            # If decryption fails the key was stored as plaintext (legacy rows).
+            plaintext_key = row.apiKey
+
+        return SimpleNamespace(
+            id=str(row.id),
+            name=row.name,
+            provider=row.provider,
+            modelId=row.modelId,
+            apiKey=plaintext_key,
+            baseUrl=row.baseUrl or "",
+            isDefault=row.isDefault,
+            isActive=row.isActive,
+            settings=_json.dumps(settings_dict),
+            modelTier=getattr(row, "modelTier", "standard"),
+            global_llm_config_id=getattr(row, "global_llm_config_id", None),
+        )
+
     # Tier 1: tenant default
     result = await db.execute(
         select(LlmConfigModel)
@@ -3481,7 +3621,7 @@ async def get_default_llm_config(db: AsyncSession) -> LlmConfigModel | None:
     )
     row = result.scalar_one_or_none()
     if row is not None:
-        return row
+        return _tenant_row_to_shim(row)
 
     # Tier 2: any active tenant config
     result = await db.execute(
@@ -3492,68 +3632,7 @@ async def get_default_llm_config(db: AsyncSession) -> LlmConfigModel | None:
     )
     row = result.scalar_one_or_none()
     if row is not None:
-        return row
-
-    # Tier 3: platform GlobalLlmConfig (public schema, Fernet-encrypted key).
-    # Opens a fresh session locked to public schema so the SET search_path on
-    # the tenant db session does not interfere.
-    try:
-        from types import SimpleNamespace
-        from app.core.database import AsyncSessionLocal
-        from app.models.global_llm_config import GlobalLlmConfig
-        from app.services.secret_service import decrypt_at_rest
-        from sqlalchemy import text as _text
-
-        async with AsyncSessionLocal() as pub_db:
-            await pub_db.execute(_text('SET search_path TO "public"'))
-
-            # Prefer the row marked is_default; fall back to any active row
-            g_result = await pub_db.execute(
-                select(GlobalLlmConfig)
-                .where(GlobalLlmConfig.is_active.is_(True))
-                .where(GlobalLlmConfig.is_default.is_(True))
-                .order_by(GlobalLlmConfig.id.asc())
-                .limit(1)
-            )
-            g_row = g_result.scalar_one_or_none()
-
-            if g_row is None:
-                g_result = await pub_db.execute(
-                    select(GlobalLlmConfig)
-                    .where(GlobalLlmConfig.is_active.is_(True))
-                    .order_by(GlobalLlmConfig.id.asc())
-                    .limit(1)
-                )
-                g_row = g_result.scalar_one_or_none()
-
-            if g_row is None:
-                return None
-
-            # Decrypt the Fernet-encrypted API key
-            try:
-                plaintext_key = decrypt_at_rest(g_row.api_key_encrypted)
-            except Exception:
-                plaintext_key = g_row.api_key_encrypted  # already plaintext fallback
-
-            # Return a SimpleNamespace shim that satisfies cast_llm_config()
-            # which reads: provider, modelId, apiKey, baseUrl, settings, isActive
-            return SimpleNamespace(
-                id=str(g_row.id),
-                name=g_row.display_name,
-                provider=g_row.provider,
-                modelId=g_row.model_name,
-                apiKey=plaintext_key,
-                baseUrl=g_row.base_url or "",
-                isDefault=g_row.is_default,
-                isActive=g_row.is_active,
-                settings={"max_tokens": g_row.max_tokens, "temperature": g_row.temperature},
-                modelTier="standard",
-                global_llm_config_id=g_row.id,
-            )
-    except Exception as exc:
-        logger.warning("get_default_llm_config.global_fallback_failed", error=str(exc))
-        return None
-
+        return _tenant_row_to_shim(row)
 
 # ── Provider URL + header builders ──────────────────────────────────────────
 
@@ -3585,6 +3664,25 @@ def _provider_chat_url(provider: str, kwargs: dict[str, Any]) -> str:
     return f"{base}/chat/completions"
 
 
+# def _provider_headers(provider: str, kwargs: dict[str, Any]) -> dict[str, str]:
+#     """Return provider-specific auth headers (Content-Type added by caller)."""
+#     api_key = kwargs.get("api_key") or ""
+#     if provider == PROVIDER_ANTHROPIC:
+#         return {
+#             "x-api-key": api_key,
+#             "anthropic-version": kwargs["extra"].get(
+#                 "anthropic_version", _ANTHROPIC_VERSION_DEFAULT
+#             ),
+#         }
+#     if provider == PROVIDER_GEMINI:
+#         return {"x-goog-api-key": api_key}
+#     if provider == PROVIDER_AZURE:
+#         # Azure uses api-key header (not Bearer)
+#         return {"api-key": api_key}
+#     return {"Authorization": f"Bearer {api_key}"}
+
+
+
 def _provider_headers(provider: str, kwargs: dict[str, Any]) -> dict[str, str]:
     """Return provider-specific auth headers (Content-Type added by caller)."""
     api_key = kwargs.get("api_key") or ""
@@ -3600,8 +3698,12 @@ def _provider_headers(provider: str, kwargs: dict[str, Any]) -> dict[str, str]:
     if provider == PROVIDER_AZURE:
         # Azure uses api-key header (not Bearer)
         return {"api-key": api_key}
+    # FIX: key-optional providers (Ollama/local, ZAI built-in) send no
+    # Authorization header when api_key is empty — sending "Bearer " with
+    # an empty token produces an illegal header value that httpx rejects.
+    if not api_key and provider in (PROVIDER_LOCAL, PROVIDER_ZAI):
+        return {}
     return {"Authorization": f"Bearer {api_key}"}
-
 
 # ── Payload builders (per-provider) ─────────────────────────────────────────
 
