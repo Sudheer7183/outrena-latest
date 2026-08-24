@@ -1,5 +1,7 @@
 
 
+
+
 # """
 # campaigns.py — Phase 2 /api/v1/campaigns router.
 
@@ -741,8 +743,6 @@
 
 # __all__ = ["router"]
 
-
-
 """
 campaigns.py — Phase 2 /api/v1/campaigns router.
 
@@ -846,6 +846,14 @@ async def _generate_touch_content(
     campaign,
     icp,
     framework_override: str | None,
+    sender_first_name: str | None = None,
+    sender_last_name: str | None = None,
+    sender_title_override: str | None = None,
+    sender_company_override: str | None = None,
+    sender_offer_override: str | None = None,
+    sender_signature: str | None = None,
+    unsubscribe_url: str | None = "{{unsubscribe_url}}",
+    physical_address: str | None = None,
 ) -> tuple[str, str, int]:
     """
     Call the tenant's configured LLM to write one email touch.
@@ -895,28 +903,49 @@ async def _generate_touch_content(
             else f"Buying signal: {first.get('signal') or str(first)}"
         )
 
-    # Sender / ICP context
-    sender_role    = (getattr(icp, "senderRole",    None) if icp else None) or getattr(campaign, "senderRole",    None) or "Account Executive"
-    sender_company = (getattr(icp, "senderCompany", None) if icp else None) or getattr(campaign, "senderCompany", None) or "our company"
-    sender_offer   = (getattr(icp, "senderOffer",   None) if icp else None) or ""
+    # Sender / ICP context — profile fields from the logged-in rep take
+    # priority; fall back to campaign/ICP fields, then hardcoded defaults.
+    sender_role    = sender_title_override \
+                     or (getattr(icp, "senderRole",    None) if icp else None) \
+                     or getattr(campaign, "senderRole",    None) \
+                     or "Account Executive"
+    sender_company = sender_company_override \
+                     or (getattr(icp, "senderCompany", None) if icp else None) \
+                     or getattr(campaign, "senderCompany", None) \
+                     or "our company"
+    sender_offer   = sender_offer_override \
+                     or (getattr(icp, "senderOffer",   None) if icp else None) \
+                     or ""
     proof_metric   = (getattr(icp, "proofMetric",   None) if icp else None) or ""
     persona_desc   = (getattr(icp, "persona",       None) if icp else None) or ""
 
+    # Resolve sender display name — use real name from profile if available.
+    sender_display = " ".join(
+        part for part in [sender_first_name, sender_last_name] if part
+    ).strip() or "the sender"
+
+    prospect_first = (prospect.firstName or "there").strip()
+
     system_msg = (
         "You are an expert B2B cold email copywriter. "
-        "Respond ONLY with a valid JSON object — no markdown fences, no preamble, no explanation."
+        "Respond ONLY with a valid JSON object — no markdown fences, no preamble, no explanation. "
+        "CRITICAL: Never output placeholder tokens such as {{first_name}}, [Your Name], "
+        "[Company], {{unsubscribe_url}}, or any bracketed/handlebars variable. "
+        "Use only the actual names and values provided in the prompt."
     )
 
     user_msg = f"""Write touch #{seq.touchNumber} of a 7-touch cold email sequence.
 
 PROSPECT
-  Name: {p_name}
+  First name (use this in the greeting — write it literally, do NOT write {{{{first_name}}}}): {prospect_first}
+  Full name: {p_name}
   Title: {p_title}
   Company: {p_company}
   Seniority: {p_seniority}
   {signal_text}
 
 SENDER
+  Full name (sign off with this name — do NOT write [Your Name]): {sender_display}
   Role: {sender_role}
   Company: {sender_company}
   Offer: {sender_offer}
@@ -933,7 +962,7 @@ TOUCH INSTRUCTIONS
 Return JSON with exactly these four keys:
 {{
   "subject": "subject line under 60 characters, no ALL CAPS",
-  "body": "email body — {word_limit} words max, plain text, merge fields like {{{{first_name}}}} are allowed",
+  "body": "email body — {word_limit} words max, plain text, NO placeholder tokens — use the real names above",
   "qa_score": integer 0-100,
   "personalisation_confidence": float 0.0-1.0
 }}"""
@@ -954,6 +983,26 @@ Return JSON with exactly these four keys:
         subject   = str(data.get("subject", "")).strip()
         body_copy = str(data.get("body", "")).strip()
         qa_score  = int(data.get("qa_score", 70))
+
+        # ── Append signature block ────────────────────────────────────────────
+        # The LLM writes the email body only. The rep's saved signature is
+        # appended verbatim so it is consistent across all touches and never
+        # needs to be typed in the prompt (which would inflate token count).
+        if sender_signature and sender_signature.strip():
+            body_copy = f"{body_copy}\n\n{sender_signature.strip()}"
+
+        # ── Append CAN-SPAM footer ────────────────────────────────────────────
+        # {{unsubscribe_url}} is replaced by MailBridge at actual send time.
+        # physicalAddress satisfies CAN-SPAM §5(a)(5).
+        if unsubscribe_url:
+            footer_parts = [
+                "---",
+                f"To unsubscribe from future emails, click here: {unsubscribe_url}",
+            ]
+            if physical_address and physical_address.strip():
+                footer_parts.append(physical_address.strip())
+            body_copy = f"{body_copy}\n\n" + "\n".join(footer_parts)
+
         return subject, body_copy, qa_score
     except asyncio.TimeoutError:
         _sl.get_logger(__name__).warning(
@@ -980,11 +1029,32 @@ class _GenerateSequencesBody(BaseModel):
 
     prospectId — when supplied, generate only for this specific prospect.
     framework  — override the sequence framework (optional).
-    All extra fields sent by the frontend are silently ignored.
+
+    Sender profile fields — passed by the frontend from the logged-in rep's
+    profile (GET /users/me/profile). Used to personalise the LLM prompt so
+    generated emails contain the rep's real name, signature, and CAN-SPAM footer
+    instead of [Your Name] / {{first_name}} placeholders.
     """
     model_config = {"extra": "ignore"}
     prospectId: str | None = None
     framework: str | None = None
+    # Sender identity (from UserProfile stored in auth context)
+    senderFirstName: str | None = None
+    senderLastName: str | None = None
+    senderTitle: str | None = None
+    senderCompany: str | None = None
+    senderOffer: str | None = None
+    # Signature block appended verbatim after the LLM body
+    senderSignature: str | None = None
+    # CAN-SPAM footer fields
+    unsubscribeUrl: str | None = "{{unsubscribe_url}}"
+    physicalAddress: str | None = None
+    # Legacy fields from campaign-level sender config (still accepted)
+    senderRole: str | None = None
+    proofMetric: str | None = None
+    seniority: str | None = None
+    signals: list | None = None
+    llmConfigId: str | None = None
 
 
 # ── Static routes (declared BEFORE /{campaign_id} per Pitfall #7) ───────────
@@ -1452,6 +1522,14 @@ async def generate_sequences(
                 campaign=campaign,
                 icp=icp,
                 framework_override=body.framework,
+                sender_first_name=body.senderFirstName,
+                sender_last_name=body.senderLastName,
+                sender_title_override=body.senderTitle,
+                sender_company_override=body.senderCompany,
+                sender_offer_override=body.senderOffer,
+                sender_signature=body.senderSignature,
+                unsubscribe_url=body.unsubscribeUrl or "{{unsubscribe_url}}",
+                physical_address=body.physicalAddress,
             )
 
             if subject or body_copy:

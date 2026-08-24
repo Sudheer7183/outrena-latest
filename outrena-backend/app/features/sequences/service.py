@@ -718,7 +718,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 import structlog
-from sqlalchemy import select
+# from sqlalchemy import select
+# from sqlalchemy.orm import selectinload
+# from sqlalchemy.ext.asyncio import AsyncSession
+
+from fastapi import HTTPException, status as http_status
+from sqlalchemy import select, text
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -957,11 +962,112 @@ class SequenceService:
         # Fall back to seq.owner_user_id only if it is a real user UUID
         # (not "system"). Never pass "system" to MailBridge — it skips
         # per-user routing and sends from the tenant's default mailbox.
+        # seq_owner = getattr(seq, "owner_user_id", None)
+        # effective_user_id = (
+        #     caller_user_id
+        #     or (seq_owner if seq_owner and seq_owner != "system" else None)
+        # )
+
+        # # send() never commits on this db session — all side effects use
+        # # isolated AsyncSessionLocal() sessions internally.
+        # result = await self._mailbridge.send(
+        #     db=db,
+        #     to=to_email,
+        #     subject=seq.subjectLine or "",
+        #     body=seq.bodyCopy or "",
+        #     sequence_id=sequence_id,
+        #     config_id=campaign.domainId if campaign else None,
+        #     user_id=effective_user_id,
+        # )
+
         seq_owner = getattr(seq, "owner_user_id", None)
         effective_user_id = (
             caller_user_id
             or (seq_owner if seq_owner and seq_owner != "system" else None)
         )
+
+        # ── Domain warming gate (mirrors scheduler/_send_via_mailbridge) ──
+        # Resolve the MailBridgeConfig for this user, then check the Domain
+        # it points to — same three checks the scheduler runs on every tick.
+        # body.force=true (MANAGER only) bypasses all three gates so admins
+        # can override for testing or urgent manual sends.
+        if not body.force:
+            from app.features.mailbridge.service import MailBridgeService
+            from app.models.config_models import Domain as _Domain, MailBridgeConfig as _MBConfig
+
+            mb_config = await MailBridgeService._resolve_config(
+                db, None, user_id=effective_user_id
+            )
+            if mb_config is not None and getattr(mb_config, "domainId", None):
+                dom_result = await db.execute(
+                    select(_Domain).where(_Domain.id == mb_config.domainId)
+                )
+                dom = dom_result.scalar_one_or_none()
+
+                # Gate 1 — DNS verification
+                if dom is not None and dom.lastChecked is not None:
+                    failing = [
+                        name for name, ok in (
+                            ("SPF", dom.spfStatus),
+                            ("DKIM", dom.dkimStatus),
+                            ("DMARC", dom.dmarcStatus),
+                        ) if not ok
+                    ]
+                    if failing:
+                        raise HTTPException(
+                            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=(
+                                f"DNS verification failing for domain "
+                                f"'{dom.domainName}': {', '.join(failing)}. "
+                                "Fix the DNS records and re-verify in "
+                                "Setup → Domains before sending."
+                            ),
+                        )
+
+                # Gate 2 — warming week
+                if dom is not None:
+                    week = int(getattr(dom, "warmingWeek", 0) or 0)
+                    if 1 <= week < 2:
+                        raise HTTPException(
+                            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=(
+                                f"Domain '{dom.domainName}' has only completed "
+                                f"{week} week(s) of warm-up. Click 'Auto-warm' "
+                                "on Setup → Domains to advance to Week 2 before "
+                                "sending."
+                            ),
+                        )
+
+                # Gate 3 — daily cap
+                if dom is not None:
+                    _WARMUP_RAMP: dict[int, int] = {
+                        1: 10, 2: 30, 3: 50, 4: 100, 5: 200, 6: 350, 7: 500
+                    }
+                    week = int(getattr(dom, "warmingWeek", 0) or 0)
+                    base = int(getattr(dom, "dailySendLimit", 0) or 0) or 10_000
+                    effective_cap = min(base, _WARMUP_RAMP[week]) if 1 <= week <= 7 else base
+                    sent_today = (
+                        await db.execute(
+                            text(
+                                'SELECT COUNT(*) FROM "Sequence" s '
+                                'JOIN "Campaign" c ON c.id = s."campaignId" '
+                                'WHERE c."domainId" = :dom_id '
+                                "  AND s.\"sentAt\" >= date_trunc('day', now())"
+                            ),
+                            {"dom_id": dom.id},
+                        )
+                    ).scalar() or 0
+                    if int(sent_today) >= effective_cap:
+                        raise HTTPException(
+                            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=(
+                                f"Daily warm-up cap reached for domain "
+                                f"'{dom.domainName}' "
+                                f"({sent_today}/{effective_cap} emails, "
+                                f"Week {dom.warmingWeek}). "
+                                "Remaining sends will go out tomorrow."
+                            ),
+                        )
 
         # send() never commits on this db session — all side effects use
         # isolated AsyncSessionLocal() sessions internally.
@@ -971,7 +1077,7 @@ class SequenceService:
             subject=seq.subjectLine or "",
             body=seq.bodyCopy or "",
             sequence_id=sequence_id,
-            config_id=campaign.domainId if campaign else None,
+            config_id=None,  # FIX: campaign.domainId is a Domain PK, not a MailBridgeConfig PK.
             user_id=effective_user_id,
         )
 
