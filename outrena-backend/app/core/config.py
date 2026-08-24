@@ -255,7 +255,7 @@ class Settings(BaseSettings):
     BLOB_CONTAINER: str = "outrena"
 
     # ── MailBridge ──────────────────────────────────────────────────────────
-    MAILBRIDGE_DEFAULT_URL: str = "http://172.93.49.106/:9005"
+    MAILBRIDGE_DEFAULT_URL: str = "http://172.93.49.106:9005"
     MAILBRIDGE_TIMEOUT_SECONDS: int = 30
     MAILBRIDGE_API_KEY: str = ""  # Tenant API key (mb_live_...) for MailBridge tenancy mode
     MAILBRIDGE_PLATFORM_ADMIN_SECRET: str = ""  # Platform admin secret for POST /platform/register

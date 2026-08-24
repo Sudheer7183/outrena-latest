@@ -1,3 +1,5 @@
+
+
 // import { useState, useCallback } from 'react';
 // import { useQuery } from '@tanstack/react-query';
 // import {
@@ -14,6 +16,7 @@
 // import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 // import { toast } from 'sonner';
 // import { http } from '@/services/apiClient';
+// import { useAuth } from '@/context/AuthContext';
 
 // // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -124,6 +127,9 @@
 // // ─── Component ────────────────────────────────────────────────────────────────
 
 // export function SequencesPage() {
+//   // ── Auth / profile ───────────────────────────────────────────────────────
+//   const { profile } = useAuth();
+
 //   // ── Server state ────────────────────────────────────────────────────────
 //   const { data: campaignsRaw, isLoading: cLoading } = useQuery({
 //     queryKey: ['campaigns', { page: 1, pageSize: 100 }],
@@ -173,9 +179,10 @@
 //         // Ignore — prospect may already be linked
 //       });
 
-//       // Step 2: trigger generation
-//       // Backend returns { message, created, restamped, prospects } — not the sequences themselves
-//       // It generates and stores in DB; we must fetch separately
+//       // Step 2: trigger generation — include sender profile fields so the
+//       // backend LLM prompt can personalise the signature and sign-off.
+//       // Fields are optional: if the user has not filled in their profile,
+//       // the backend falls back gracefully to its existing placeholder text.
 //       await http.post(
 //         `/api/v1/campaigns/${selectedCampaignId}/generate-sequences`,
 //         {
@@ -183,11 +190,25 @@
 //           framework,
 //           llmConfigId:   selectedCampaign?.llmConfigId ?? null,
 //           senderRole:    selectedCampaign?.senderRole,
-//           senderCompany: selectedCampaign?.senderCompany,
-//           senderOffer:   selectedCampaign?.senderOffer,
+//           senderCompany: selectedCampaign?.senderCompany ?? profile?.senderCompany,
+//           senderOffer:   selectedCampaign?.senderOffer   ?? profile?.senderOffer,
 //           proofMetric:   selectedCampaign?.proofMetric,
 //           seniority:     selectedProspect?.seniority,
 //           signals:       parseSignals(selectedProspect?.signals),
+
+//           // ── Personalisation fields from the logged-in rep's profile ──────
+//           // These were the missing fields causing [Your Name] placeholders.
+//           senderFirstName:  profile?.firstName  ?? undefined,
+//           senderLastName:   profile?.lastName   ?? undefined,
+//           senderTitle:      profile?.senderTitle ?? undefined,
+
+//           // Signature block appended verbatim after the LLM body
+//           senderSignature:  profile?.emailSignature ?? undefined,
+
+//           // CAN-SPAM footer — {{unsubscribe_url}} is replaced by MailBridge
+//           // at actual send time; physicalAddress satisfies §5(a)(5).
+//           unsubscribeUrl:   "{{unsubscribe_url}}",
+//           physicalAddress:  profile?.physicalAddress ?? undefined,
 //         },
 //       );
 
@@ -237,7 +258,7 @@
 //     } catch (err: unknown) {
 //       toast.error(err instanceof Error ? err.message : 'Generation failed');
 //     } finally { setGenerating(false); }
-//   }, [selectedCampaignId, selectedProspectId, framework, selectedCampaign, selectedProspect]);
+//   }, [selectedCampaignId, selectedProspectId, framework, selectedCampaign, selectedProspect, profile]);
 
 //   const handleSave = useCallback(async (seq: Sequence) => {
 //     setSavingId(seq.id);
@@ -306,6 +327,15 @@
 
 //   const handleSendNow = useCallback(async (seq: Sequence, index: number) => {
 //     setSendingId(seq.id);
+//     // try {
+//     //   await http.post(`/api/v1/sequences/${seq.id}/send-email`, {});
+//     //   const updated = [...sequences];
+//     //   updated[index] = { ...updated[index], status: 'Sent' };
+//     //   setSequences(updated);
+//     //   toast.success(`Touch ${seq.touchNumber} sent`);
+//     // } catch (err: unknown) {
+//     //   toast.error(err instanceof Error ? err.message : 'Send failed');
+//     // } finally { setSendingId(null); }
 //     try {
 //       await http.post(`/api/v1/sequences/${seq.id}/send-email`, {});
 //       const updated = [...sequences];
@@ -313,7 +343,13 @@
 //       setSequences(updated);
 //       toast.success(`Touch ${seq.touchNumber} sent`);
 //     } catch (err: unknown) {
-//       toast.error(err instanceof Error ? err.message : 'Send failed');
+//       // Extract FastAPI detail string (warming gate, DNS gate, etc.) if present.
+//       // AxiosError.message is generic ("Request failed with status 422") — the
+//       // actual human-readable reason is in error.response.data.detail.
+//       const detail =
+//         (err as { response?: { data?: { detail?: string } } })
+//           ?.response?.data?.detail;
+//       toast.error(detail ?? (err instanceof Error ? err.message : 'Send failed'));
 //     } finally { setSendingId(null); }
 //   }, [sequences]);
 
@@ -376,6 +412,21 @@
 //             Generate 7-touch email sequences with escalating cadence
 //           </p>
 //         </div>
+
+//         {/* Profile status indicator — shown when profile is missing fields */}
+//         {(!profile?.emailSignature || !profile?.firstName) && (
+//           <div className="flex items-center gap-1.5 text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+//             <AlertCircle className="h-3 w-3 shrink-0" />
+//             <span>
+//               Complete your{' '}
+//               <a href="/settings/profile" className="underline underline-offset-2">
+//                 profile &amp; signature
+//               </a>{' '}
+//               for personalised emails
+//             </span>
+//           </div>
+//         )}
+
 //         <div className="flex gap-2 flex-wrap">
 //           <TBtn
 //             variant="outline"
@@ -736,8 +787,8 @@
 import { useState, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
-  Layers, Loader2, CheckCircle2, Copy, FileDown, FileText,
-  ChevronDown, ChevronUp, Save, Send, AlertCircle,
+  Layers, Loader2, Copy, FileDown, FileText,
+  ChevronDown, ChevronUp, Save, Send, AlertCircle, Clock,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -750,9 +801,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { toast } from 'sonner';
 import { http } from '@/services/apiClient';
 import { useAuth } from '@/context/AuthContext';
-
+ 
 // ─── Types ───────────────────────────────────────────────────────────────────
-
+ 
 interface Campaign {
   id: string;
   name: string;
@@ -764,7 +815,7 @@ interface Campaign {
   senderOffer?: string | null;
   proofMetric?: string | null;
 }
-
+ 
 interface Prospect {
   id: string;
   firstName: string;
@@ -775,7 +826,7 @@ interface Prospect {
   signals?: string | null;
   icpProfileId?: string | null;
 }
-
+ 
 interface Sequence {
   id: string;
   campaignId: string;
@@ -793,14 +844,14 @@ interface Sequence {
   flagForManualReview?: boolean;
   sentAt?: string | null;
 }
-
+ 
 // ─── Constants ────────────────────────────────────────────────────────────────
-
+ 
 const WORD_LIMITS: Record<string, number> = {
   FirstTouch: 150, NewEvidence: 120, DifferentPain: 120,
   IndustryInsight: 120, DirectQuestion: 80, Breakup: 60,
 };
-
+ 
 const TOUCH_INFO = [
   { touch: 1, day: 'Day 1',  angle: 'First Touch',       words: 150, color: 'border-blue-200',    desc: 'The opener. References a specific signal or trigger event. Establishes relevance immediately — no generic intros.' },
   { touch: 2, day: 'Day 3',  angle: 'New Evidence',      words: 120, color: 'border-cyan-200',    desc: 'Follows up with a new data point or case study. Introduces social proof or a metric the prospect cares about.' },
@@ -810,34 +861,34 @@ const TOUCH_INFO = [
   { touch: 6, day: 'Day 24', angle: 'Breakup',           words: 60,  color: 'border-rose-200',    desc: 'The "breakup" email. Polite sign-off that creates urgency. Often gets the highest reply rate. Max 60 words.' },
   { touch: 7, day: 'Day 30', angle: 'Breakup (LinkedIn)', words: 60, color: 'border-pink-200',    desc: 'LinkedIn follow-up breakup. Same tone, adapted for the LinkedIn channel.' },
 ];
-
+ 
 const STATUS_COLORS: Record<string, string> = {
-  Draft: 'bg-muted text-muted-foreground',
-  QaPassed: 'bg-emerald-100 text-emerald-700 border-emerald-200',
-  Sent: 'bg-blue-100 text-blue-700 border-blue-200',
+  Draft:     'bg-muted text-muted-foreground',
+  QaPassed:  'bg-emerald-100 text-emerald-700 border-emerald-200',
+  Sent:      'bg-blue-100 text-blue-700 border-blue-200',
   Scheduled: 'bg-amber-100 text-amber-700 border-amber-200',
 };
-
+ 
 // ─── Helper ───────────────────────────────────────────────────────────────────
-
+ 
 function normalise<T>(data: unknown): T[] {
   if (!data) return [];
   if (Array.isArray(data)) return data as T[];
   const p = data as { items?: T[] };
   return Array.isArray(p.items) ? p.items : [];
 }
-
+ 
 function parseSignals(signals: string | null | undefined): unknown[] {
   try { return signals ? (JSON.parse(signals) as unknown[]) : []; }
   catch { return []; }
 }
-
+ 
 function wordCount(text: string | null | undefined): number {
   return (text ?? '').split(/\s+/).filter(Boolean).length;
 }
-
+ 
 // ─── Inline Tooltip Button ────────────────────────────────────────────────────
-
+ 
 function TBtn({
   children, tooltip, disabled, onClick, size = 'sm', variant = 'outline', className = '',
 }: {
@@ -856,13 +907,13 @@ function TBtn({
     </Tooltip>
   );
 }
-
+ 
 // ─── Component ────────────────────────────────────────────────────────────────
-
+ 
 export function SequencesPage() {
   // ── Auth / profile ───────────────────────────────────────────────────────
   const { profile } = useAuth();
-
+ 
   // ── Server state ────────────────────────────────────────────────────────
   const { data: campaignsRaw, isLoading: cLoading } = useQuery({
     queryKey: ['campaigns', { page: 1, pageSize: 100 }],
@@ -874,10 +925,10 @@ export function SequencesPage() {
     queryFn: () => http.get<unknown>('/api/v1/prospects', { page: 1, page_size: 200 }),
     staleTime: 30_000,
   });
-
-  const campaigns  = normalise<Campaign>(campaignsRaw);
-  const prospects  = normalise<Prospect>(prospectsRaw);
-
+ 
+  const campaigns = normalise<Campaign>(campaignsRaw);
+  const prospects = normalise<Prospect>(prospectsRaw);
+ 
   // ── UI state ────────────────────────────────────────────────────────────
   const [selectedCampaignId, setSelectedCampaignId] = useState('');
   const [selectedProspectId, setSelectedProspectId] = useState('');
@@ -888,13 +939,13 @@ export function SequencesPage() {
   const [sendingId, setSendingId]                   = useState<string | null>(null);
   const [showExplain, setShowExplain]               = useState(false);
   const [exportingCsv, setExportingCsv]             = useState(false);
-
+ 
   // ── Derived ─────────────────────────────────────────────────────────────
   const selectedCampaign = campaigns.find((c) => c.id === selectedCampaignId) ?? null;
   const selectedProspect = prospects.find((p) => p.id === selectedProspectId) ?? null;
-
-  // ── Handlers ─────────────────────────────────────────────────────────────
-
+ 
+  // ── Handlers ──────────────────────────────────────────────────────────────
+ 
   const handleGenerate = useCallback(async () => {
     if (!selectedCampaignId || !selectedProspectId) {
       toast.error('Select a campaign and prospect first');
@@ -903,19 +954,12 @@ export function SequencesPage() {
     setGenerating(true);
     setSequences([]);
     try {
-      // Step 1: ensure prospect is linked to campaign (backend requires this)
       await http.post('/api/v1/campaigns/campaign-prospects', {
         campaignId:  selectedCampaignId,
         prospectIds: [selectedProspectId],
         action:      'add',
-      }).catch(() => {
-        // Ignore — prospect may already be linked
-      });
-
-      // Step 2: trigger generation — include sender profile fields so the
-      // backend LLM prompt can personalise the signature and sign-off.
-      // Fields are optional: if the user has not filled in their profile,
-      // the backend falls back gracefully to its existing placeholder text.
+      }).catch(() => {});
+ 
       await http.post(
         `/api/v1/campaigns/${selectedCampaignId}/generate-sequences`,
         {
@@ -928,30 +972,15 @@ export function SequencesPage() {
           proofMetric:   selectedCampaign?.proofMetric,
           seniority:     selectedProspect?.seniority,
           signals:       parseSignals(selectedProspect?.signals),
-
-          // ── Personalisation fields from the logged-in rep's profile ──────
-          // These were the missing fields causing [Your Name] placeholders.
-          senderFirstName:  profile?.firstName  ?? undefined,
-          senderLastName:   profile?.lastName   ?? undefined,
-          senderTitle:      profile?.senderTitle ?? undefined,
-
-          // Signature block appended verbatim after the LLM body
-          senderSignature:  profile?.emailSignature ?? undefined,
-
-          // CAN-SPAM footer — {{unsubscribe_url}} is replaced by MailBridge
-          // at actual send time; physicalAddress satisfies §5(a)(5).
-          unsubscribeUrl:   "{{unsubscribe_url}}",
-          physicalAddress:  profile?.physicalAddress ?? undefined,
+          senderFirstName: profile?.firstName  ?? undefined,
+          senderLastName:  profile?.lastName   ?? undefined,
+          senderTitle:     profile?.senderTitle ?? undefined,
+          senderSignature: profile?.emailSignature ?? undefined,
+          unsubscribeUrl:  '{{unsubscribe_url}}',
+          physicalAddress: profile?.physicalAddress ?? undefined,
         },
       );
-
-      // Step 3: fetch the sequences from DB (generation stores, doesn't return them)
-      // QUERY-PARAM CASING FIX: the backend's GET /api/v1/sequences route
-      // declares `campaign_id` / `prospect_id` (snake_case, no alias) —
-      // sending camelCase here was silently ignored by FastAPI, so this
-      // call was returning ALL sequences (unfiltered) instead of just this
-      // prospect's 7 touches. That's why generating for one prospect
-      // appeared to show sequences belonging to many other prospects too.
+ 
       const fetched = await http.get<unknown>(
         '/api/v1/sequences',
         { campaign_id: selectedCampaignId, prospect_id: selectedProspectId, limit: 50 },
@@ -959,17 +988,8 @@ export function SequencesPage() {
       const seqs: Sequence[] = Array.isArray(fetched)
         ? fetched
         : ((fetched as { items?: Sequence[] }).items ?? []);
-
+ 
       if (seqs.length === 0) {
-        // Sequences may already exist — retry with the campaign filter
-        // only (still correctly snake_case), then filter to this prospect
-        // CLIENT-SIDE ourselves. Previously, if that client-side filter
-        // also came back empty, this fell back to showing the ENTIRE
-        // campaign's unfiltered sequences — which is exactly how
-        // generating for one prospect could appear to show touches
-        // belonging to several other prospects. That unsafe fallback is
-        // removed: if we truly can't find this prospect's sequences, we
-        // show nothing rather than showing someone else's.
         const all = await http.get<unknown>(
           '/api/v1/sequences',
           { campaign_id: selectedCampaignId, limit: 50 },
@@ -992,7 +1012,7 @@ export function SequencesPage() {
       toast.error(err instanceof Error ? err.message : 'Generation failed');
     } finally { setGenerating(false); }
   }, [selectedCampaignId, selectedProspectId, framework, selectedCampaign, selectedProspect, profile]);
-
+ 
   const handleSave = useCallback(async (seq: Sequence) => {
     setSavingId(seq.id);
     try {
@@ -1006,7 +1026,11 @@ export function SequencesPage() {
       toast.error(err instanceof Error ? err.message : 'Save failed');
     } finally { setSavingId(null); }
   }, []);
-
+ 
+  // FIX: Approve now also calls /scheduled-send so the APScheduler picks up
+  // the sequence automatically. Without this, sequences stayed in QaPassed
+  // forever and the scheduler (which only queries status=Scheduled) never
+  // had anything to send.
   const handleApprove = useCallback(async (seq: Sequence, index: number) => {
     const wc = wordCount(seq.bodyCopy);
     const limit = WORD_LIMITS[seq.angle] ?? 150;
@@ -1021,15 +1045,18 @@ export function SequencesPage() {
         bodyCopy:    seq.bodyCopy,
         status:      'QaPassed',
       });
+      // Move to Scheduled so the APScheduler tick picks it up automatically.
+      await http.post(`/api/v1/sequences/${seq.id}/scheduled-send`, {});
       const updated = [...sequences];
-      updated[index] = { ...updated[index], status: 'QaPassed' };
+      updated[index] = { ...updated[index], status: 'Scheduled' };
       setSequences(updated);
-      toast.success(`Touch ${seq.touchNumber} approved`);
+      toast.success(`Touch ${seq.touchNumber} approved & scheduled`);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Approve failed');
     } finally { setSavingId(null); }
   }, [sequences]);
-
+ 
+  // FIX: Approve All also schedules every touch in one pass.
   const handleApproveAll = useCallback(async () => {
     for (let i = 0; i < sequences.length; i++) {
       const seq = sequences[i];
@@ -1042,6 +1069,7 @@ export function SequencesPage() {
     }
     setSavingId('all');
     try {
+      // Step 1: set all to QaPassed
       await Promise.all(
         sequences.map((seq) =>
           http.put(`/api/v1/sequences/${seq.id}`, {
@@ -1051,24 +1079,21 @@ export function SequencesPage() {
           })
         )
       );
-      setSequences(sequences.map((s) => ({ ...s, status: 'QaPassed' })));
-      toast.success('All touches approved');
+      // Step 2: move all to Scheduled so the APScheduler picks them up.
+      await Promise.all(
+        sequences.map((seq) =>
+          http.post(`/api/v1/sequences/${seq.id}/scheduled-send`, {})
+        )
+      );
+      setSequences(sequences.map((s) => ({ ...s, status: 'Scheduled' })));
+      toast.success('All touches approved & scheduled');
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Approve all failed');
     } finally { setSavingId(null); }
   }, [sequences]);
-
+ 
   const handleSendNow = useCallback(async (seq: Sequence, index: number) => {
     setSendingId(seq.id);
-    // try {
-    //   await http.post(`/api/v1/sequences/${seq.id}/send-email`, {});
-    //   const updated = [...sequences];
-    //   updated[index] = { ...updated[index], status: 'Sent' };
-    //   setSequences(updated);
-    //   toast.success(`Touch ${seq.touchNumber} sent`);
-    // } catch (err: unknown) {
-    //   toast.error(err instanceof Error ? err.message : 'Send failed');
-    // } finally { setSendingId(null); }
     try {
       await http.post(`/api/v1/sequences/${seq.id}/send-email`, {});
       const updated = [...sequences];
@@ -1085,19 +1110,13 @@ export function SequencesPage() {
       toast.error(detail ?? (err instanceof Error ? err.message : 'Send failed'));
     } finally { setSendingId(null); }
   }, [sequences]);
-
+ 
   const handleExportCsv = useCallback(async () => {
     if (!selectedCampaignId) { toast.error('Select a campaign first'); return; }
     setExportingCsv(true);
     try {
       const rows = sequences.length > 0
         ? sequences
-        // QUERY-PARAM CASING FIX: backend export_sequences only declares
-        // `campaign_id` (snake_case, no alias) and doesn't support a
-        // prospect filter at all — the fallback path below only ever
-        // triggers when `sequences` (already correctly prospect-scoped
-        // in memory) is empty, so exporting the whole campaign here is
-        // an acceptable fallback rather than a silent scoping bug.
         : await http.get<Sequence[]>('/api/v1/sequences/export', {
             campaign_id: selectedCampaignId,
           });
@@ -1124,9 +1143,9 @@ export function SequencesPage() {
       toast.error(err instanceof Error ? err.message : 'Export failed');
     } finally { setExportingCsv(false); }
   }, [sequences, selectedCampaignId, selectedProspectId]);
-
+ 
   // ── Render ───────────────────────────────────────────────────────────────
-
+ 
   if (cLoading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -1134,7 +1153,7 @@ export function SequencesPage() {
       </div>
     );
   }
-
+ 
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -1145,7 +1164,7 @@ export function SequencesPage() {
             Generate 7-touch email sequences with escalating cadence
           </p>
         </div>
-
+ 
         {/* Profile status indicator — shown when profile is missing fields */}
         {(!profile?.emailSignature || !profile?.firstName) && (
           <div className="flex items-center gap-1.5 text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1">
@@ -1159,7 +1178,7 @@ export function SequencesPage() {
             </span>
           </div>
         )}
-
+ 
         <div className="flex gap-2 flex-wrap">
           <TBtn
             variant="outline"
@@ -1184,7 +1203,7 @@ export function SequencesPage() {
           </TBtn>
         </div>
       </div>
-
+ 
       {/* Configuration Card */}
       <Card>
         <CardContent className="p-4">
@@ -1206,7 +1225,7 @@ export function SequencesPage() {
                 <p className="text-xs text-amber-600">Create a campaign first</p>
               )}
             </div>
-
+ 
             <div className="space-y-2">
               <Label>Prospect</Label>
               <Select value={selectedProspectId} onValueChange={setSelectedProspectId}>
@@ -1220,7 +1239,7 @@ export function SequencesPage() {
                 </SelectContent>
               </Select>
             </div>
-
+ 
             <div className="space-y-2">
               <Label>Framework</Label>
               <Select value={framework} onValueChange={setFramework}>
@@ -1234,7 +1253,7 @@ export function SequencesPage() {
                 </SelectContent>
               </Select>
             </div>
-
+ 
             <TBtn
               size="default"
               variant="default"
@@ -1250,7 +1269,7 @@ export function SequencesPage() {
           </div>
         </CardContent>
       </Card>
-
+ 
       {/* Sequence Timeline */}
       {sequences.length > 0 && (
         <div className="space-y-4">
@@ -1258,49 +1277,58 @@ export function SequencesPage() {
             <h4 className="font-medium text-sm">
               Sequence Timeline
               <span className="ml-2 text-xs text-muted-foreground font-normal">
-                ({sequences.filter((s) => s.status === 'QaPassed').length}/{sequences.length} approved)
+                ({sequences.filter((s) => s.status === 'Scheduled' || s.status === 'QaPassed').length}/{sequences.length} approved)
               </span>
             </h4>
+            {/* Approve All & Schedule — moves every touch to Scheduled in one click */}
             <TBtn
               size="sm"
               variant="outline"
-              tooltip="Approve all touches (checks word limits)"
+              tooltip="Approve all touches and schedule for automated sending"
               onClick={handleApproveAll}
-              disabled={savingId === 'all'}
+              disabled={savingId === 'all' || sequences.every((s) => s.status === 'Scheduled' || s.status === 'Sent')}
             >
               {savingId === 'all'
                 ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                : <CheckCircle2 className="h-3 w-3 mr-1" />
+                : <Clock className="h-3 w-3 mr-1" />
               }
-              Approve All
+              Approve All &amp; Schedule
             </TBtn>
           </div>
-
+ 
           <div className="relative">
             {/* Timeline spine */}
             <div className="absolute left-6 top-0 bottom-0 w-px bg-border" />
-
+ 
             {sequences.map((seq, i) => {
-              const wc    = wordCount(seq.bodyCopy);
-              const limit = WORD_LIMITS[seq.angle] ?? 150;
-              const over  = wc > limit;
+              const wc        = wordCount(seq.bodyCopy);
+              const limit     = WORD_LIMITS[seq.angle] ?? 150;
+              const over      = wc > limit;
               const isSaving  = savingId === seq.id;
               const isSending = sendingId === seq.id;
-
+ 
               return (
                 <div key={seq.id} className="relative pl-14 pb-6">
                   {/* Touch number bubble */}
                   <div className={`absolute left-4 h-5 w-5 rounded-full flex items-center justify-center text-xs font-bold ${
-                    seq.status === 'QaPassed'
-                      ? 'bg-emerald-500 text-white'
-                      : seq.status === 'Sent'
-                        ? 'bg-blue-500 text-white'
-                        : 'bg-primary text-primary-foreground'
+                    seq.status === 'Scheduled'
+                      ? 'bg-amber-500 text-white'
+                      : seq.status === 'QaPassed'
+                        ? 'bg-emerald-500 text-white'
+                        : seq.status === 'Sent'
+                          ? 'bg-blue-500 text-white'
+                          : 'bg-primary text-primary-foreground'
                   }`}>
                     {seq.touchNumber}
                   </div>
-
-                  <Card className={seq.status === 'QaPassed' ? 'border-emerald-200' : ''}>
+ 
+                  <Card className={
+                    seq.status === 'Scheduled'
+                      ? 'border-amber-200'
+                      : seq.status === 'QaPassed'
+                        ? 'border-emerald-200'
+                        : ''
+                  }>
                     <CardHeader className="pb-2">
                       <div className="flex items-start justify-between gap-2 flex-wrap">
                         <div>
@@ -1316,7 +1344,6 @@ export function SequencesPage() {
                                 Email
                               </Badge>
                             )}
-                            {/* QA Score badge (SQ-1) */}
                             {seq.qaScore != null && (
                               <Badge
                                 variant="outline"
@@ -1341,8 +1368,7 @@ export function SequencesPage() {
                           {seq.status}
                         </Badge>
                       </div>
-
-                      {/* Personalisation confidence indicator */}
+ 
                       {seq.flagForManualReview && (
                         <div className="flex items-center gap-1 text-xs text-amber-600 mt-1">
                           <AlertCircle className="h-3 w-3 shrink-0" />
@@ -1350,7 +1376,7 @@ export function SequencesPage() {
                         </div>
                       )}
                     </CardHeader>
-
+ 
                     <CardContent className="space-y-3">
                       {/* Subject line */}
                       <div className="space-y-1">
@@ -1366,7 +1392,7 @@ export function SequencesPage() {
                           placeholder="Subject line..."
                         />
                       </div>
-
+ 
                       {/* Body copy */}
                       <div className="space-y-1">
                         <Label className="text-xs">Body</Label>
@@ -1381,7 +1407,6 @@ export function SequencesPage() {
                           className="text-sm font-mono"
                           placeholder="Email body..."
                         />
-                        {/* Word count */}
                         <div className="flex justify-between text-xs">
                           <span className={over ? 'text-red-600 font-medium' : 'text-muted-foreground'}>
                             Words: {wc} / {limit}
@@ -1394,10 +1419,10 @@ export function SequencesPage() {
                           )}
                         </div>
                       </div>
-
+ 
                       {/* Action buttons */}
                       <div className="flex gap-2 flex-wrap">
-                        {/* Save (SQ-2: save on edit, not only on schedule) */}
+                        {/* Save */}
                         <TBtn
                           size="sm"
                           variant="outline"
@@ -1411,20 +1436,29 @@ export function SequencesPage() {
                           }
                           Save
                         </TBtn>
-
-                        {/* Approve */}
+ 
+                        {/* Approve & Schedule — replaces the old Approve button */}
                         <TBtn
                           size="sm"
                           variant="outline"
-                          tooltip={over ? `Exceeds ${limit}-word limit` : 'Approve this touch'}
+                          tooltip={
+                            over
+                              ? `Exceeds ${limit}-word limit`
+                              : 'Approve and schedule for automated sending'
+                          }
                           onClick={() => handleApprove(seq, i)}
-                          disabled={isSaving || seq.status === 'QaPassed'}
+                          disabled={isSaving || seq.status === 'Scheduled' || seq.status === 'Sent'}
                         >
-                          <CheckCircle2 className="h-3 w-3 mr-1" />
-                          {seq.status === 'QaPassed' ? 'Approved' : 'Approve'}
+                          <Clock className="h-3 w-3 mr-1" />
+                          {seq.status === 'Scheduled'
+                            ? 'Scheduled'
+                            : seq.status === 'Sent'
+                              ? 'Sent'
+                              : 'Approve & Schedule'
+                          }
                         </TBtn>
-
-                        {/* Copy body (SQ-3) */}
+ 
+                        {/* Copy body */}
                         <TBtn
                           size="sm"
                           variant="ghost"
@@ -1437,12 +1471,12 @@ export function SequencesPage() {
                           <Copy className="h-3 w-3 mr-1" />
                           Copy
                         </TBtn>
-
-                        {/* Send Now */}
+ 
+                        {/* Send Now — manual immediate send, bypasses schedule */}
                         <TBtn
                           size="sm"
                           variant="ghost"
-                          tooltip="Send this touch now via MailBridge"
+                          tooltip="Send this touch immediately via MailBridge (bypasses schedule)"
                           onClick={() => handleSendNow(seq, i)}
                           disabled={isSending || seq.status === 'Sent'}
                         >
@@ -1461,7 +1495,7 @@ export function SequencesPage() {
           </div>
         </div>
       )}
-
+ 
       {/* Empty state */}
       {sequences.length === 0 && !generating && (
         <div className="py-16 text-center text-muted-foreground">
@@ -1470,8 +1504,8 @@ export function SequencesPage() {
           <p className="text-xs mt-1">Creates 7 personalised touches across ~30 days</p>
         </div>
       )}
-
-      {/* Cadence Reference Guide (SQ-4) */}
+ 
+      {/* Cadence Reference Guide */}
       {showExplain && (
         <Card id="seq-explain" className="border-blue-100 bg-blue-50/30">
           <CardHeader className="pb-3">
@@ -1486,7 +1520,7 @@ export function SequencesPage() {
               strategic escalation. Each touch uses a different psychological angle sent at an optimised
               interval.
             </p>
-
+ 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {TOUCH_INFO.map((t) => (
                 <div key={t.touch} className={`p-3 rounded-lg border ${t.color} space-y-1`}>
@@ -1499,7 +1533,7 @@ export function SequencesPage() {
                 </div>
               ))}
             </div>
-
+ 
             <div className="bg-muted rounded-lg p-3 text-xs space-y-1">
               <p className="font-medium">Key Principles:</p>
               <ul className="list-disc list-inside space-y-1 text-muted-foreground">

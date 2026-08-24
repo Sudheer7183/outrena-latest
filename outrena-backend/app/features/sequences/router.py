@@ -547,6 +547,23 @@ async def add_subject_line(
     return SubjectLineResponse.model_validate(item)
 
 
+# @router.post("/{sequence_id}/scheduled-send", response_model=SequenceResponse)
+# async def schedule_send(
+#     sequence_id: str,
+#     body: ScheduledSendRequest,
+#     db: AsyncSession = Depends(get_db),
+#     token: TokenPayload = Depends(require_role(Role.REP)),
+# ) -> SequenceResponse:
+#     seq = await _service.get_for_user(
+#         db, sequence_id, user_id=token.sub, role=_role_value(token)
+#     )
+#     if seq is None:
+#         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sequence not found.")
+#     item = await _service.schedule_send(db, sequence_id, body)
+#     if item is None:
+#         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sequence not found.")
+#     return SequenceResponse.model_validate(item)
+
 @router.post("/{sequence_id}/scheduled-send", response_model=SequenceResponse)
 async def schedule_send(
     sequence_id: str,
@@ -559,7 +576,7 @@ async def schedule_send(
     )
     if seq is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sequence not found.")
-    item = await _service.schedule_send(db, sequence_id, body)
+    item = await _service.schedule_send(db, sequence_id, body, caller_user_id=token.sub)
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sequence not found.")
     return SequenceResponse.model_validate(item)

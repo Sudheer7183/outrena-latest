@@ -565,9 +565,14 @@ import { formatDateTime } from "@/lib/utils";
 
 const PROVIDERS = ["gmail", "smtp", "outlook", "sendgrid", "ses"] as const;
 
+// interface DomainLite {
+//   id: string;
+//   domain: string;
+// }
+
 interface DomainLite {
   id: string;
-  domain: string;
+  domainName: string;
 }
 
 interface FormState {
@@ -846,7 +851,8 @@ export function MailBridgePage() {
                             </TableCell>
                             <TableCell className="text-muted-foreground">{c.fromEmail}</TableCell>
                             <TableCell className="text-muted-foreground">
-                              {domain?.domain ?? "—"}
+                              
+                              {domain?.domainName ?? "—"}
                             </TableCell>
                             <TableCell>
                               {c.mailbridge_api_key ? (
@@ -1131,7 +1137,7 @@ export function MailBridgePage() {
                   <option value="">— Tenant-wide —</option>
                   {(domains ?? []).map((d) => (
                     <option key={d.id} value={d.id}>
-                      {d.domain}
+                      {d.domainName}
                     </option>
                   ))}
                 </Select>

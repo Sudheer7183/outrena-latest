@@ -873,11 +873,19 @@ class SequenceService:
         return list(result.scalars().all())
 
     async def schedule_send(
-        self, db: AsyncSession, sequence_id: str, body: ScheduledSendRequest
+        self,
+        db: AsyncSession,
+        sequence_id: str,
+        body: ScheduledSendRequest,
+        caller_user_id: str | None = None,
     ) -> Sequence | None:
         seq = await self.get(db, sequence_id)
         if seq is None:
             return None
+        # FIX: stamp the approving user's UUID so the scheduler routes
+        # the send through their connected MailBridge inbox, not 'system'.
+        if caller_user_id and caller_user_id != "system":
+            seq.owner_user_id = caller_user_id
         seq.status = EmailStatus.Scheduled
         await db.commit()
         return seq
