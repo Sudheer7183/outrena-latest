@@ -1,3 +1,5 @@
+
+
 """
 unsubscribe_router.py — Public one-click unsubscribe endpoint.
 
@@ -67,7 +69,7 @@ async def _process_unsubscribe(token: str, tenant_slug: str) -> dict:
         if row.get("consent_status") == "withdrawn":
             return {"unsubscribed": True, "message": f"Hi {first_name}, you were already unsubscribed."}
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
 
         # Update: withdraw consent, suppress
         await db.execute(

@@ -192,12 +192,109 @@
 #                 messageId=msg_id, status="queued", accepted=True
 #             )
 
+#         # ── Resolve the prospect's unsubscribe token and replace the placeholder ──
+#         # {{unsubscribe_url}} is written into bodyCopy at generation time.
+#         # We resolve the real URL here, at send time, using the prospect's
+#         # unsubscribeToken stored in the DB. This avoids storing live URLs in
+#         # the Sequence row, which would break if the domain changes.
+#         body_for_send = body
+#         if "{{unsubscribe_url}}" in body_for_send:
+#             try:
+#                 from app.models.campaign_models import Sequence as _SendSeq
+#                 from app.models.prospect_models import Prospect as _SendProspect
+#                 _unsubscribe_token: str | None = None
+#                 if sequence_id:
+#                     _seq_lookup = await db.execute(
+#                         select(_SendSeq).where(_SendSeq.id == sequence_id)
+#                     )
+#                     _seq_row = _seq_lookup.scalar_one_or_none()
+#                     if _seq_row:
+#                         _p_lookup = await db.execute(
+#                             select(_SendProspect).where(
+#                                 _SendProspect.id == _seq_row.prospectId
+#                             )
+#                         )
+#                         _prospect_row = _p_lookup.scalar_one_or_none()
+#                         if _prospect_row:
+#                             _unsubscribe_token = getattr(
+#                                 _prospect_row, "unsubscribeToken", None
+#                             )
+
+#                 if _unsubscribe_token:
+#                     _scheme = "https" if self._settings.ENVIRONMENT != "development" else "https"
+#                     _real_unsubscribe_url = (
+#                         f"{_scheme}://{self._settings.BASE_DOMAIN}"
+#                         f"/p/unsubscribe?token={_unsubscribe_token}"
+#                     )
+#                 else:
+#                     # Fallback: link to the public unsubscribe page without token
+#                     # (user will need to enter their email manually).
+#                     _scheme = "https" if self._settings.ENVIRONMENT != "development" else "http"
+#                     _real_unsubscribe_url = (
+#                         f"{_scheme}://{self._settings.BASE_DOMAIN}/p/unsubscribe"
+#                     )
+
+#                 body_for_send = body_for_send.replace(
+#                     "{{unsubscribe_url}}", _real_unsubscribe_url
+#                 )
+#             except Exception as _unsub_exc:  # noqa: BLE001 — never block send
+#                 logger.warning(
+#                     "mailbridge.send.unsubscribe_token_resolve_failed",
+#                     sequence_id=sequence_id,
+#                     error=str(_unsub_exc),
+#                 )
+#                 # Leave the token in the text as a visible fallback — better
+#                 # than silently dropping the footer.
+
+#         # ── Build HTML body from plain text ──────────────────────────────────
+#         # bodyCopy is stored as plain text with \n line breaks. Email clients
+#         # that render body_html (Gmail, Outlook) collapse whitespace and ignore
+#         # \n unless it is converted to HTML. We do a minimal conversion:
+#         #   - Split on blank lines → <p> paragraphs
+#         #   - Convert single \n within a paragraph → <br>
+#         #   - Escape HTML special characters to prevent injection
+#         import html as _html_mod
+
+#         def _plain_to_html(text: str) -> str:
+#             """Convert plain text email body to minimal HTML."""
+#             # Escape HTML entities
+#             escaped = _html_mod.escape(text)
+#             # Split into paragraphs on blank lines (one or more empty lines)
+#             import re as _re
+#             paragraphs = _re.split(r"\n\s*\n", escaped)
+#             html_parts: list[str] = []
+#             for para in paragraphs:
+#                 stripped = para.strip()
+#                 if not stripped:
+#                     continue
+#                 # Convert single newlines within a paragraph to <br>
+#                 inner = stripped.replace("\n", "<br>\n")
+#                 html_parts.append(f"<p>{inner}</p>")
+#             body_html = "\n".join(html_parts)
+#             return (
+#                 "<!DOCTYPE html>"
+#                 "<html><head>"
+#                 '<meta charset="UTF-8">'
+#                 '<meta name="viewport" content="width=device-width,initial-scale=1">'
+#                 "<style>"
+#                 "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;"
+#                 "font-size:14px;line-height:1.6;color:#1a1a1a;max-width:600px;margin:0 auto;padding:20px}"
+#                 "p{margin:0 0 12px}"
+#                 "a{color:#2563eb}"
+#                 "hr{border:none;border-top:1px solid #e5e7eb;margin:20px 0}"
+#                 ".footer{font-size:11px;color:#6b7280;margin-top:24px}"
+#                 "</style>"
+#                 f"</head><body>{body_html}</body></html>"
+#             )
+
+#         body_html = _plain_to_html(body_for_send)
+
 #         # Build the MailBridge-compatible payload.
 #         mb_payload: dict[str, Any] = {
 #             "to": [to],
 #             "subject": subject,
-#             "body_html": body,
-#             "body_text": body,
+#             "body_html": body_html,
+#             "body_text": body_for_send,  # plain text fallback for non-HTML clients
 #         }
 
 #         # FIX — per-user mailbox routing via external_user_id:
@@ -766,6 +863,7 @@ class MailBridgeService:
                     _real_unsubscribe_url = (
                         f"{_scheme}://{self._settings.BASE_DOMAIN}"
                         f"/p/unsubscribe?token={_unsubscribe_token}"
+                        f"&tenant_slug={tenant_slug}"
                     )
                 else:
                     # Fallback: link to the public unsubscribe page without token
