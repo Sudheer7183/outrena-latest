@@ -846,9 +846,11 @@
 //   const handleBulkAddToCampaign = async () => {
 //     if (!addToCampaignId || selectedIds.size === 0) return;
 //     try {
-//       const data = await http.post<any>(`/api/v1/campaigns/${addToCampaignId}/prospects`, {
+//       // Backend route is POST /campaigns/campaign-prospects (flat, not nested).
+//       // campaignId goes in the request body — not the URL.
+//       const data = await http.post<any>("/api/v1/campaigns/campaign-prospects", {
+//         campaignId: addToCampaignId,
 //         prospectIds: Array.from(selectedIds),
-//         action: "add",
 //       });
 //       toast.success(`${data.added ?? selectedIds.size} prospects added to campaign`);
 //       setAddToCampaignOpen(false);
@@ -4208,6 +4210,7 @@ const signalsMut = useMutation({
           <DialogTitle>Bulk CSV Import</DialogTitle>
           <DialogDescription>
             Supported columns: first_name, last_name, email, title, company, domain, linkedin, seniority, phone, notes
+            <br /><span className="text-[10px]">Both <code>first_name</code> (Excel default) and <code>firstName</code> (camelCase) column names are accepted.</span>
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-4">
@@ -4291,9 +4294,13 @@ const signalsMut = useMutation({
           )}
 
           <div className="text-xs text-muted-foreground bg-muted rounded-lg p-3">
-            <p className="font-medium mb-1">Example CSV format:</p>
-            <pre className="font-mono text-[10px] whitespace-pre-wrap">first_name,last_name,email,title,company,domain
+            <p className="font-medium mb-1">Example CSV format (snake_case — Excel default):</p>
+            <pre className="font-mono text-[10px] whitespace-pre-wrap">first_name,last_name,email,title,company
 John,Smith,john@acme.com,VP Engineering,Acme Inc,acme.com</pre>
+            <p className="font-medium mt-2 mb-1">Also accepted (camelCase):</p>
+            <pre className="font-mono text-[10px] whitespace-pre-wrap">firstName,lastName,email,title,company
+John,Smith,john@acme.com,VP Engineering,Acme Inc,acme.com</pre>
+            <p className="mt-2 text-[10px]">💡 In Excel, use <b>File → Save As → CSV UTF-8</b> or plain <b>CSV</b> — both work.</p>
           </div>
         </div>
         <DialogFooter>

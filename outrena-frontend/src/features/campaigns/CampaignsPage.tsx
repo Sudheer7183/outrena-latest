@@ -1,50 +1,3 @@
-// /**
-//  * CampaignsPage.tsx — Full-feature Campaigns page for OUTRENA React/FastAPI.
-//  *
-//  * Closes all C-1 through C-13 gap items:
-//  *  C-1  Campaign creation form — 3 tabs (Basics, Sender & Product, Configuration)
-//  *  C-2  Campaign Detail view (list → detail drill-in) with 6 tabs
-//  *  C-3  Prospects tab — list, add dialog (search + multi-select), remove per row
-//  *  C-4  Sequences tab — list, generate button (prospect + framework), send per seq,
-//  *        send-all approved, schedule campaign, approve/edit inline
-//  *  C-5  Collaterals tab — list, link from library, add new inline, delete
-//  *  C-6  Email Sending tab — MailBridge connections CRUD + test
-//  *  C-7  Compliance tab — CAN-SPAM/GDPR (footer toggle, address, unsubscribe URL),
-//  *        webhook URL card
-//  *  C-8  Tools tab — AI reply categorisation tool
-//  *  C-9  Pre-Flight Activation Check dialog (6-check gate)
-//  *  C-10 Clone campaign action
-//  *  C-11 Export campaigns CSV
-//  *  C-12 Campaign status badge with colour coding
-//  *  C-13 Campaign card shows _count (prospects, sequences, collaterals)
-//  *
-//  * API routes used (all real FastAPI endpoints):
-//  *   GET    /api/v1/campaigns                         list
-//  *   POST   /api/v1/campaigns                         create
-//  *   PUT    /api/v1/campaigns/{id}                    update
-//  *   DELETE /api/v1/campaigns/{id}                    delete
-//  *   POST   /api/v1/campaigns/clone                   clone
-//  *   POST   /api/v1/campaigns/preflight               pre-flight check
-//  *   POST   /api/v1/campaigns/campaign-prospects      link prospect
-//  *   DELETE /api/v1/campaigns/campaign-prospects      unlink prospect
-//  *   POST   /api/v1/campaigns/{id}/generate-sequences bulk generate
-//  *   GET    /api/v1/sequences?campaign_id=X           list sequences
-//  *   PUT    /api/v1/sequences/{id}                    update sequence
-//  *   POST   /api/v1/sequences/{id}/send-email         send one
-//  *   POST   /api/v1/sequences/{id}/scheduled-send     schedule one
-//  *   GET    /api/v1/collaterals                       collateral library
-//  *   POST   /api/v1/collaterals                       create collateral
-//  *   POST   /api/v1/collaterals/link                  link to campaign
-//  *   DELETE /api/v1/collaterals/link/{link_id}        unlink
-//  *   GET    /api/v1/mailbridge/config                 list MB configs
-//  *   POST   /api/v1/mailbridge/config                 create MB config
-//  *   DELETE /api/v1/mailbridge/config/{id}            delete MB config
-//  *   GET    /api/v1/icp-profiles                      ICP list
-//  *   GET    /api/v1/llm-configs                       LLM list
-//  *   GET    /api/v1/domains                           domain list
-//  *   GET    /api/v1/prospects                         all prospects (for add dialog)
-//  *   POST   /api/v1/reply-drafts                      categorise reply
-//  */
 
 // import { useEffect, useMemo, useState } from "react";
 // import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -260,6 +213,14 @@
 //   const selectedCampaign = campaigns.find((c) => c.id === selectedId);
 
 //   /* ── Detail: lazy-loaded data ── */
+//   const campaignProspectsQ = useQuery<CampaignProspectRow[]>({
+//     queryKey: ["campaign-prospects", selectedId],
+//     queryFn: () =>
+//       http.get<any>(`/api/v1/campaigns/campaign-prospects?campaign_id=${selectedId}`)
+//         .then((r) => Array.isArray(r) ? r : r?.items ?? []),
+//     enabled: view === "detail" && !!selectedId,
+//   });
+
 //   const sequencesQ = useQuery<Sequence[]>({
 //     queryKey: ["sequences", selectedId],
 //     queryFn: () => http.get<any>(`/api/v1/sequences?campaign_id=${selectedId}`).then((r) => Array.isArray(r) ? r : r?.items ?? []),
@@ -269,6 +230,18 @@
 //     queryKey: ["collaterals"],
 //     queryFn: () => http.get<any>("/api/v1/collaterals").then((r) => Array.isArray(r) ? r : r?.items ?? []),
 //     enabled: view === "detail" && !!selectedId,
+//   });
+
+//   // Fetch existing collateral links for this campaign so previously linked
+//   // collaterals are visible when the detail view is opened.
+//   // Endpoint: GET /api/v1/collaterals/links?campaign_id=X
+//   const collateralLinksQ = useQuery<{ id: string; collateralId: string; campaignId: string }[]>({
+//     queryKey: ["collateral-links", selectedId],
+//     queryFn: () =>
+//       http.get<any>(`/api/v1/collaterals/links?campaign_id=${selectedId}`)
+//         .then((r) => Array.isArray(r) ? r : r?.items ?? []),
+//     enabled: view === "detail" && !!selectedId,
+//     staleTime: 0,
 //   });
 //   const mailbridgeQ = useQuery<MailBridgeConfig[]>({
 //     queryKey: ["mailbridge-configs"],
@@ -280,19 +253,16 @@
 //   const collateralLibrary = collateralsQ.data ?? [];
 //   const mbConfigs = mailbridgeQ.data ?? [];
 
-//   // Campaign prospects come from the campaign.prospects relationship
-//   const campaignProspects: CampaignProspectRow[] = useMemo(() => {
-//     console.log("select campaigns",selectedCampaign);
-
-//     if (!selectedCampaign?.prospects) return [];
-//     console.log("select campaigns",selectedCampaign);
-    
-//     // backend may embed them or we need to derive from allProspects
-//     return selectedCampaign.prospects.map((cp) => ({
-//       ...cp,
-//       prospect: cp.prospect ?? allProspects.find((p) => p.id === cp.prospectId),
-//     }));
-//   }, [selectedCampaign, allProspects]);
+//   // Campaign prospects fetched directly from the API (not embedded in the campaign list response).
+//   // Enrich each row with the full prospect object looked up from the allProspects list.
+//   const campaignProspects: CampaignProspectRow[] = useMemo(
+//     () =>
+//       (campaignProspectsQ.data ?? []).map((cp) => ({
+//         ...cp,
+//         prospect: cp.prospect ?? allProspects.find((p) => p.id === cp.prospectId),
+//       })),
+//     [campaignProspectsQ.data, allProspects]
+//   );
 
 //   // Collaterals linked to this campaign (filter library by campaignId in links)
 //   // The backend returns campaign with collateral links embedded or we filter collateralLibrary
@@ -412,6 +382,7 @@
 //       http.post("/api/v1/campaigns/campaign-prospects", { campaignId: selectedId, prospectId }),
 //     onSuccess: () => {
 //       qc.invalidateQueries({ queryKey: ["campaigns"] });
+//       qc.invalidateQueries({ queryKey: ["campaign-prospects", selectedId] });
 //     },
 //   });
 
@@ -433,6 +404,7 @@
 //       });
 //       toast.success("Prospect removed");
 //       qc.invalidateQueries({ queryKey: ["campaigns"] });
+//       qc.invalidateQueries({ queryKey: ["campaign-prospects", selectedId] });
 //     } catch { toast.error("Remove failed"); }
 //   };
 
@@ -516,15 +488,19 @@
 //   const [linkCollateralId, setLinkCollateralId] = useState("");
 //   const [campaignCollateralLinks, setCampaignCollateralLinks] = useState<{ linkId: string; collateralId: string; }[]>([]);
 
-//   // Load campaign-specific collateral links from collateral library when entering detail
+//   // Seed collateral link state from the API whenever the campaign detail opens
+//   // or the collateral-links query result changes (e.g. after a link/unlink).
 //   useEffect(() => {
-//     if (view === "detail" && selectedId) {
-//       // The collaterals router doesn't have a campaign filter, so we get all and track links via our own state
-//       // In a real scenario, the campaign.collaterals relationship would be embedded
+//     const links = collateralLinksQ.data ?? [];
+//     if (links.length > 0) {
+//       setCampaignCollateralLinks(links.map((l) => ({ linkId: l.id, collateralId: l.collateralId })));
+//       setLinkedCollateralIds(new Set(links.map((l) => l.collateralId)));
+//     } else if (!collateralLinksQ.isFetching) {
+//       // Only reset to empty if we've confirmed there are no links (not still loading)
 //       setCampaignCollateralLinks([]);
 //       setLinkedCollateralIds(new Set());
 //     }
-//   }, [view, selectedId]);
+//   }, [collateralLinksQ.data, collateralLinksQ.isFetching]);
 
 //   const createCollateralMut = useMutation({
 //     mutationFn: (body: Record<string, unknown>) => http.post<any>("/api/v1/collaterals", body),
@@ -537,6 +513,7 @@
 //       } catch { /* link failed but collateral created */ }
 //       toast.success("Collateral added and linked");
 //       qc.invalidateQueries({ queryKey: ["collaterals"] });
+//       qc.invalidateQueries({ queryKey: ["collateral-links", selectedId] });
 //       setCollateralDialog(false);
 //       setCollForm({ name: "", type: "case_study", url: "", content: "", description: "" });
 //     },
@@ -550,6 +527,7 @@
 //       setCampaignCollateralLinks((prev) => [...prev, { linkId: link.id ?? link.linkId, collateralId: linkCollateralId }]);
 //       setLinkedCollateralIds((prev) => new Set([...prev, linkCollateralId]));
 //       toast.success("Collateral linked");
+//       qc.invalidateQueries({ queryKey: ["collateral-links", selectedId] });
 //       setLinkCollateralOpen(false); setLinkCollateralId("");
 //     } catch { toast.error("Link failed"); }
 //   };
@@ -562,6 +540,7 @@
 //       setCampaignCollateralLinks((prev) => prev.filter((l) => l.linkId !== link.linkId));
 //       setLinkedCollateralIds((prev) => { const s = new Set(prev); s.delete(collateralId); return s; });
 //       toast.success("Collateral unlinked");
+//       qc.invalidateQueries({ queryKey: ["collateral-links", selectedId] });
 //     } catch { toast.error("Unlink failed"); }
 //   };
 
@@ -617,17 +596,38 @@
 //     if (!replyText.trim()) return;
 //     setReplyCategorizing(true); setReplyResult(null);
 //     try {
-//       // Use reply-drafts endpoint for categorize + draft (most complete path)
-//       const firstRepliedSeq = sequences.find((s) => s.status === "Replied");
-//       const body = firstRepliedSeq
-//         ? { sequenceId: firstRepliedSeq.id, replyText }
-//         : { replyText };
-//       const data = await http.post<any>("/api/v1/reply-drafts", body);
-//       if (data.success) {
-//         setReplyResult(data.categorization ?? data);
-//         toast.success(`Categorized as ${data.categorization?.category ?? data.category ?? "unknown"}`);
-//       } else toast.error(data.error ?? "Categorization failed");
-//     } catch { toast.error("Categorization failed"); }
+//       // Step 1: find a sequence+prospect pair to attach the draft to.
+//       // Prefer a Replied sequence; fall back to any sequence with a known prospect.
+//       const repliedSeq = sequences.find((s) => s.status === "Replied");
+//       const anySeq = repliedSeq ?? sequences[0];
+//       const prospectId = anySeq?.prospectId ?? campaignProspects[0]?.prospectId ?? null;
+
+//       if (!anySeq || !prospectId) {
+//         toast.error("Add prospects and generate sequences first, then paste a reply to categorize.");
+//         setReplyCategorizing(false);
+//         return;
+//       }
+
+//       // Step 2: create a ReplyDraft row with the required fields.
+//       // ReplyDraftCreate requires: sequenceId, prospectId, originalReply.
+//       const draft = await http.post<any>("/api/v1/reply-drafts", {
+//         sequenceId: anySeq.id,
+//         prospectId,
+//         originalReply: replyText,  // correct field name (not replyText)
+//         category: "other",         // will be overwritten by categorize call below
+//       });
+
+//       // Step 3: call the LLM categorize endpoint on the new draft.
+//       const result = await http.post<any>(`/api/v1/reply-drafts/${draft.id}/reply-categorize`, {
+//         originalReply: replyText,
+//       });
+
+//       setReplyResult(result);
+//       toast.success(`Categorized as: ${result.category ?? "unknown"}`);
+//     } catch (err: any) {
+//       const msg = err?.response?.data?.message ?? err?.message ?? "Categorization failed";
+//       toast.error(msg);
+//     }
 //     setReplyCategorizing(false);
 //   };
 
@@ -1123,7 +1123,7 @@
 //                   <div className="space-y-1"><Label className="text-xs">Display Name *</Label><Input placeholder="e.g. Gmail via MailBridge" value={mbForm.name} onChange={(e) => setMbForm((f) => ({ ...f, name: e.target.value }))} /></div>
 //                   <div className="space-y-1">
 //                     <Label className="text-xs">MailBridge Server URL *</Label>
-//                     <Input placeholder="e.g. http://164.52.216.131:9000" value={mbForm.baseUrl} onChange={(e) => setMbForm((f) => ({ ...f, baseUrl: e.target.value }))} />
+//                     <Input placeholder="e.g. http://172.93.49.106:9000" value={mbForm.baseUrl} onChange={(e) => setMbForm((f) => ({ ...f, baseUrl: e.target.value }))} />
 //                     <p className="text-xs text-muted-foreground">Base URL of your MailBridge FastAPI server (Swagger at /docs)</p>
 //                   </div>
 //                   <div className="space-y-1">
@@ -1426,54 +1426,6 @@
 //     </div>
 //   );
 // }
-
-/**
- * CampaignsPage.tsx — Full-feature Campaigns page for OUTRENA React/FastAPI.
- *
- * Closes all C-1 through C-13 gap items:
- *  C-1  Campaign creation form — 3 tabs (Basics, Sender & Product, Configuration)
- *  C-2  Campaign Detail view (list → detail drill-in) with 6 tabs
- *  C-3  Prospects tab — list, add dialog (search + multi-select), remove per row
- *  C-4  Sequences tab — list, generate button (prospect + framework), send per seq,
- *        send-all approved, schedule campaign, approve/edit inline
- *  C-5  Collaterals tab — list, link from library, add new inline, delete
- *  C-6  Email Sending tab — MailBridge connections CRUD + test
- *  C-7  Compliance tab — CAN-SPAM/GDPR (footer toggle, address, unsubscribe URL),
- *        webhook URL card
- *  C-8  Tools tab — AI reply categorisation tool
- *  C-9  Pre-Flight Activation Check dialog (6-check gate)
- *  C-10 Clone campaign action
- *  C-11 Export campaigns CSV
- *  C-12 Campaign status badge with colour coding
- *  C-13 Campaign card shows _count (prospects, sequences, collaterals)
- *
- * API routes used (all real FastAPI endpoints):
- *   GET    /api/v1/campaigns                         list
- *   POST   /api/v1/campaigns                         create
- *   PUT    /api/v1/campaigns/{id}                    update
- *   DELETE /api/v1/campaigns/{id}                    delete
- *   POST   /api/v1/campaigns/clone                   clone
- *   POST   /api/v1/campaigns/preflight               pre-flight check
- *   POST   /api/v1/campaigns/campaign-prospects      link prospect
- *   DELETE /api/v1/campaigns/campaign-prospects      unlink prospect
- *   POST   /api/v1/campaigns/{id}/generate-sequences bulk generate
- *   GET    /api/v1/sequences?campaign_id=X           list sequences
- *   PUT    /api/v1/sequences/{id}                    update sequence
- *   POST   /api/v1/sequences/{id}/send-email         send one
- *   POST   /api/v1/sequences/{id}/scheduled-send     schedule one
- *   GET    /api/v1/collaterals                       collateral library
- *   POST   /api/v1/collaterals                       create collateral
- *   POST   /api/v1/collaterals/link                  link to campaign
- *   DELETE /api/v1/collaterals/link/{link_id}        unlink
- *   GET    /api/v1/mailbridge/config                 list MB configs
- *   POST   /api/v1/mailbridge/config                 create MB config
- *   DELETE /api/v1/mailbridge/config/{id}            delete MB config
- *   GET    /api/v1/icp-profiles                      ICP list
- *   GET    /api/v1/llm-configs                       LLM list
- *   GET    /api/v1/domains                           domain list
- *   GET    /api/v1/prospects                         all prospects (for add dialog)
- *   POST   /api/v1/reply-drafts                      categorise reply
- */
 
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -2274,10 +2226,10 @@ export function CampaignsPage() {
 
             {/* ══ C-3: PROSPECTS TAB ══ */}
             <TabsContent value="prospects" className="space-y-4">
-              <div className="flex items-center justify-between">
+              {/* <div className="flex items-center justify-between">
                 <p className="text-sm text-muted-foreground">{campaignProspects.length} prospects linked</p>
                 <Button size="sm" onClick={() => setAddProspectOpen(true)}><Plus className="h-3 w-3 mr-1" /> Add Prospects</Button>
-              </div>
+              </div> */}
               {campaignProspects.length === 0 ? (
                 <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">No prospects added yet. Click "Add Prospects" to select from your list.</CardContent></Card>
               ) : (
