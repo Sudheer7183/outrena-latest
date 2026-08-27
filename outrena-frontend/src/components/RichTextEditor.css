@@ -1,0 +1,100 @@
+/* ── RichTextEditor.css ─────────────────────────────────────────────────────
+ * Scoped styles for the Tiptap ProseMirror editor used in email template
+ * and sequence editing surfaces. All rules are namespaced under
+ * .outrena-rte-content so they cannot leak into the rest of the app.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/* ── Editor canvas ── */
+.outrena-rte-content .ProseMirror {
+  outline: none;
+  padding: 0.875rem 1rem;
+  min-height: inherit;
+}
+
+/* ── Vertical rhythm ── */
+.outrena-rte-content .ProseMirror > * + * {
+  margin-top: 0.625rem;
+}
+
+/* ── Paragraphs ── */
+.outrena-rte-content .ProseMirror p {
+  line-height: 1.65;
+  margin: 0;
+}
+.outrena-rte-content .ProseMirror p + p {
+  margin-top: 0.625rem;
+}
+
+/* ── Headings ── */
+.outrena-rte-content .ProseMirror h2 {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  line-height: 1.4;
+  margin-top: 1rem;
+  margin-bottom: 0.25rem;
+}
+
+/* ── Lists ── */
+.outrena-rte-content .ProseMirror ul {
+  list-style: disc;
+  padding-left: 1.5rem;
+}
+.outrena-rte-content .ProseMirror ol {
+  list-style: decimal;
+  padding-left: 1.5rem;
+}
+.outrena-rte-content .ProseMirror li > p {
+  margin-top: 0;
+}
+.outrena-rte-content .ProseMirror li + li {
+  margin-top: 0.25rem;
+}
+
+/* ── Inline marks ── */
+.outrena-rte-content .ProseMirror strong {
+  font-weight: 600;
+}
+.outrena-rte-content .ProseMirror em {
+  font-style: italic;
+}
+.outrena-rte-content .ProseMirror u {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.outrena-rte-content .ProseMirror s {
+  text-decoration: line-through;
+}
+
+/* ── Links ── */
+.outrena-rte-content .ProseMirror a {
+  color: hsl(var(--primary));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+/* ── Horizontal rule ── */
+.outrena-rte-content .ProseMirror hr {
+  border: 0;
+  border-top: 1px solid hsl(var(--border));
+  margin: 1rem 0;
+}
+
+/* ── Placeholder (empty editor) ── */
+.outrena-rte-content .ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  color: hsl(var(--muted-foreground));
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+/* ── Focus ring — applied to the outer wrapper, not ProseMirror ── */
+.outrena-rte:focus-within {
+  box-shadow: 0 0 0 2px hsl(var(--ring));
+}
+
+/* ── Selection ── */
+.outrena-rte-content .ProseMirror ::selection {
+  background-color: hsl(var(--primary) / 0.15);
+}

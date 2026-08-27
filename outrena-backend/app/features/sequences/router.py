@@ -2678,7 +2678,7 @@ async def template_send(
  
         def _append_footer(body_text: str | None, prospect: "_Prospect") -> str:  # noqa: ARG001
             """Append signature + CAN-SPAM footer to the rendered body.
- 
+
             Rules:
             - Signature is appended if profile has one AND it's not already in the body.
             - Unsubscribe footer is appended if the body doesn't already contain
@@ -2686,32 +2686,77 @@ async def template_send(
               substitution — the placeholder remains because it's resolved by MailBridge
               at send time, not here).
             - Physical address is included in the footer when available.
+
+            RTE UPGRADE: when bodyTemplate is HTML (from the Tiptap editor),
+            the signature and footer must be appended as HTML — plain-text \n
+            separators collapse to a single space in HTML email renderers
+            (Gmail, Outlook). HTML bodies are detected by the opening < tag.
             """
             text = body_text or ""
             sig  = (body.emailSignature or "").strip()
             addr = (body.physicalAddress or "").strip()
- 
+
+            # Detect whether the body is HTML (from the RTE) or plain text.
+            # A body is HTML when it starts with an HTML tag AND contains at
+            # least one closing tag.
+            _s = text.lstrip()
+            is_html_body = (
+                bool(_s)
+                and _s[0] == "<"
+                and any(
+                    m in text
+                    for m in ("</p>", "</h", "<br", "</ul>", "</ol>", "</li>")
+                )
+            )
+
             footer_parts: list[str] = []
- 
-            # Append signature if present and not already in the body
+
+            # ── Signature ────────────────────────────────────────────────────
             if sig and sig not in text:
-                footer_parts.append(sig)
- 
-            # Always append the unsubscribe block unless the body already has
-            # the {{unsubscribe_url}} placeholder (meaning the template author
-            # included it explicitly). Check for the placeholder, NOT the word
-            # "unsubscribe" — the word may appear naturally in the body copy.
-            has_unsub_placeholder = "{{unsubscribe_url}}" in text or "{{ unsubscribe_url }}" in text
+                if is_html_body:
+                    # Convert each line of the signature to an inline <br>
+                    # so "Best,\nSudheer\nvanigamsoftware.com" renders as:
+                    #   Best,
+                    #   Sudheer
+                    #   vanigamsoftware.com
+                    sig_html = "<br>".join(
+                        line for line in sig.splitlines()
+                    )
+                    footer_parts.append(f"<p>{sig_html}</p>")
+                else:
+                    footer_parts.append(sig)
+
+            # ── Unsubscribe + physical address ───────────────────────────────
+            has_unsub_placeholder = (
+                "{{unsubscribe_url}}" in text
+                or "{{ unsubscribe_url }}" in text
+            )
             if not has_unsub_placeholder:
                 unsub_line = "To unsubscribe: {{unsubscribe_url}}"
-                if addr:
-                    footer_parts.append(f"---\n{unsub_line}\n{addr}")
+                if is_html_body:
+                    if addr:
+                        footer_parts.append(
+                            f"<p>---<br>{unsub_line}<br>{addr}</p>"
+                        )
+                    else:
+                        footer_parts.append(f"<p>---<br>{unsub_line}</p>")
                 else:
-                    footer_parts.append(f"---\n{unsub_line}")
- 
+                    if addr:
+                        footer_parts.append(f"---\n{unsub_line}\n{addr}")
+                    else:
+                        footer_parts.append(f"---\n{unsub_line}")
+
+            # ── Join ─────────────────────────────────────────────────────────
             if footer_parts:
-                return text.rstrip() + "\n\n" + "\n\n".join(footer_parts)
+                if is_html_body:
+                    # HTML parts are block-level — no separator needed between them.
+                    return text.rstrip() + "".join(footer_parts)
+                else:
+                    # Plain text — double newline between sections.
+                    return text.rstrip() + "\n\n" + "\n\n".join(footer_parts)
             return text
+ 
+
  
         rendered_rows: list[SequenceResponse] = []
         prospect_map: dict[str, str] = {}   # seq.id → "First Last · Company"

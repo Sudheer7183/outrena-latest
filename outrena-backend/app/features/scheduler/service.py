@@ -4957,7 +4957,31 @@ async def _resolve_mailbridge_config(
         .limit(1)
     )
     return result.scalar_one_or_none()
- 
+
+def _is_html_body(body: str | None) -> bool:
+    """True when body was authored in the Tiptap RTE (already HTML).
+
+    The RTE always opens content with a block-level HTML tag. We also require
+    at least one closing tag to avoid false-positives on plain text that
+    happens to start with '<'.
+    """
+    if not body:
+        return False
+    s = body.lstrip()
+    return s.startswith("<") and any(
+        marker in body
+        for marker in (
+            "</p>", "</h", "<br", "</ul>", "</ol>",
+            "</li>", "</strong>", "</em>",
+        )
+    )
+
+
+def _strip_html_text(html: str) -> str:
+    """Strip HTML tags and collapse whitespace → plain-text fallback."""
+    import re as _re
+    text = _re.sub(r"<[^>]+>", " ", html)
+    return _re.sub(r"\s+", " ", text).strip() 
  
 async def _send_via_mailbridge(
     db: AsyncSession,
@@ -5088,13 +5112,15 @@ async def _send_via_mailbridge(
  
     base_url = (config.baseUrl if config else "") or settings.MAILBRIDGE_DEFAULT_URL
  
-    # Build MailBridge-compatible body text with CAN-SPAM footer.
+    # Build MailBridge-compatible body with CAN-SPAM footer.
+    # RTE UPGRADE: body may be HTML from Tiptap; detect and route accordingly.
     body_text = sequence.bodyCopy or ""
- 
+    is_html = _is_html_body(body_text)
+
     # ── CAN-SPAM / NFR-19: footer enforcement ─────────────────────────────
     # Every commercial email must contain: physical address + unsubscribe URL.
-    # If the sequence body lacks them, we append a minimal compliant footer
-    # rather than blocking the send (blocking would deadlock campaigns).
+    # If the sequence body lacks them, we append a minimal compliant footer.
+    # HTML bodies get an HTML footer; plain-text bodies get the existing footer.
     # Best-effort: silently skip if we can't compute tenant slug.
     needs_footer = (
         "unsubscribe" not in body_text.lower()
@@ -5114,25 +5140,51 @@ async def _send_via_mailbridge(
                 if _prospect_token and _tenant_slug
                 else ""
             )
-            _footer_lines = [
-                "",
-                "---",
-                "This email was sent by an authorised OUTRENA user.",
-            ]
-            if _unsub_url:
-                _footer_lines.append(f"Unsubscribe: {_unsub_url}")
-            body_text = body_text + "\n".join(_footer_lines)
+
+            if is_html:
+                # HTML footer — inline styles for maximum email-client compat.
+                _unsub_link = (
+                    f' <a href="{_unsub_url}" '
+                    'style="color:#6b7280;text-decoration:underline">Unsubscribe</a>'
+                    if _unsub_url
+                    else ""
+                )
+                _html_footer = (
+                    '<hr style="border:0;border-top:1px solid #e5e7eb;margin:24px 0">'
+                    '<p style="color:#6b7280;font-size:11px;line-height:1.5;margin:0">'
+                    f"This email was sent by an authorised OUTRENA user.{_unsub_link}"
+                    "</p>"
+                )
+                body_text = body_text + _html_footer
+            else:
+                # Plain-text footer (unchanged from original behaviour).
+                _footer_lines = [
+                    "",
+                    "---",
+                    "This email was sent by an authorised OUTRENA user.",
+                ]
+                if _unsub_url:
+                    _footer_lines.append(f"Unsubscribe: {_unsub_url}")
+                body_text = body_text + "\n".join(_footer_lines)
+
         except Exception:  # noqa: BLE001 — footer is best-effort, never block send
             pass
- 
+
     # Build MailBridge-compatible payload (Phase 3+ /outbound/send).
-    # MailBridge expects: to as a list, body_html/body_text (not "body"),
-    # and optional external_user_id for identity propagation.
+    # body_html: rich HTML for Gmail / Outlook / Apple Mail.
+    # body_text: plain-text fallback for non-HTML email clients.
+    if is_html:
+        body_html_final = body_text           # already HTML with HTML footer
+        body_text_final = _strip_html_text(body_text)   # stripped for fallback
+    else:
+        body_html_final = body_text           # MailBridge/Gmail handles plain text display
+        body_text_final = body_text           # same plain text for fallback
+
     payload = {
         "to": [recipient_email],
         "subject": sequence.subjectLine or "",
-        "body_html": body_text,
-        "body_text": body_text,
+        "body_html": body_html_final,
+        "body_text": body_text_final,
     }
     # Identity propagation: tell MailBridge which connected mailbox to send from.
     #

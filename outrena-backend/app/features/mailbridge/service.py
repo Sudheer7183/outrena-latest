@@ -926,14 +926,51 @@ class MailBridgeService:
                 f"</head><body>{body_html}</body></html>"
             )
 
-        body_html = _plain_to_html(body_for_send)
+        # body_html = _plain_to_html(body_for_send)
+
+        # # Build the MailBridge-compatible payload.
+        # mb_payload: dict[str, Any] = {
+        #     "to": [to],
+        #     "subject": subject,
+        #     "body_html": body_html,
+        #     "body_text": body_for_send,  # plain text fallback for non-HTML clients
+        # }
+        # ── HTML body detection ───────────────────────────────────────────────
+        # When the body was authored in the Tiptap RTE it already contains valid
+        # HTML (starts with a tag, contains closing tags). In that case:
+        #   - body_html: use the HTML as-is (do NOT call _plain_to_html, which
+        #     would html.escape() the tags and break the rendering)
+        #   - body_text: strip tags to generate a plain-text fallback
+        # For legacy plain-text bodies, keep the existing _plain_to_html path.
+        import re as _re_strip
+
+        def _is_rte_html(text: str) -> bool:
+            """True when body was produced by the Tiptap RTE (already HTML)."""
+            s = text.lstrip()
+            return bool(s) and s[0] == "<" and any(
+                marker in text
+                for marker in (
+                    "</p>", "</h", "<br", "</ul>", "</ol>",
+                    "</li>", "</strong>", "</em>",
+                )
+            )
+
+        if _is_rte_html(body_for_send):
+            # Body is HTML from the RTE — use directly, strip for plain-text fallback.
+            body_html = body_for_send
+            body_text_plain = _re_strip.sub(r"<[^>]+>", " ", body_for_send)
+            body_text_plain = _re_strip.sub(r"\s+", " ", body_text_plain).strip()
+        else:
+            # Legacy plain-text body — convert to HTML for rich clients.
+            body_html = _plain_to_html(body_for_send)
+            body_text_plain = body_for_send
 
         # Build the MailBridge-compatible payload.
         mb_payload: dict[str, Any] = {
             "to": [to],
             "subject": subject,
             "body_html": body_html,
-            "body_text": body_for_send,  # plain text fallback for non-HTML clients
+            "body_text": body_text_plain,  # plain text fallback for non-HTML clients
         }
 
         # FIX — per-user mailbox routing via external_user_id:
