@@ -104,6 +104,7 @@
 // import { AlumniTrackerPage } from "@/features/alumni_tracker/AlumniTrackerPage";
 // import { FlowAnalyticsPage } from "@/features/flow_analytics/FlowAnalyticsPage";
 // import { AutopilotQueuePage } from "@/features/autopilot_queue/AutopilotQueuePage";
+// import { ProfileSettingsPage } from "@/features/profile/ProfileSettingsPage";
  
 // /**
 //  * SuperAdminRedirect — renders a Navigate to /platform-admin when the logged-in
@@ -247,6 +248,8 @@
 //           { path: "setup/sender-identities", element: <SenderIdentitiesPage /> },
 //           { path: "usage", element: <UsagePage /> },
 //           { path: "support", element: <SupportPage /> },
+//           // Sender profile settings — linked from Topbar avatar → "My Profile"
+//           { path: "profile", element: <ProfileSettingsPage /> },
 //         ],
 //       },
 //       // MANAGER-gated pages (backend requires MANAGER minimum)
@@ -560,6 +563,7 @@ export const router = createBrowserRouter([
           { path: "setup/domains", element: <DomainsPage /> },                   // backend: MANAGER
           { path: "setup/mailbridge", element: <MailBridgePage /> },             // backend: MANAGER (list/get)
           { path: "setup/rate-limits", element: <RateLimitsPage /> },            // backend: MANAGER (list/get)
+          { path: "setup/scheduler", element: <SchedulerStatusPage /> },         // backend: MANAGER+ (tick/trigger lowered from TENANT_ADMIN)
         ],
       },
       // TENANT_ADMIN-gated setup + admin pages
@@ -569,7 +573,6 @@ export const router = createBrowserRouter([
           { path: "setup/llm-models", element: <LlmConfigPage /> },
           { path: "setup/prompts", element: <PromptManagementPage /> },
           { path: "setup/system-params", element: <SystemParamsPage /> },
-          { path: "setup/scheduler", element: <SchedulerStatusPage /> },
           { path: "setup/billing", element: <BillingPage /> },
           { path: "admin/users", element: <UserManagementPage /> },
           { path: "admin/roles", element: <RolesPage /> },

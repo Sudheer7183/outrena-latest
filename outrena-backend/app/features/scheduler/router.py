@@ -1,11 +1,87 @@
+# """
+# scheduler.py — Phase 3 /api/v1/scheduler router.
+
+# Endpoints:
+#   GET    /scheduler/status    in-process scheduler status (lastTickAt, etc.)
+#   POST   /scheduler/tick       force a single synchronous tick
+#   POST   /scheduler/trigger    trigger an immediate scheduler run (Celery or sync)
+#   GET    /scheduler/runs       list recent scheduler run logs
+# """
+# from __future__ import annotations
+
+# from fastapi import APIRouter, Depends, Query
+# from sqlalchemy.ext.asyncio import AsyncSession
+
+# from app.api.deps import get_db
+# from app.api.security import require_role
+# from app.schemas.auth import Role
+# from app.schemas.scheduler import (
+#     ManualTickRequest,
+#     ManualTickResponse,
+#     SchedulerStatusResponse,
+#     TriggerResponse,
+#     SchedulerRunsListResponse,
+# )
+# from app.features.scheduler.service import SchedulerService
+
+# router = APIRouter(prefix="/scheduler", tags=["Scheduler"])
+# _service = SchedulerService()
+
+
+# @router.get("/status", response_model=SchedulerStatusResponse)
+# async def get_status(
+#     db: AsyncSession = Depends(get_db),
+#     _: object = Depends(require_role(Role.REP)),
+# ) -> SchedulerStatusResponse:
+#     item = await _service.get_status(db)
+#     return SchedulerStatusResponse.model_validate(item)
+
+
+# @router.post("/tick", response_model=ManualTickResponse)
+# async def manual_tick(
+#     body: ManualTickRequest,
+#     db: AsyncSession = Depends(get_db),
+#     _: object = Depends(require_role(Role.TENANT_ADMIN)),
+# ) -> ManualTickResponse:
+#     """Force a single synchronous scheduler tick (testing/admin)."""
+#     return await _service.manual_tick(
+#         db, tenant_scoped=body.tenantScoped, max_send=body.maxSend
+#     )
+
+
+# @router.post("/trigger", response_model=TriggerResponse)
+# async def trigger(
+#     db: AsyncSession = Depends(get_db),
+#     _: object = Depends(require_role(Role.TENANT_ADMIN)),
+# ) -> TriggerResponse:
+#     """Trigger an immediate scheduler run (Celery async or synchronous fallback)."""
+#     return await _service.trigger(db)
+
+
+# @router.get("/runs", response_model=SchedulerRunsListResponse)
+# async def list_runs(
+#     limit: int = Query(20, ge=1, le=100),
+#     offset: int = Query(0, ge=0),
+#     db: AsyncSession = Depends(get_db),
+#     _: object = Depends(require_role(Role.REP)),
+# ) -> SchedulerRunsListResponse:
+#     """List recent scheduler run logs, newest first."""
+#     return await _service.list_runs(db, limit=limit, offset=offset)
+
 """
-scheduler.py — Phase 3 /api/v1/scheduler router.
+scheduler/router.py — Phase 3 /api/v1/scheduler router.
 
 Endpoints:
   GET    /scheduler/status    in-process scheduler status (lastTickAt, etc.)
   POST   /scheduler/tick       force a single synchronous tick
   POST   /scheduler/trigger    trigger an immediate scheduler run (Celery or sync)
   GET    /scheduler/runs       list recent scheduler run logs
+
+Role matrix (after MANAGER access grant):
+  GET  /status   → REP+        (read-only; always was REP+)
+  POST /tick     → MANAGER+    (was TENANT_ADMIN; managers can now run ticks)
+  POST /trigger  → MANAGER+    (was TENANT_ADMIN; managers can now trigger)
+  GET  /runs     → REP+        (read-only; always was REP+)
 """
 from __future__ import annotations
 
@@ -41,9 +117,13 @@ async def get_status(
 async def manual_tick(
     body: ManualTickRequest,
     db: AsyncSession = Depends(get_db),
-    _: object = Depends(require_role(Role.TENANT_ADMIN)),
+    _: object = Depends(require_role(Role.MANAGER)),
 ) -> ManualTickResponse:
-    """Force a single synchronous scheduler tick (testing/admin)."""
+    """Force a single synchronous scheduler tick (testing/admin).
+
+    Lowered from TENANT_ADMIN → MANAGER so managers can run ticks
+    without needing platform admin access.
+    """
     return await _service.manual_tick(
         db, tenant_scoped=body.tenantScoped, max_send=body.maxSend
     )
@@ -52,9 +132,13 @@ async def manual_tick(
 @router.post("/trigger", response_model=TriggerResponse)
 async def trigger(
     db: AsyncSession = Depends(get_db),
-    _: object = Depends(require_role(Role.TENANT_ADMIN)),
+    _: object = Depends(require_role(Role.MANAGER)),
 ) -> TriggerResponse:
-    """Trigger an immediate scheduler run (Celery async or synchronous fallback)."""
+    """Trigger an immediate scheduler run (Celery async or synchronous fallback).
+
+    Lowered from TENANT_ADMIN → MANAGER so managers can trigger runs
+    without needing platform admin access.
+    """
     return await _service.trigger(db)
 
 
