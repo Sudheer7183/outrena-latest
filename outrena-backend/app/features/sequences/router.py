@@ -154,24 +154,34 @@
 #     if icp_row is None:
 #         raise HTTPException(status.HTTP_404_NOT_FOUND, "ICP profile not found.")
  
-#     # ── Fetch all ACTIVE (non-deleted, non-anonymized) prospects under this ICP ─
-#     # Soft-deleted prospects have deleted_at set and PII replaced with "[anonymized]".
-#     # They must be excluded: rendering their data produces "[anonymized]" in emails.
+#     # ── Fetch all ACTIVE, non-suppressed prospects under this ICP ────────────
+#     # Exclusion rules (all must pass):
+#     #   - deleted_at IS NULL              — not soft-deleted
+#     #   - anonymized IS NOT TRUE          — not anonymized
+#     #   - suppressed IS NOT TRUE          — not suppressed (covers NULL + false)
+#     #   - consent_status <> 'withdrawn'   — unsubscribe not triggered
+#     #
+#     # The suppressed + consent_status checks enforce the unsubscribe contract:
+#     # a prospect who clicked "unsubscribe" must never appear in preview cards,
+#     # Approve All, or LLM generation again — not just be blocked at schedule time.
 #     prospect_rows = (
 #         await db.execute(
 #             select(_Prospect).where(
 #                 _Prospect.icpProfileId == body.icpProfileId,
 #                 _Prospect.deleted_at.is_(None),
 #                 _Prospect.anonymized.is_(False),
+#                 _Prospect.suppressed.is_not(True),
+#                 _Prospect.consent_status != "withdrawn",
 #             )
 #         )
 #     ).scalars().all()
- 
+
 #     if not prospect_rows:
 #         raise HTTPException(
 #             status.HTTP_422_UNPROCESSABLE_ENTITY,
-#             f"No active prospects are linked to ICP '{getattr(icp_row, 'name', body.icpProfileId)}'. "
-#             "Deleted prospects are excluded. Go to Prospects and link active prospects to this ICP.",
+#             f"No eligible prospects are linked to ICP '{getattr(icp_row, 'name', body.icpProfileId)}'. "
+#             "Deleted and unsubscribed prospects are excluded. "
+#             "Go to Prospects and link active, non-suppressed prospects to this ICP.",
 #         )
  
 #     template_name = getattr(template, "name", "")
@@ -199,87 +209,85 @@
 #                 return var_map.get(m.group(1).strip(), m.group(0))
 #             return re.sub(r"\{\{\s*(\w+)\s*\}\}", _sub, text)
  
-        # def _append_footer(body_text: str | None, prospect: "_Prospect") -> str:  # noqa: ARG001
-        #     """Append signature + CAN-SPAM footer to the rendered body.
+#         def _append_footer(body_text: str | None, prospect: "_Prospect") -> str:  # noqa: ARG001
+#             """Append signature + CAN-SPAM footer to the rendered body.
 
-        #     Rules:
-        #     - Signature is appended if profile has one AND it's not already in the body.
-        #     - Unsubscribe footer is appended if the body doesn't already contain
-        #       the literal placeholder {{unsubscribe_url}} (checked after variable
-        #       substitution — the placeholder remains because it's resolved by MailBridge
-        #       at send time, not here).
-        #     - Physical address is included in the footer when available.
+#             Rules:
+#             - Signature is appended if profile has one AND it's not already in the body.
+#             - Unsubscribe footer is appended if the body doesn't already contain
+#               the literal placeholder {{unsubscribe_url}} (checked after variable
+#               substitution — the placeholder remains because it's resolved by MailBridge
+#               at send time, not here).
+#             - Physical address is included in the footer when available.
 
-        #     RTE UPGRADE: when bodyTemplate is HTML (from the Tiptap editor),
-        #     the signature and footer must be appended as HTML — plain-text \n
-        #     separators collapse to a single space in HTML email renderers
-        #     (Gmail, Outlook). HTML bodies are detected by the opening < tag.
-        #     """
-        #     text = body_text or ""
-        #     sig  = (body.emailSignature or "").strip()
-        #     addr = (body.physicalAddress or "").strip()
+#             RTE UPGRADE: when bodyTemplate is HTML (from the Tiptap editor),
+#             the signature and footer must be appended as HTML — plain-text \n
+#             separators collapse to a single space in HTML email renderers
+#             (Gmail, Outlook). HTML bodies are detected by the opening < tag.
+#             """
+#             text = body_text or ""
+#             sig  = (body.emailSignature or "").strip()
+#             addr = (body.physicalAddress or "").strip()
 
-        #     # Detect whether the body is HTML (from the RTE) or plain text.
-        #     # A body is HTML when it starts with an HTML tag AND contains at
-        #     # least one closing tag.
-        #     _s = text.lstrip()
-        #     is_html_body = (
-        #         bool(_s)
-        #         and _s[0] == "<"
-        #         and any(
-        #             m in text
-        #             for m in ("</p>", "</h", "<br", "</ul>", "</ol>", "</li>")
-        #         )
-        #     )
+#             # Detect whether the body is HTML (from the RTE) or plain text.
+#             # A body is HTML when it starts with an HTML tag AND contains at
+#             # least one closing tag.
+#             _s = text.lstrip()
+#             is_html_body = (
+#                 bool(_s)
+#                 and _s[0] == "<"
+#                 and any(
+#                     m in text
+#                     for m in ("</p>", "</h", "<br", "</ul>", "</ol>", "</li>")
+#                 )
+#             )
 
-        #     footer_parts: list[str] = []
+#             footer_parts: list[str] = []
 
-        #     # ── Signature ────────────────────────────────────────────────────
-        #     if sig and sig not in text:
-        #         if is_html_body:
-        #             # Convert each line of the signature to an inline <br>
-        #             # so "Best,\nSudheer\nvanigamsoftware.com" renders as:
-        #             #   Best,
-        #             #   Sudheer
-        #             #   vanigamsoftware.com
-        #             sig_html = "<br>".join(
-        #                 line for line in sig.splitlines()
-        #             )
-        #             footer_parts.append(f"<p>{sig_html}</p>")
-        #         else:
-        #             footer_parts.append(sig)
+#             # ── Signature ────────────────────────────────────────────────────
+#             if sig and sig not in text:
+#                 if is_html_body:
+#                     # Convert each line of the signature to an inline <br>
+#                     # so "Best,\nSudheer\nvanigamsoftware.com" renders as:
+#                     #   Best,
+#                     #   Sudheer
+#                     #   vanigamsoftware.com
+#                     sig_html = "<br>".join(
+#                         line for line in sig.splitlines()
+#                     )
+#                     footer_parts.append(f"<p>{sig_html}</p>")
+#                 else:
+#                     footer_parts.append(sig)
 
-        #     # ── Unsubscribe + physical address ───────────────────────────────
-        #     has_unsub_placeholder = (
-        #         "{{unsubscribe_url}}" in text
-        #         or "{{ unsubscribe_url }}" in text
-        #     )
-        #     if not has_unsub_placeholder:
-        #         unsub_line = "To unsubscribe: {{unsubscribe_url}}"
-        #         if is_html_body:
-        #             if addr:
-        #                 footer_parts.append(
-        #                     f"<p>---<br>{unsub_line}<br>{addr}</p>"
-        #                 )
-        #             else:
-        #                 footer_parts.append(f"<p>---<br>{unsub_line}</p>")
-        #         else:
-        #             if addr:
-        #                 footer_parts.append(f"---\n{unsub_line}\n{addr}")
-        #             else:
-        #                 footer_parts.append(f"---\n{unsub_line}")
+#             # ── Unsubscribe + physical address ───────────────────────────────
+#             has_unsub_placeholder = (
+#                 "{{unsubscribe_url}}" in text
+#                 or "{{ unsubscribe_url }}" in text
+#             )
+#             if not has_unsub_placeholder:
+#                 unsub_line = "To unsubscribe: {{unsubscribe_url}}"
+#                 if is_html_body:
+#                     if addr:
+#                         footer_parts.append(
+#                             f"<p>---<br>{unsub_line}<br>{addr}</p>"
+#                         )
+#                     else:
+#                         footer_parts.append(f"<p>---<br>{unsub_line}</p>")
+#                 else:
+#                     if addr:
+#                         footer_parts.append(f"---\n{unsub_line}\n{addr}")
+#                     else:
+#                         footer_parts.append(f"---\n{unsub_line}")
 
-        #     # ── Join ─────────────────────────────────────────────────────────
-        #     if footer_parts:
-        #         if is_html_body:
-        #             # HTML parts are block-level — no separator needed between them.
-        #             return text.rstrip() + "".join(footer_parts)
-        #         else:
-        #             # Plain text — double newline between sections.
-        #             return text.rstrip() + "\n\n" + "\n\n".join(footer_parts)
-        #     return text
- 
-
+#             # ── Join ─────────────────────────────────────────────────────────
+#             if footer_parts:
+#                 if is_html_body:
+#                     # HTML parts are block-level — no separator needed between them.
+#                     return text.rstrip() + "".join(footer_parts)
+#                 else:
+#                     # Plain text — double newline between sections.
+#                     return text.rstrip() + "\n\n" + "\n\n".join(footer_parts)
+#             return text
  
 #         rendered_rows: list[SequenceResponse] = []
 #         prospect_map: dict[str, str] = {}   # seq.id → "First Last · Company"
@@ -397,7 +405,9 @@
 #             prospectMap=prospect_map,
 #             message=(
 #                 f"Template '{template_name}' rendered for {len(rendered_rows)} prospect(s) "
-#                 f"under ICP '{icp_name}'.{skip_note} Review all and Approve & Schedule."
+#                 f"under ICP '{icp_name}'.{skip_note} "
+#                 f"Unsubscribed prospects are automatically excluded. "
+#                 f"Review all and Approve & Schedule."
 #             ),
 #         )
  
@@ -798,23 +808,58 @@ async def template_send(
     # Exclusion rules (all must pass):
     #   - deleted_at IS NULL              — not soft-deleted
     #   - anonymized IS NOT TRUE          — not anonymized
-    #   - suppressed IS NOT TRUE          — not suppressed (covers NULL + false)
-    #   - consent_status <> 'withdrawn'   — unsubscribe not triggered
+    #   - suppressed IS NOT TRUE          — prospect-level opt-out flag
+    #   - consent_status <> 'withdrawn'   — prospect-level consent withdrawn
+    #   - email NOT IN EmailSuppression   — email-level opt-out (catches duplicates
+    #                                       and future imports of the same address)
     #
-    # The suppressed + consent_status checks enforce the unsubscribe contract:
-    # a prospect who clicked "unsubscribe" must never appear in preview cards,
-    # Approve All, or LLM generation again — not just be blocked at schedule time.
-    prospect_rows = (
-        await db.execute(
-            select(_Prospect).where(
-                _Prospect.icpProfileId == body.icpProfileId,
-                _Prospect.deleted_at.is_(None),
-                _Prospect.anonymized.is_(False),
-                _Prospect.suppressed.is_not(True),
-                _Prospect.consent_status != "withdrawn",
+    # The EmailSuppression subquery is the key addition: it ensures that if the
+    # same email address was unsubscribed via ANY Prospect row, ALL Prospect rows
+    # with that email are excluded from the preview — not just the one whose token
+    # was in the clicked email.
+    from sqlalchemy import text as _raw_sql, not_, exists
+
+    # Build subquery: emails present in EmailSuppression for this tenant.
+    # We use a raw NOT EXISTS subquery so that if the EmailSuppression table
+    # does not yet exist (migration 0021 not yet run), the query falls back
+    # gracefully by catching the exception below and re-running without it.
+    _base_filters = [
+        _Prospect.icpProfileId == body.icpProfileId,
+        _Prospect.deleted_at.is_(None),
+        _Prospect.anonymized.is_(False),
+        _Prospect.suppressed.is_not(True),
+        _Prospect.consent_status != "withdrawn",
+    ]
+
+    try:
+        # Attempt the full query including the EmailSuppression exclusion.
+        from sqlalchemy import func as _func
+        _suppressed_emails_subq = (
+            select(_raw_sql("1").columns)
+            .select_from(_raw_sql('"EmailSuppression"').columns("email"))
+            .where(
+                _raw_sql('"EmailSuppression".email') == _func.lower(_func.trim(_Prospect.email))
             )
+            .correlate(_Prospect)
+            .exists()
         )
-    ).scalars().all()
+        prospect_rows = (
+            await db.execute(
+                select(_Prospect).where(
+                    *_base_filters,
+                    not_(_suppressed_emails_subq),
+                )
+            )
+        ).scalars().all()
+    except Exception:  # noqa: BLE001
+        # EmailSuppression table may not exist yet (migration 0021 pending).
+        # Fall back to prospect-level filters only — still safe, just not
+        # catching email-level duplicates until migration is applied.
+        prospect_rows = (
+            await db.execute(
+                select(_Prospect).where(*_base_filters)
+            )
+        ).scalars().all()
 
     if not prospect_rows:
         raise HTTPException(

@@ -1,5 +1,4 @@
 
-
 # """
 # sequence_service.py — Sequence CRUD + send-email + scheduled-send + 7-touch cadence.
 
@@ -310,6 +309,14 @@
 #             )
 
 #         # ── Replace {{unsubscribe_url}} with real URL ─────────────────────────
+#         # IMPORTANT: the URL must point to the backend GET endpoint
+#         # (GET /api/v1/public/unsubscribe?token=...&tenant_slug=...) which
+#         # returns an HTML confirmation page directly — NOT to the React SPA
+#         # at /p/unsubscribe.  The React page requires JavaScript to execute
+#         # and then makes a separate POST; email security scanners and plain-
+#         # text clients follow GET links only, so the React approach fails
+#         # silently.  The backend GET endpoint handles the unsubscribe in one
+#         # HTTP round-trip with no client-side JS needed.
 #         body_to_send = seq.bodyCopy or ""
 #         if "{{unsubscribe_url}}" in body_to_send and prospect is not None:
 #             try:
@@ -318,10 +325,22 @@
 #                 _tenant_slug = await _rts(db)
 #                 _prospect_token = getattr(prospect, "unsubscribeToken", None) or ""
 #                 _base = _gs().BASE_DOMAIN
-#                 if _prospect_token and _tenant_slug and _base:
+#                 if not _prospect_token:
+#                     # Prospect has no unsubscribeToken — log a warning and leave
+#                     # the placeholder in place rather than silently emitting a
+#                     # broken link.  Run migration 0020 to backfill missing tokens.
+#                     logger.warning(
+#                         "sequence.send_email.missing_unsubscribe_token",
+#                         sequence_id=sequence_id,
+#                         prospect_id=seq.prospectId,
+#                         hint="Run alembic upgrade head (migration 0020) to backfill tokens.",
+#                     )
+#                 elif _tenant_slug and _base:
+#                     # Direct backend GET — works in all email clients, security
+#                     # scanners, and one-click RFC 8058 unsubscribe handlers.
 #                     body_to_send = body_to_send.replace(
 #                         "{{unsubscribe_url}}",
-#                         f"https://{_base}/p/unsubscribe"
+#                         f"https://{_base}/api/v1/public/unsubscribe"
 #                         f"?token={_prospect_token}&tenant_slug={_tenant_slug}",
 #                     )
 #             except Exception:  # noqa: BLE001
@@ -526,6 +545,7 @@
 #             await db.commit()
 
 #         return created
+
 """
 sequence_service.py — Sequence CRUD + send-email + scheduled-send + 7-touch cadence.
 
@@ -712,12 +732,16 @@ class SequenceService:
             return None
 
         # ── Suppression gate ──────────────────────────────────────────────────
-        # Block scheduling if the prospect has unsubscribed. Use raw SQL to
-        # bypass the SQLAlchemy identity-map cache (expire_on_commit=False means
-        # cached objects are never expired — we must query fresh from DB).
+        # Two-layer check:
+        #   Layer 1 — Prospect-level: suppressed=true OR consent_status='withdrawn'
+        #   Layer 2 — Email-level: email address in EmailSuppression table
+        #
+        # Layer 2 catches duplicate Prospect rows and future imports of the same
+        # email address that would otherwise bypass the prospect-level flag.
+        # Use raw SQL to bypass the SQLAlchemy identity-map cache.
         from sqlalchemy import text as _t
         _sup_result = await db.execute(
-            _t('SELECT suppressed, consent_status FROM "Prospect" WHERE id = :pid'),
+            _t('SELECT suppressed, consent_status, email FROM "Prospect" WHERE id = :pid'),
             {"pid": seq.prospectId},
         )
         _sup_row = _sup_result.mappings().first()
@@ -730,6 +754,25 @@ class SequenceService:
                 status_code=422,
                 detail="Cannot schedule — this prospect has unsubscribed. No further emails will be sent to them.",
             )
+
+        # Layer 2: check EmailSuppression by email address (catches duplicates
+        # and future imports of the same email).
+        if _sup_row and _sup_row.get("email"):
+            _email_lower = (_sup_row["email"] or "").strip().lower()
+            if _email_lower:
+                _es_result = await db.execute(
+                    _t('SELECT 1 FROM "EmailSuppression" WHERE email = :email LIMIT 1'),
+                    {"email": _email_lower},
+                )
+                if _es_result.fetchone() is not None:
+                    from fastapi import HTTPException as _HTTPEx
+                    raise _HTTPEx(
+                        status_code=422,
+                        detail=(
+                            f"Cannot schedule — {_email_lower} has unsubscribed from this tenant's outreach. "
+                            "No further emails will be sent to this address."
+                        ),
+                    )
 
         # FIX: stamp the approving user's UUID so the scheduler routes
         # the send through their connected MailBridge inbox, not 'system'.
@@ -816,6 +859,12 @@ class SequenceService:
             )
 
         # ── Suppression gate ──────────────────────────────────────────────────
+        # Two-layer check:
+        #   Layer 1 — Prospect-level: suppressed=true OR consent_status='withdrawn'
+        #   Layer 2 — Email-level: email address in EmailSuppression table
+        #
+        # Layer 2 catches duplicate Prospect rows and future imports of the same
+        # email address that would otherwise bypass the prospect-level flag.
         # Use raw SQL to bypass identity-map cache (expire_on_commit=False).
         from sqlalchemy import text as _t
         _sup_result = await db.execute(
@@ -834,6 +883,30 @@ class SequenceService:
                 sentAt=None,
                 message="Prospect has unsubscribed — email not sent.",
             )
+
+        # Layer 2: check EmailSuppression by email address (catches duplicates
+        # and future imports of the same address into new Prospect rows).
+        if to_email:
+            _email_lower = to_email.strip().lower()
+            try:
+                _es_result = await db.execute(
+                    _t('SELECT 1 FROM "EmailSuppression" WHERE email = :email LIMIT 1'),
+                    {"email": _email_lower},
+                )
+                if _es_result.fetchone() is not None:
+                    return SendEmailResponse(
+                        id=sequence_id,
+                        status=EmailStatus.Failed,
+                        mailBridgeMessageId=None,
+                        sentAt=None,
+                        message=(
+                            f"{_email_lower} has unsubscribed from this tenant's outreach — email not sent."
+                        ),
+                    )
+            except Exception:  # noqa: BLE001
+                # EmailSuppression table may not exist yet (migration 0021 pending).
+                # Fail open: do not block sends if the table is missing.
+                pass
 
         # ── Replace {{unsubscribe_url}} with real URL ─────────────────────────
         # IMPORTANT: the URL must point to the backend GET endpoint

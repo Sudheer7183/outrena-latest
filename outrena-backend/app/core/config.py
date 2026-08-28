@@ -260,7 +260,7 @@ class Settings(BaseSettings):
     MAILBRIDGE_API_KEY: str = ""  # Tenant API key (mb_live_...) for MailBridge tenancy mode
     MAILBRIDGE_PLATFORM_ADMIN_SECRET: str = ""  # Platform admin secret for POST /platform/register
     MAILBRIDGE_REPLY_POLL_ENABLED: bool = True   # Set False to disable without redeployment
-    MAILBRIDGE_REPLY_POLL_SECONDS: int = 120     # How often to poll MailBridge for replies
+    MAILBRIDGE_REPLY_POLL_SECONDS: int = 120    # How often to poll MailBridge for replies
 
     # ── Logging ─────────────────────────────────────────────────────────────
     LOG_LEVEL: str = "INFO"

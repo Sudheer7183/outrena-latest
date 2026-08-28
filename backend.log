@@ -1,0 +1,75 @@
+outrena-backend  | [env.py] do_run_migrations starting for schema_name='public'
+outrena-backend  | INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+outrena-backend  | INFO  [alembic.runtime.migration] Will assume transactional DDL.
+outrena-backend  | [env.py] AFTER migrations for schema_name='public': to_regclass('public.tenants') = 'tenants'
+outrena-backend  | [env.py] _list_active_tenant_schemas found: ['tenant_acme', 'tenant_clearcourse', 'tenant_testtenant2', 'tenant_testtenant3', 'tenant_testtenant4', 'tenant_vanigam']
+outrena-backend  | [env.py] do_run_migrations starting for schema_name='tenant_acme'
+outrena-backend  | INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+outrena-backend  | INFO  [alembic.runtime.migration] Will assume transactional DDL.
+outrena-backend  | [env.py] AFTER migrations for schema_name='tenant_acme': to_regclass('public.tenants') = 'tenants'
+outrena-backend  | [env.py] do_run_migrations starting for schema_name='tenant_clearcourse'
+outrena-backend  | INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+outrena-backend  | INFO  [alembic.runtime.migration] Will assume transactional DDL.
+outrena-backend  | [env.py] AFTER migrations for schema_name='tenant_clearcourse': to_regclass('public.tenants') = 'tenants'
+outrena-backend  | [env.py] do_run_migrations starting for schema_name='tenant_testtenant2'
+outrena-backend  | INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+outrena-backend  | INFO  [alembic.runtime.migration] Will assume transactional DDL.
+outrena-backend  | [env.py] AFTER migrations for schema_name='tenant_testtenant2': to_regclass('public.tenants') = 'tenants'
+outrena-backend  | [env.py] do_run_migrations starting for schema_name='tenant_testtenant3'
+outrena-backend  | INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+outrena-backend  | INFO  [alembic.runtime.migration] Will assume transactional DDL.
+outrena-backend  | [env.py] AFTER migrations for schema_name='tenant_testtenant3': to_regclass('public.tenants') = 'tenants'
+outrena-backend  | [env.py] do_run_migrations starting for schema_name='tenant_testtenant4'
+outrena-backend  | INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+outrena-backend  | INFO  [alembic.runtime.migration] Will assume transactional DDL.
+outrena-backend  | [env.py] AFTER migrations for schema_name='tenant_testtenant4': to_regclass('public.tenants') = 'tenants'
+outrena-backend  | [env.py] do_run_migrations starting for schema_name='tenant_vanigam'
+outrena-backend  | INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+outrena-backend  | INFO  [alembic.runtime.migration] Will assume transactional DDL.
+outrena-backend  | [env.py] AFTER migrations for schema_name='tenant_vanigam': to_regclass('public.tenants') = 'tenants'
+outrena-backend  | INFO:     Will watch for changes in these directories: ['/app']
+outrena-backend  | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+outrena-backend  | INFO:     Started reloader process [10] using WatchFiles
+outrena-backend  | 2026-08-28 04:16:10 [info     ] posthog.disabled               reason=POSTHOG_KEY empty
+outrena-backend  | Process SpawnProcess-1:
+outrena-backend  | Traceback (most recent call last):
+outrena-backend  |   File "/usr/local/lib/python3.11/multiprocessing/process.py", line 314, in _bootstrap
+outrena-backend  |     self.run()
+outrena-backend  |   File "/usr/local/lib/python3.11/multiprocessing/process.py", line 108, in run
+outrena-backend  |     self._target(*self._args, **self._kwargs)
+outrena-backend  |   File "/opt/venv/lib/python3.11/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+outrena-backend  |     target(sockets=sockets)
+outrena-backend  |   File "/opt/venv/lib/python3.11/site-packages/uvicorn/server.py", line 66, in run
+outrena-backend  |     return asyncio.run(self.serve(sockets=sockets))
+outrena-backend  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+outrena-backend  |   File "/usr/local/lib/python3.11/asyncio/runners.py", line 190, in run
+outrena-backend  |     return runner.run(main)
+outrena-backend  |            ^^^^^^^^^^^^^^^^
+outrena-backend  |   File "/usr/local/lib/python3.11/asyncio/runners.py", line 118, in run
+outrena-backend  |     return self._loop.run_until_complete(task)
+outrena-backend  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+outrena-backend  |   File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+outrena-backend  |   File "/opt/venv/lib/python3.11/site-packages/uvicorn/server.py", line 70, in serve
+outrena-backend  |     await self._serve(sockets)
+outrena-backend  |   File "/opt/venv/lib/python3.11/site-packages/uvicorn/server.py", line 77, in _serve
+outrena-backend  |     config.load()
+outrena-backend  |   File "/opt/venv/lib/python3.11/site-packages/uvicorn/config.py", line 435, in load
+outrena-backend  |     self.loaded_app = import_from_string(self.app)
+outrena-backend  |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+outrena-backend  |   File "/opt/venv/lib/python3.11/site-packages/uvicorn/importer.py", line 19, in import_from_string
+outrena-backend  |     module = importlib.import_module(module_str)
+outrena-backend  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+outrena-backend  |   File "/usr/local/lib/python3.11/importlib/__init__.py", line 126, in import_module
+outrena-backend  |     return _bootstrap._gcd_import(name[level:], package, level)
+outrena-backend  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+outrena-backend  |   File "<frozen importlib._bootstrap>", line 1204, in _gcd_import
+outrena-backend  |   File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+outrena-backend  |   File "<frozen importlib._bootstrap>", line 1147, in _find_and_load_unlocked
+outrena-backend  |   File "<frozen importlib._bootstrap>", line 690, in _load_unlocked
+outrena-backend  |   File "<frozen importlib._bootstrap_external>", line 940, in exec_module
+outrena-backend  |   File "<frozen importlib._bootstrap>", line 241, in _call_with_frames_removed
+outrena-backend  |   File "/app/app/main.py", line 39, in <module>
+outrena-backend  |     from app.middleware.tenant_middleware import TenantMiddleware
+outrena-backend  |   File "/app/app/middleware/tenant_middleware.py", line 390
+outrena-backend  |     "/api/v1/mailbridge/webhook",  # MailBridge bounce/reply webhook — tenant resolved from payload
+outrena-backend  | IndentationError: unexpected indent

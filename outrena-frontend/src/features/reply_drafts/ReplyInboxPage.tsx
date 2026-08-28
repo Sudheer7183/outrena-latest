@@ -1,14 +1,21 @@
+
 // /**
-//  * ReplyInboxPage.tsx — Gap closure RI-1 through RI-8
-//  * Layout matches Next.js reference: two-tab (Manual Review + Auto-Pilot),
-//  * inline toolbar, draft list + detail panel side-by-side, inline deal card.
+//  * ReplyInboxPage.tsx
+//  *
+//  * Shows a conversation-thread view for each reply draft:
+//  *   1. What Outrena sent (from Sequence.subjectLine + bodyCopy)
+//  *   2. What the prospect replied (ReplyDraft.originalReply)
+//  *   3. The AI-generated draft reply (ReplyDraft.draftBody)
+//  *
+//  * The left panel is a list of drafts grouped by prospect.
+//  * The right panel is the conversation thread + action buttons.
 //  */
 // import { useMemo, useState, useEffect } from 'react';
 // import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 // import {
 //   Bot, CheckCircle2, Send, Sparkles, FileDown, Eye, Info,
 //   Loader2, MessageCircleReply, Zap, Ban, DollarSign, Clock,
-//   ShieldAlert, XCircle,
+//   ShieldAlert, XCircle, Mail, User, ArrowDown,
 // } from 'lucide-react';
 // import { toast } from 'sonner';
 
@@ -48,6 +55,11 @@
 //   autoSentAt: string | null;
 //   createdAt: string;
 //   updatedAt: string;
+//   // Enriched fields from backend join
+//   prospectName: string | null;
+//   prospectEmail: string | null;
+//   sentEmailSubject: string | null;
+//   sentEmailBody: string | null;
 // }
 
 // interface AutoPilotPreview {
@@ -103,6 +115,83 @@
 //   return ((data as { items?: T[] }).items) ?? [];
 // }
 
+// // ─── Conversation Thread Component ───────────────────────────────────────────
+
+// function ConversationThread({ draft }: { draft: ReplyDraft }) {
+//   const prospectLabel = draft.prospectName ?? draft.prospectEmail ?? 'Prospect';
+
+//   return (
+//     <div className="space-y-3">
+//       {/* ── Step 1: What Outrena sent ─────────────────────────────────── */}
+//       <div className="flex flex-col gap-1">
+//         <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground uppercase tracking-wide">
+//           <Mail className="h-3 w-3" /> You sent
+//         </div>
+//         <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+//           {draft.sentEmailSubject && (
+//             <p className="font-medium text-xs text-muted-foreground mb-1.5">
+//               Subject: {draft.sentEmailSubject}
+//             </p>
+//           )}
+//           <p className="text-sm whitespace-pre-wrap leading-relaxed">
+//             {draft.sentEmailBody ?? (
+//               <span className="italic text-muted-foreground">
+//                 Email body not captured — check Sequence details.
+//               </span>
+//             )}
+//           </p>
+//         </div>
+//       </div>
+
+//       {/* Arrow connector */}
+//       <div className="flex items-center justify-center text-muted-foreground/40">
+//         <ArrowDown className="h-4 w-4" />
+//       </div>
+
+//       {/* ── Step 2: Prospect's reply ───────────────────────────────────── */}
+//       <div className="flex flex-col gap-1">
+//         <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground uppercase tracking-wide">
+//           <User className="h-3 w-3" />
+//           <span>{prospectLabel} replied</span>
+//           {draft.prospectEmail && (
+//             <span className="normal-case font-normal text-muted-foreground/60">
+//               &lt;{draft.prospectEmail}&gt;
+//             </span>
+//           )}
+//         </div>
+//         <div className="rounded-lg border border-amber-200 bg-amber-50/40 p-3">
+//           <p className="text-sm whitespace-pre-wrap leading-relaxed">{draft.originalReply}</p>
+//         </div>
+//       </div>
+
+//       {/* Arrow connector (only show if there's a draft) */}
+//       {draft.draftBody && (
+//         <div className="flex items-center justify-center text-muted-foreground/40">
+//           <ArrowDown className="h-4 w-4" />
+//         </div>
+//       )}
+
+//       {/* ── Step 3: AI-Generated Draft ────────────────────────────────── */}
+//       {draft.draftBody && (
+//         <div className="flex flex-col gap-1">
+//           <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground uppercase tracking-wide">
+//             <Sparkles className="h-3 w-3 text-emerald-600" />
+//             <span className="text-emerald-700">AI-Generated Draft</span>
+//             {draft.suggestedAction && (
+//               <span className="normal-case font-normal text-muted-foreground/60 ml-1">
+//                 · {draft.suggestedAction}
+//               </span>
+//             )}
+//           </div>
+//           <div className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-3">
+//             <p className="text-sm whitespace-pre-wrap leading-relaxed">{draft.draftBody}</p>
+//           </div>
+//         </div>
+//       )}
+//     </div>
+//   );
+// }
+
 // // ─── Component ────────────────────────────────────────────────────────────────
 
 // export function ReplyInboxPage() {
@@ -144,7 +233,6 @@
 //   const [logReplyText, setLogReplyText]   = useState('');
 //   const [logSubmitting, setLogSubmitting] = useState(false);
 
-//   // Sequences for the selected prospect (for Log Reply sequenceId)
 //   const { data: logSequencesRaw } = useQuery({
 //     queryKey: ['sequences-for-log', logProspectId],
 //     queryFn: () => http.get<unknown>('/api/v1/sequences', { prospect_id: logProspectId, limit: 50 }),
@@ -153,13 +241,13 @@
 //   });
 //   const logSequences = normalise<{ id: string; touchNumber: number; angle: string }>(logSequencesRaw);
 
-//   const [apPreviewOpen, setApPreviewOpen]     = useState(false);
+//   const [apPreviewOpen, setApPreviewOpen]       = useState(false);
 //   const [apPreviewLoading, setApPreviewLoading] = useState(false);
-//   const [apPreview, setApPreview]             = useState<AutoPilotPreview | null>(null);
-//   const [apConfirmOpen, setApConfirmOpen]     = useState(false);
-//   const [apSending, setApSending]             = useState(false);
-//   const [apResult, setApResult]               = useState<AutoPilotSendResult | null>(null);
-//   const [apResultOpen, setApResultOpen]       = useState(false);
+//   const [apPreview, setApPreview]               = useState<AutoPilotPreview | null>(null);
+//   const [apConfirmOpen, setApConfirmOpen]       = useState(false);
+//   const [apSending, setApSending]               = useState(false);
+//   const [apResult, setApResult]                 = useState<AutoPilotSendResult | null>(null);
+//   const [apResultOpen, setApResultOpen]         = useState(false);
 
 //   const filteredDrafts = useMemo(() =>
 //     showAutoPilotOnly ? replies.filter((r) => r.autoPilotEligible) : replies,
@@ -180,6 +268,14 @@
 //       setSelectedDraft(filteredDrafts[0]);
 //     }
 //   }, [filteredDrafts, selectedDraft]);
+
+//   // When the list refreshes, keep selectedDraft in sync so enriched fields update.
+//   useEffect(() => {
+//     if (selectedDraft) {
+//       const fresh = filteredDrafts.find((d) => d.id === selectedDraft.id);
+//       if (fresh) setSelectedDraft(fresh);
+//     }
+//   }, [filteredDrafts]); // eslint-disable-line react-hooks/exhaustive-deps
 
 //   const approveMut = useMutation({
 //     mutationFn: (id: string) => http.put(`/api/v1/reply-drafts/${id}`, { status: 'approved' }),
@@ -207,7 +303,7 @@
 //   });
 
 //   const handleExportCsv = () => {
-//     const headers = ['id', 'category', 'status', 'confidence', 'autoPilotEligible', 'originalReply', 'draftBody', 'createdAt'];
+//     const headers = ['id', 'category', 'status', 'confidence', 'autoPilotEligible', 'prospectName', 'prospectEmail', 'sentEmailSubject', 'originalReply', 'draftBody', 'createdAt'];
 //     const csv = [
 //       headers.join(','),
 //       ...replies.map((r) =>
@@ -320,17 +416,22 @@
 //             </div>
 //           </div>
 
-//           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-//             {/* Draft list */}
-//             <Card>
+//           <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+//             {/* ── Left: Draft List ─────────────────────────────────────── */}
+//             <Card className="lg:col-span-2">
 //               <CardHeader className="pb-2">
 //                 <CardTitle className="text-sm flex items-center justify-between">
-//                   <span>Reply Drafts {showAutoPilotOnly && <Badge variant="outline" className="ml-2 text-[10px]">filter: auto-pilot eligible</Badge>}</span>
+//                   <span>
+//                     Reply Drafts
+//                     {showAutoPilotOnly && (
+//                       <Badge variant="outline" className="ml-2 text-[10px]">filter: auto-pilot eligible</Badge>
+//                     )}
+//                   </span>
 //                   <span className="text-xs text-muted-foreground font-normal">{filteredDrafts.length} shown</span>
 //                 </CardTitle>
 //               </CardHeader>
 //               <CardContent className="p-0">
-//                 <div className="max-h-[600px] overflow-y-auto">
+//                 <div className="max-h-[640px] overflow-y-auto">
 //                   {isLoading ? (
 //                     <div className="p-6 text-center"><Loader2 className="h-5 w-5 animate-spin mx-auto" /></div>
 //                   ) : filteredDrafts.length === 0 ? (
@@ -344,25 +445,43 @@
 //                     <button
 //                       key={d.id}
 //                       onClick={() => setSelectedDraft(d)}
-//                       className={cn('w-full text-left p-3 border-b last:border-0 hover:bg-muted/30 transition-colors', selectedDraft?.id === d.id && 'bg-muted/50')}
+//                       className={cn(
+//                         'w-full text-left p-3 border-b last:border-0 hover:bg-muted/30 transition-colors',
+//                         selectedDraft?.id === d.id && 'bg-muted/50 border-l-2 border-l-primary'
+//                       )}
 //                     >
-//                       <div className="flex items-center justify-between gap-2">
-//                         <div className="flex items-center gap-1.5 flex-wrap">
-//                           <span className={cn('px-1.5 py-0.5 rounded text-[10px] font-medium', CATEGORY_COLORS[d.category] ?? 'bg-gray-100')}>
-//                             {d.category.replace(/_/g, ' ')}
-//                           </span>
-//                           {d.autoPilotEligible && (
-//                             <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-100 text-violet-700 flex items-center gap-0.5">
-//                               <Zap className="h-2.5 w-2.5" /> auto-pilot
-//                             </span>
-//                           )}
-//                         </div>
+//                       {/* Prospect name + status badge */}
+//                       <div className="flex items-center justify-between gap-2 mb-1">
+//                         <span className="text-xs font-semibold truncate">
+//                           {d.prospectName ?? d.prospectEmail ?? 'Unknown Prospect'}
+//                         </span>
 //                         <span className={cn('px-1.5 py-0.5 rounded text-[10px] shrink-0', STATUS_COLORS[d.status] ?? 'bg-gray-100')}>
 //                           {d.status.replace('_', ' ')}
 //                         </span>
 //                       </div>
-//                       <p className="text-xs font-medium mt-1.5 line-clamp-1">{d.originalReply}</p>
-//                       {d.draftBody && <p className="text-xs text-muted-foreground mt-1 line-clamp-1">{d.draftBody}</p>}
+
+//                       {/* Category + auto-pilot badge */}
+//                       <div className="flex items-center gap-1.5 flex-wrap mb-1.5">
+//                         <span className={cn('px-1.5 py-0.5 rounded text-[10px] font-medium', CATEGORY_COLORS[d.category] ?? 'bg-gray-100')}>
+//                           {d.category.replace(/_/g, ' ')}
+//                         </span>
+//                         {d.autoPilotEligible && (
+//                           <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-100 text-violet-700 flex items-center gap-0.5">
+//                             <Zap className="h-2.5 w-2.5" /> auto-pilot
+//                           </span>
+//                         )}
+//                       </div>
+
+//                       {/* Subject line of sent email */}
+//                       {d.sentEmailSubject && (
+//                         <p className="text-[10px] text-muted-foreground mb-0.5 truncate">
+//                           📧 {d.sentEmailSubject}
+//                         </p>
+//                       )}
+
+//                       {/* Prospect reply snippet */}
+//                       <p className="text-xs text-foreground/80 line-clamp-2 leading-snug">{d.originalReply}</p>
+
 //                       <p className="text-[10px] text-muted-foreground mt-1">{new Date(d.createdAt).toLocaleString()}</p>
 //                     </button>
 //                   ))}
@@ -370,128 +489,133 @@
 //               </CardContent>
 //             </Card>
 
-//             {/* Detail panel */}
-//             <Card>
-//               <CardHeader className="pb-2"><CardTitle className="text-sm">Draft Detail</CardTitle></CardHeader>
-//               <CardContent>
-//                 {!selectedDraft ? (
-//                   <p className="text-sm text-muted-foreground">Select a draft to view details and take action.</p>
-//                 ) : (
-//                   <div className="space-y-4">
-//                     <div className="flex items-center gap-2 flex-wrap">
-//                       <span className={cn('px-2 py-0.5 rounded text-xs font-medium', CATEGORY_COLORS[selectedDraft.category] ?? 'bg-gray-100')}>
-//                         {selectedDraft.category.replace(/_/g, ' ')}
-//                       </span>
-//                       <span className={cn('px-2 py-0.5 rounded text-xs', STATUS_COLORS[selectedDraft.status] ?? 'bg-gray-100')}>
-//                         {selectedDraft.status.replace('_', ' ')}
-//                       </span>
-//                       {selectedDraft.autoPilotEligible && (
-//                         <span className="px-2 py-0.5 rounded text-xs font-medium bg-violet-100 text-violet-700 flex items-center gap-1">
-//                           <Zap className="h-3 w-3" /> auto-pilot eligible
+//             {/* ── Right: Conversation Thread + Actions ─────────────────── */}
+//             <Card className="lg:col-span-3">
+//               {!selectedDraft ? (
+//                 <CardContent className="flex items-center justify-center h-full min-h-[200px]">
+//                   <p className="text-sm text-muted-foreground">Select a reply to view the conversation thread.</p>
+//                 </CardContent>
+//               ) : (
+//                 <>
+//                   <CardHeader className="pb-3 border-b">
+//                     {/* Header: prospect name + meta */}
+//                     <div className="flex items-start justify-between gap-2 flex-wrap">
+//                       <div>
+//                         <CardTitle className="text-base">
+//                           {selectedDraft.prospectName ?? selectedDraft.prospectEmail ?? 'Unknown Prospect'}
+//                         </CardTitle>
+//                         {selectedDraft.prospectEmail && (
+//                           <p className="text-xs text-muted-foreground mt-0.5">{selectedDraft.prospectEmail}</p>
+//                         )}
+//                       </div>
+//                       <div className="flex items-center gap-1.5 flex-wrap">
+//                         <span className={cn('px-2 py-0.5 rounded text-xs font-medium', CATEGORY_COLORS[selectedDraft.category] ?? 'bg-gray-100')}>
+//                           {selectedDraft.category.replace(/_/g, ' ')}
 //                         </span>
-//                       )}
-//                       {selectedDraft.summary && <span className="text-xs text-muted-foreground">{selectedDraft.summary}</span>}
-//                       {selectedDraft.confidence != null && (
-//                         <span className="text-xs text-muted-foreground">confidence: {Math.round(selectedDraft.confidence * 100)}%</span>
-//                       )}
-//                     </div>
-
-//                     <div>
-//                       <p className="text-xs font-medium mb-1">Original Reply</p>
-//                       <div className="bg-muted/50 rounded-lg p-3 text-sm border">{selectedDraft.originalReply}</div>
-//                     </div>
-
-//                     {selectedDraft.suggestedAction && (
-//                       <div>
-//                         <p className="text-xs font-medium mb-1">Suggested Action</p>
-//                         <p className="text-sm text-muted-foreground">{selectedDraft.suggestedAction}</p>
+//                         <span className={cn('px-2 py-0.5 rounded text-xs', STATUS_COLORS[selectedDraft.status] ?? 'bg-gray-100')}>
+//                           {selectedDraft.status.replace('_', ' ')}
+//                         </span>
+//                         {selectedDraft.autoPilotEligible && (
+//                           <span className="px-2 py-0.5 rounded text-xs font-medium bg-violet-100 text-violet-700 flex items-center gap-1">
+//                             <Zap className="h-3 w-3" /> auto-pilot eligible
+//                           </span>
+//                         )}
+//                         {selectedDraft.confidence != null && (
+//                           <span className="text-xs text-muted-foreground">
+//                             {Math.round(selectedDraft.confidence * 100)}% confidence
+//                           </span>
+//                         )}
 //                       </div>
+//                     </div>
+//                     {selectedDraft.summary && (
+//                       <p className="text-xs text-muted-foreground mt-1 italic">{selectedDraft.summary}</p>
 //                     )}
+//                   </CardHeader>
 
-//                     {selectedDraft.draftBody && (
-//                       <div>
-//                         <p className="text-xs font-medium mb-1">AI-Generated Draft</p>
-//                         <div className="bg-emerald-50/50 border border-emerald-200 rounded-lg p-3 text-sm whitespace-pre-wrap">{selectedDraft.draftBody}</div>
-//                       </div>
-//                     )}
+//                   <CardContent className="pt-4">
+//                     <div className="space-y-4">
+//                       {/* Conversation Thread */}
+//                       <ConversationThread draft={selectedDraft} />
 
-//                     <div className="flex gap-2 flex-wrap">
-//                       {selectedDraft.status === 'pending' && (
-//                         <>
-//                           <Button size="sm" onClick={() => approveMut.mutate(selectedDraft.id)} disabled={approveMut.isPending}>
-//                             <CheckCircle2 className="h-4 w-4 mr-1" /> Approve
-//                           </Button>
-//                           <Button size="sm" variant="outline" onClick={() => sendMut.mutate(selectedDraft.id)} disabled={sendMut.isPending}>
+//                       {/* Action Buttons */}
+//                       <div className="flex gap-2 flex-wrap pt-2 border-t">
+//                         {selectedDraft.status === 'pending' && (
+//                           <>
+//                             <Button size="sm" onClick={() => approveMut.mutate(selectedDraft.id)} disabled={approveMut.isPending}>
+//                               <CheckCircle2 className="h-4 w-4 mr-1" /> Approve
+//                             </Button>
+//                             <Button size="sm" variant="outline" onClick={() => sendMut.mutate(selectedDraft.id)} disabled={sendMut.isPending}>
+//                               <Send className="h-4 w-4 mr-1" />{sendMut.isPending ? 'Sending…' : 'Send Now'}
+//                             </Button>
+//                             <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
+//                               onClick={() => dismissMut.mutate(selectedDraft.id)} disabled={dismissMut.isPending}>
+//                               <Ban className="h-4 w-4 mr-1" /> Dismiss
+//                             </Button>
+//                           </>
+//                         )}
+//                         {selectedDraft.status === 'approved' && (
+//                           <Button size="sm" onClick={() => sendMut.mutate(selectedDraft.id)} disabled={sendMut.isPending}>
 //                             <Send className="h-4 w-4 mr-1" />{sendMut.isPending ? 'Sending…' : 'Send Now'}
 //                           </Button>
-//                           <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
-//                             onClick={() => dismissMut.mutate(selectedDraft.id)} disabled={dismissMut.isPending}>
-//                             <Ban className="h-4 w-4 mr-1" /> Dismiss
+//                         )}
+//                         {(selectedDraft.status === 'sent' || selectedDraft.status === 'auto_sent') && (
+//                           <Badge className="bg-emerald-100 text-emerald-700">
+//                             <CheckCircle2 className="h-3 w-3 mr-1" />
+//                             {selectedDraft.status === 'auto_sent' ? 'Auto-Sent' : 'Sent'}
+//                           </Badge>
+//                         )}
+//                         {POSITIVE_CATEGORIES.includes(selectedDraft.category) && (
+//                           <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-300 hover:bg-emerald-50"
+//                             onClick={() => openCreateDeal(selectedDraft)}>
+//                             <DollarSign className="h-4 w-4 mr-1" />
+//                             {dealSuggesting && createDealOpen ? 'Analyzing…' : 'Create Deal'}
 //                           </Button>
-//                         </>
-//                       )}
-//                       {selectedDraft.status === 'approved' && (
-//                         <Button size="sm" onClick={() => sendMut.mutate(selectedDraft.id)} disabled={sendMut.isPending}>
-//                           <Send className="h-4 w-4 mr-1" />{sendMut.isPending ? 'Sending…' : 'Send Now'}
-//                         </Button>
-//                       )}
-//                       {(selectedDraft.status === 'sent' || selectedDraft.status === 'auto_sent') && (
-//                         <Badge className="bg-emerald-100 text-emerald-700">
-//                           <CheckCircle2 className="h-3 w-3 mr-1" />
-//                           {selectedDraft.status === 'auto_sent' ? 'Auto-Sent' : 'Sent'}
-//                         </Badge>
-//                       )}
-//                       {POSITIVE_CATEGORIES.includes(selectedDraft.category) && (
-//                         <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-300 hover:bg-emerald-50"
-//                           onClick={() => openCreateDeal(selectedDraft)}>
-//                           <DollarSign className="h-4 w-4 mr-1" />
-//                           {dealSuggesting && createDealOpen ? 'Analyzing…' : 'Create Deal'}
-//                         </Button>
+//                         )}
+//                       </div>
+
+//                       {/* Inline deal form */}
+//                       {createDealOpen && (
+//                         <Card className="border-emerald-200 bg-emerald-50/50">
+//                           <CardContent className="p-3 space-y-2">
+//                             <p className="text-xs font-medium flex items-center gap-1">
+//                               <Sparkles className="h-3 w-3" /> AI-Suggested Deal
+//                             </p>
+//                             <div className="grid grid-cols-2 gap-2">
+//                               <div>
+//                                 <Label className="text-xs">Deal Title</Label>
+//                                 <Input className="h-8 text-sm mt-1" value={dealTitle} onChange={(e) => setDealTitle(e.target.value)} />
+//                               </div>
+//                               <div>
+//                                 <Label className="text-xs">Value ($)</Label>
+//                                 <Input className="h-8 text-sm mt-1" type="number" placeholder="0" value={dealValue} onChange={(e) => setDealValue(e.target.value)} />
+//                               </div>
+//                             </div>
+//                             {dealNotes && (
+//                               <div>
+//                                 <Label className="text-xs">AI Notes</Label>
+//                                 <p className="text-xs text-muted-foreground mt-1 bg-white rounded p-2 border">{dealNotes}</p>
+//                               </div>
+//                             )}
+//                             {dealNextAction && (
+//                               <div>
+//                                 <Label className="text-xs">Suggested Next Action</Label>
+//                                 <p className="text-xs text-emerald-800 mt-1 bg-white rounded p-2 border border-emerald-200">{dealNextAction}</p>
+//                               </div>
+//                             )}
+//                             <div className="flex gap-2">
+//                               <Button size="sm" disabled={!dealTitle || createDealMut.isPending}
+//                                 onClick={() => createDealMut.mutate({ title: dealTitle, value: parseFloat(dealValue) || 0, stage: 'qualified', notes: dealNotes || undefined, prospectId: selectedDraft?.prospectId, source: 'cold_email' })}>
+//                                 {createDealMut.isPending ? 'Creating…' : 'Create Deal'}
+//                               </Button>
+//                               <Button size="sm" variant="ghost" onClick={() => setCreateDealOpen(false)}>Cancel</Button>
+//                             </div>
+//                           </CardContent>
+//                         </Card>
 //                       )}
 //                     </div>
-
-//                     {/* Inline deal form */}
-//                     {createDealOpen && (
-//                       <Card className="border-emerald-200 bg-emerald-50/50">
-//                         <CardContent className="p-3 space-y-2">
-//                           <p className="text-xs font-medium flex items-center gap-1">
-//                             <Sparkles className="h-3 w-3" /> AI-Suggested Deal
-//                           </p>
-//                           <div className="grid grid-cols-2 gap-2">
-//                             <div>
-//                               <Label className="text-xs">Deal Title</Label>
-//                               <Input className="h-8 text-sm mt-1" value={dealTitle} onChange={(e) => setDealTitle(e.target.value)} />
-//                             </div>
-//                             <div>
-//                               <Label className="text-xs">Value ($)</Label>
-//                               <Input className="h-8 text-sm mt-1" type="number" placeholder="0" value={dealValue} onChange={(e) => setDealValue(e.target.value)} />
-//                             </div>
-//                           </div>
-//                           {dealNotes && (
-//                             <div>
-//                               <Label className="text-xs">AI Notes</Label>
-//                               <p className="text-xs text-muted-foreground mt-1 bg-white rounded p-2 border">{dealNotes}</p>
-//                             </div>
-//                           )}
-//                           {dealNextAction && (
-//                             <div>
-//                               <Label className="text-xs">Suggested Next Action</Label>
-//                               <p className="text-xs text-emerald-800 mt-1 bg-white rounded p-2 border border-emerald-200">{dealNextAction}</p>
-//                             </div>
-//                           )}
-//                           <div className="flex gap-2">
-//                             <Button size="sm" disabled={!dealTitle || createDealMut.isPending}
-//                               onClick={() => createDealMut.mutate({ title: dealTitle, value: parseFloat(dealValue) || 0, stage: 'qualified', notes: dealNotes || undefined, prospectId: selectedDraft?.prospectId, source: 'cold_email' })}>
-//                               {createDealMut.isPending ? 'Creating…' : 'Create Deal'}
-//                             </Button>
-//                             <Button size="sm" variant="ghost" onClick={() => setCreateDealOpen(false)}>Cancel</Button>
-//                           </div>
-//                         </CardContent>
-//                       </Card>
-//                     )}
-//                   </div>
-//                 )}
-//               </CardContent>
+//                   </CardContent>
+//                 </>
+//               )}
 //             </Card>
 //           </div>
 
@@ -581,7 +705,7 @@
 //         </TabsContent>
 //       </Tabs>
 
-//       {/* Log a Reply Dialog — with prospect selector */}
+//       {/* Log a Reply Dialog */}
 //       <Dialog open={logOpen} onOpenChange={setLogOpen}>
 //         <DialogContent>
 //           <DialogHeader>
@@ -647,9 +771,12 @@
 //                 : (apPreview?.eligible ?? []).map((d) => (
 //                   <div key={d.id} className="p-3 rounded-lg border text-sm space-y-1">
 //                     <div className="flex items-center justify-between">
-//                       <span className={cn('px-1.5 py-0.5 rounded text-[10px] font-medium', CATEGORY_COLORS[d.category] ?? 'bg-gray-100')}>
-//                         {d.category.replace(/_/g, ' ')}
-//                       </span>
+//                       <div className="flex items-center gap-2">
+//                         <span className={cn('px-1.5 py-0.5 rounded text-[10px] font-medium', CATEGORY_COLORS[d.category] ?? 'bg-gray-100')}>
+//                           {d.category.replace(/_/g, ' ')}
+//                         </span>
+//                         <span className="text-xs font-medium">{d.prospectName ?? d.prospectEmail ?? 'Unknown'}</span>
+//                       </div>
 //                       <span className="text-xs text-muted-foreground">{d.confidence != null ? `${Math.round(d.confidence * 100)}% confidence` : ''}</span>
 //                     </div>
 //                     <p className="text-xs text-muted-foreground line-clamp-2">{d.draftBody ?? d.originalReply}</p>
@@ -697,7 +824,11 @@
 //           </DialogHeader>
 //           {apResult && (
 //             <div className="grid grid-cols-3 gap-4 py-2">
-//               {[{ label: 'Sent', value: apResult.sent, color: 'text-emerald-600' }, { label: 'Failed', value: apResult.failed, color: 'text-red-600' }, { label: 'Total', value: apResult.total, color: 'text-foreground' }].map((s) => (
+//               {[
+//                 { label: 'Sent', value: apResult.sent, color: 'text-emerald-600' },
+//                 { label: 'Failed', value: apResult.failed, color: 'text-red-600' },
+//                 { label: 'Total', value: apResult.total, color: 'text-foreground' },
+//               ].map((s) => (
 //                 <div key={s.label} className="text-center p-3 rounded-lg border">
 //                   <p className={cn('text-2xl font-bold', s.color)}>{s.value}</p>
 //                   <p className="text-xs text-muted-foreground mt-1">{s.label}</p>
@@ -711,24 +842,12 @@
 //     </div>
 //   );
 // }
-
-/**
- * ReplyInboxPage.tsx
- *
- * Shows a conversation-thread view for each reply draft:
- *   1. What Outrena sent (from Sequence.subjectLine + bodyCopy)
- *   2. What the prospect replied (ReplyDraft.originalReply)
- *   3. The AI-generated draft reply (ReplyDraft.draftBody)
- *
- * The left panel is a list of drafts grouped by prospect.
- * The right panel is the conversation thread + action buttons.
- */
 import { useMemo, useState, useEffect } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Bot, CheckCircle2, Send, Sparkles, FileDown, Eye, Info,
-  Loader2, MessageCircleReply, Zap, Ban, DollarSign, Clock,
-  ShieldAlert, XCircle, Mail, User, ArrowDown,
+  ArrowDown, Ban, Bot, CheckCircle2, Clock, DollarSign, Eye, FileDown,
+  Info, Loader2, Mail, MessageCircleReply, Send, ShieldAlert, Sparkles,
+  User, XCircle, Zap, AlertTriangle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -794,22 +913,50 @@ interface Prospect {
   company: string | null;
 }
 
+interface TrackingSummary {
+  period_days: number;
+  total_sent: number;
+  total_opened: number;
+  total_replied: number;
+  total_bounced: number;
+  open_rate: number;
+  reply_rate: number;
+  bounce_rate: number;
+  top_bounce_reasons: Array<{ reason: string; count: number }>;
+  by_status: Record<string, number>;
+}
+
+// Sequence row used in the Bounced tab
+interface BouncedSequence {
+  id: string;
+  status: string;
+  bouncedAt: string | null;
+  bounceReason: string | null;
+  prospectId: string;
+  campaignId: string;
+  subjectLine: string | null;
+  touchNumber: number;
+  // joined
+  prospectName?: string | null;
+  prospectEmail?: string | null;
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const CATEGORY_COLORS: Record<string, string> = {
-  interested:      'bg-emerald-100 text-emerald-700',
-  positive_signal: 'bg-green-100 text-green-700',
-  meeting_request: 'bg-blue-100 text-blue-700',
-  needs_info:      'bg-amber-100 text-amber-700',
-  counter_proposal:'bg-purple-100 text-purple-700',
-  neutral:         'bg-gray-100 text-gray-700',
-  out_of_office:   'bg-sky-100 text-sky-700',
-  not_interested:  'bg-red-100 text-red-700',
-  positive:        'bg-emerald-100 text-emerald-700',
-  objection:       'bg-amber-100 text-amber-700',
-  unsubscribe:     'bg-rose-100 text-rose-700',
-  oof:             'bg-sky-100 text-sky-700',
-  other:           'bg-gray-100 text-gray-700',
+  interested:       'bg-emerald-100 text-emerald-700',
+  positive_signal:  'bg-green-100 text-green-700',
+  meeting_request:  'bg-blue-100 text-blue-700',
+  needs_info:       'bg-amber-100 text-amber-700',
+  counter_proposal: 'bg-purple-100 text-purple-700',
+  neutral:          'bg-gray-100 text-gray-700',
+  out_of_office:    'bg-sky-100 text-sky-700',
+  not_interested:   'bg-red-100 text-red-700',
+  positive:         'bg-emerald-100 text-emerald-700',
+  objection:        'bg-amber-100 text-amber-700',
+  unsubscribe:      'bg-rose-100 text-rose-700',
+  oof:              'bg-sky-100 text-sky-700',
+  other:            'bg-gray-100 text-gray-700',
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -905,10 +1052,211 @@ function ConversationThread({ draft }: { draft: ReplyDraft }) {
   );
 }
 
+// ─── Tracking Summary Strip ───────────────────────────────────────────────────
+
+function TrackingDashboard({ days }: { days: number }) {
+  const { data: summary, isLoading } = useQuery<TrackingSummary>({
+    queryKey: ['tracking-summary', days],
+    queryFn: () => http.get<TrackingSummary>('/api/v1/analytics/tracking-summary', { days }),
+    staleTime: 60_000,
+    retry: false,
+  });
+
+  const stats = [
+    {
+      label: 'Sent',
+      value: summary?.total_sent ?? 0,
+      sub: `Last ${days} days`,
+      color: 'text-blue-700',
+      bg: 'bg-blue-50/50 border-blue-200',
+      icon: <Mail className="h-4 w-4 text-blue-600" />,
+    },
+    {
+      label: 'Replied',
+      value: summary?.total_replied ?? 0,
+      sub: summary ? `${(summary.reply_rate * 100).toFixed(1)}% rate` : '—',
+      color: 'text-emerald-700',
+      bg: 'bg-emerald-50/50 border-emerald-200',
+      icon: <MessageCircleReply className="h-4 w-4 text-emerald-600" />,
+    },
+    {
+      label: 'Bounced',
+      value: summary?.total_bounced ?? 0,
+      sub: summary ? `${(summary.bounce_rate * 100).toFixed(1)}% rate` : '—',
+      color: summary && summary.bounce_rate > 0.05 ? 'text-red-700' : 'text-orange-700',
+      bg: summary && summary.bounce_rate > 0.05
+        ? 'bg-red-50/50 border-red-200'
+        : 'bg-orange-50/50 border-orange-200',
+      icon: <AlertTriangle className="h-4 w-4 text-orange-500" />,
+    },
+    {
+      label: 'Opened',
+      value: summary?.total_opened ?? 0,
+      sub: summary?.total_opened
+        ? `${(summary.open_rate * 100).toFixed(1)}% rate`
+        : 'Enable in MailBridge',
+      color: 'text-violet-700',
+      bg: 'bg-violet-50/50 border-violet-200',
+      icon: <Eye className="h-4 w-4 text-violet-600" />,
+    },
+  ];
+
+  if (isLoading) {
+    return (
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="rounded-lg border p-4 animate-pulse bg-muted/30 h-20" />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3 mb-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {stats.map((s) => (
+          <Card key={s.label} className={cn('border', s.bg)}>
+            <CardContent className="p-4">
+              <div className={cn('flex items-center gap-2 mb-1', s.color)}>
+                {s.icon}
+                <span className="text-xs font-medium">{s.label}</span>
+              </div>
+              <p className={cn('text-2xl font-bold', s.color)}>{s.value.toLocaleString()}</p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">{s.sub}</p>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      {/* Bounce reason breakdown — only show when there are bounces */}
+      {summary && summary.total_bounced > 0 && summary.top_bounce_reasons.length > 0 && (
+        <Card className="border-orange-200 bg-orange-50/30">
+          <CardContent className="p-3">
+            <p className="text-xs font-medium text-orange-800 flex items-center gap-1.5 mb-2">
+              <AlertTriangle className="h-3.5 w-3.5" /> Top Bounce Reasons
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {summary.top_bounce_reasons.map((r) => (
+                <span
+                  key={r.reason}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-orange-100 text-orange-800 text-[11px] border border-orange-200"
+                >
+                  <span className="font-semibold">{r.count}×</span> {r.reason}
+                </span>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Warning when bounce rate exceeds 5% */}
+      {summary && summary.bounce_rate > 0.05 && (
+        <div className="rounded-md border border-red-200 bg-red-50 p-3 flex items-start gap-2 text-xs text-red-800">
+          <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+          <span>
+            <strong>High bounce rate ({(summary.bounce_rate * 100).toFixed(1)}%)</strong> — benchmark is &lt;5%.
+            Check the <strong>Bounced</strong> tab to review affected prospects. High bounce rates
+            hurt your sending reputation and domain warming progress.
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Bounced Tab ─────────────────────────────────────────────────────────────
+
+function BouncedTab() {
+  const { data: rawSequences, isLoading } = useQuery({
+    queryKey: ['sequences-bounced'],
+    queryFn: () => http.get<unknown>('/api/v1/sequences', { status: 'Bounced', limit: 200 }),
+    staleTime: 60_000,
+    retry: false,
+  });
+
+  const sequences = normalise<BouncedSequence>(rawSequences);
+
+  if (isLoading) {
+    return (
+      <div className="flex justify-center py-12">
+        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (sequences.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-16 text-center">
+        <CheckCircle2 className="h-8 w-8 text-emerald-500 mb-3" />
+        <p className="text-sm font-medium">No bounced emails</p>
+        <p className="text-xs text-muted-foreground mt-1">
+          When MailBridge detects a bounce it will appear here automatically.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        {sequences.length} bounced sequence{sequences.length === 1 ? '' : 's'} — MailBridge
+        detected these as undeliverable. Affected prospects are suppressed from future sends.
+      </p>
+      <div className="rounded-md border overflow-hidden">
+        <table className="w-full text-xs">
+          <thead className="bg-muted/40 border-b">
+            <tr>
+              <th className="text-left p-3 font-medium text-muted-foreground">Prospect</th>
+              <th className="text-left p-3 font-medium text-muted-foreground">Subject / Touch</th>
+              <th className="text-left p-3 font-medium text-muted-foreground">Bounce Reason</th>
+              <th className="text-left p-3 font-medium text-muted-foreground">Bounced At</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sequences.map((seq, idx) => (
+              <tr
+                key={seq.id}
+                className={cn('border-b last:border-0', idx % 2 === 0 ? 'bg-background' : 'bg-muted/20')}
+              >
+                <td className="p-3">
+                  <p className="font-medium">
+                    {seq.prospectName ?? 'Unknown'}
+                  </p>
+                  {seq.prospectEmail && (
+                    <p className="text-muted-foreground text-[11px]">{seq.prospectEmail}</p>
+                  )}
+                </td>
+                <td className="p-3">
+                  {seq.subjectLine ? (
+                    <p className="truncate max-w-[200px]">{seq.subjectLine}</p>
+                  ) : (
+                    <p className="text-muted-foreground italic">Touch {seq.touchNumber}</p>
+                  )}
+                </td>
+                <td className="p-3">
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[11px] border border-red-200">
+                    {seq.bounceReason ?? 'unknown'}
+                  </span>
+                </td>
+                <td className="p-3 text-muted-foreground">
+                  {seq.bouncedAt
+                    ? new Date(seq.bouncedAt).toLocaleString()
+                    : '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function ReplyInboxPage() {
   const qc = useQueryClient();
+  const [trackingDays, setTrackingDays] = useState(30);
 
   const { data: rawReplies, isLoading } = useQuery({
     queryKey: ['reply-drafts'],
@@ -982,7 +1330,6 @@ export function ReplyInboxPage() {
     }
   }, [filteredDrafts, selectedDraft]);
 
-  // When the list refreshes, keep selectedDraft in sync so enriched fields update.
   useEffect(() => {
     if (selectedDraft) {
       const fresh = filteredDrafts.find((d) => d.id === selectedDraft.id);
@@ -1092,8 +1439,27 @@ export function ReplyInboxPage() {
 
   return (
     <div className="space-y-4">
+      {/* ── Tracking Dashboard Strip ──────────────────────────────────────── */}
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="text-sm font-semibold text-muted-foreground">Email Activity Overview</h2>
+        <Select value={String(trackingDays)} onValueChange={(v) => setTrackingDays(Number(v))}>
+          <SelectTrigger className="h-7 w-28 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="7">Last 7 days</SelectItem>
+            <SelectItem value="14">Last 14 days</SelectItem>
+            <SelectItem value="30">Last 30 days</SelectItem>
+            <SelectItem value="60">Last 60 days</SelectItem>
+            <SelectItem value="90">Last 90 days</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <TrackingDashboard days={trackingDays} />
+
+      {/* ── Main Tabs ─────────────────────────────────────────────────────── */}
       <Tabs defaultValue="manual" className="w-full">
-        <TabsList className="grid w-full max-w-md grid-cols-2">
+        <TabsList className="grid w-full max-w-lg grid-cols-3">
           <TabsTrigger value="manual">
             <MessageCircleReply className="h-3.5 w-3.5 mr-1.5" /> Manual Review
           </TabsTrigger>
@@ -1104,6 +1470,9 @@ export function ReplyInboxPage() {
                 {autoPilotStats.eligible}
               </Badge>
             )}
+          </TabsTrigger>
+          <TabsTrigger value="bounced">
+            <AlertTriangle className="h-3.5 w-3.5 mr-1.5" /> Bounced
           </TabsTrigger>
         </TabsList>
 
@@ -1163,7 +1532,6 @@ export function ReplyInboxPage() {
                         selectedDraft?.id === d.id && 'bg-muted/50 border-l-2 border-l-primary'
                       )}
                     >
-                      {/* Prospect name + status badge */}
                       <div className="flex items-center justify-between gap-2 mb-1">
                         <span className="text-xs font-semibold truncate">
                           {d.prospectName ?? d.prospectEmail ?? 'Unknown Prospect'}
@@ -1172,8 +1540,6 @@ export function ReplyInboxPage() {
                           {d.status.replace('_', ' ')}
                         </span>
                       </div>
-
-                      {/* Category + auto-pilot badge */}
                       <div className="flex items-center gap-1.5 flex-wrap mb-1.5">
                         <span className={cn('px-1.5 py-0.5 rounded text-[10px] font-medium', CATEGORY_COLORS[d.category] ?? 'bg-gray-100')}>
                           {d.category.replace(/_/g, ' ')}
@@ -1184,17 +1550,12 @@ export function ReplyInboxPage() {
                           </span>
                         )}
                       </div>
-
-                      {/* Subject line of sent email */}
                       {d.sentEmailSubject && (
                         <p className="text-[10px] text-muted-foreground mb-0.5 truncate">
                           📧 {d.sentEmailSubject}
                         </p>
                       )}
-
-                      {/* Prospect reply snippet */}
                       <p className="text-xs text-foreground/80 line-clamp-2 leading-snug">{d.originalReply}</p>
-
                       <p className="text-[10px] text-muted-foreground mt-1">{new Date(d.createdAt).toLocaleString()}</p>
                     </button>
                   ))}
@@ -1211,7 +1572,6 @@ export function ReplyInboxPage() {
               ) : (
                 <>
                   <CardHeader className="pb-3 border-b">
-                    {/* Header: prospect name + meta */}
                     <div className="flex items-start justify-between gap-2 flex-wrap">
                       <div>
                         <CardTitle className="text-base">
@@ -1247,10 +1607,8 @@ export function ReplyInboxPage() {
 
                   <CardContent className="pt-4">
                     <div className="space-y-4">
-                      {/* Conversation Thread */}
                       <ConversationThread draft={selectedDraft} />
 
-                      {/* Action Buttons */}
                       <div className="flex gap-2 flex-wrap pt-2 border-t">
                         {selectedDraft.status === 'pending' && (
                           <>
@@ -1286,7 +1644,6 @@ export function ReplyInboxPage() {
                         )}
                       </div>
 
-                      {/* Inline deal form */}
                       {createDealOpen && (
                         <Card className="border-emerald-200 bg-emerald-50/50">
                           <CardContent className="p-3 space-y-2">
@@ -1332,7 +1689,6 @@ export function ReplyInboxPage() {
             </Card>
           </div>
 
-          {/* Workflow info card */}
           <Card className="border-blue-100 bg-blue-50/50">
             <CardContent className="p-4">
               <div className="flex items-start gap-3">
@@ -1415,6 +1771,11 @@ export function ReplyInboxPage() {
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* ── Bounced Tab ───────────────────────────────────────────────── */}
+        <TabsContent value="bounced" className="mt-4">
+          <BouncedTab />
         </TabsContent>
       </Tabs>
 
