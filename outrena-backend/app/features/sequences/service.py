@@ -195,6 +195,25 @@ class SequenceService:
         if seq is None:
             return None
 
+        # ── Terminal status guard ─────────────────────────────────────────────
+        # Bounced, Replied, and Failed sequences are historical records — they
+        # must never be overwritten by a re-send.  Each send attempt should
+        # create a NEW Sequence row instead.  Allowing a re-send to mutate an
+        # existing Bounced row causes:
+        #   1. status gets reset to Scheduled → Sent, hiding the bounce
+        #   2. bouncedAt stays set but status='Sent' → corrupted state
+        #   3. Bounced card/tab count decreases every time a new email is sent
+        _current_status = seq.status.value if hasattr(seq.status, "value") else str(seq.status)
+        if _current_status in ("Bounced", "Replied", "Failed"):
+            from fastapi import HTTPException as _HTTPEx
+            raise _HTTPEx(
+                status_code=422,
+                detail=(
+                    f"Cannot re-send a sequence that is already '{_current_status}'. "
+                    "Create a new sequence for this prospect instead."
+                ),
+            )
+
         # ── Suppression gate ──────────────────────────────────────────────────
         # Two-layer check:
         #   Layer 1 — Prospect-level: suppressed=true OR consent_status='withdrawn'
