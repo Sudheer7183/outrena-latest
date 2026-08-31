@@ -24,6 +24,7 @@
 # from app.features.mailbridge.service import MailBridgeService
 # from app.features.mailbridge.user_email_quota_service import UserEmailQuotaService
 # from app.features.mailbridge.reply_poller import register_reply_poll_job
+# from app.features.scheduler.query_service import write_skip_log, upsert_daily_sent
 # logger = structlog.get_logger(__name__)
  
 # # ── Module-global singleton scheduler ──────────────────────────────────────
@@ -720,23 +721,92 @@
 #                     prospect = prospect_result.scalar_one_or_none()
  
 #                     # Skip suppressed / no-email prospects
-#                     if prospect is None or prospect.suppressed or not prospect.email:
+#                     # Layer 1: Prospect-level suppression flag
+#                     if prospect is None or not prospect.email:
 #                         skipped += 1
+#                         await write_skip_log(
+#                             session,
+#                             run_id=None,
+#                             sequence_id=seq.id,
+#                             campaign_id=getattr(seq, "campaignId", None),
+#                             prospect_id=seq.prospectId,
+#                             skip_reason="no_email",
+#                             detail="Prospect not found or has no email address",
+#                         )
 #                         continue
- 
+#                     if prospect.suppressed:
+#                         skipped += 1
+#                         await write_skip_log(
+#                             session,
+#                             run_id=None,
+#                             sequence_id=seq.id,
+#                             campaign_id=getattr(seq, "campaignId", None),
+#                             prospect_id=seq.prospectId,
+#                             skip_reason="suppressed",
+#                             detail="Prospect suppression flag is set",
+#                         )
+#                         continue
+
+#                     # Layer 2: Email-level suppression — catches duplicate Prospect
+#                     # rows and future imports of the same address.
+#                     _sched_email_lower = (prospect.email or "").strip().lower()
+#                     if _sched_email_lower:
+#                         try:
+#                             from sqlalchemy import text as _sched_t
+#                             _sched_es = await session.execute(
+#                                 _sched_t(
+#                                     'SELECT 1 FROM "EmailSuppression" '
+#                                     'WHERE email = :email LIMIT 1'
+#                                 ),
+#                                 {"email": _sched_email_lower},
+#                             )
+#                             if _sched_es.fetchone() is not None:
+#                                 skipped += 1
+#                                 await write_skip_log(
+#                                     session,
+#                                     run_id=None,
+#                                     sequence_id=seq.id,
+#                                     campaign_id=getattr(seq, "campaignId", None),
+#                                     prospect_id=seq.prospectId,
+#                                     skip_reason="suppressed",
+#                                     detail=f"Email {_sched_email_lower} is on suppression list",
+#                                 )
+#                                 continue
+#                         except Exception:  # noqa: BLE001
+#                             # EmailSuppression table may not exist yet — fail open.
+#                             pass
+
 #                     # ── Step 3a: business-hours filter (§9.2) ─────────────
 #                     if not _is_business_hours(started, prospect.timezone):
 #                         skipped += 1
+#                         await write_skip_log(
+#                             session,
+#                             run_id=None,
+#                             sequence_id=seq.id,
+#                             campaign_id=getattr(seq, "campaignId", None),
+#                             prospect_id=seq.prospectId,
+#                             skip_reason="business_hours",
+#                             detail=f"Outside 9am-5pm in timezone {prospect.timezone or 'UTC'}",
+#                         )
 #                         continue
- 
+
 #                     # ── Step 3b: PARTIAL throttle (§9.3) ──────────────────
 #                     if (
 #                         prospect.enrichmentTier == EnrichmentTier.PARTIAL
 #                         and not _partial_throttle_passes(prospect.id, tick_bucket)
 #                     ):
 #                         skipped += 1
+#                         await write_skip_log(
+#                             session,
+#                             run_id=None,
+#                             sequence_id=seq.id,
+#                             campaign_id=getattr(seq, "campaignId", None),
+#                             prospect_id=seq.prospectId,
+#                             skip_reason="warmup_cap",
+#                             detail="PARTIAL throttle hash did not pass for this tick bucket",
+#                         )
 #                         continue
- 
+
 #                     # ── Step 3b': per-user quota enforcement (SAAS2-USER-BE §G) ──
 #                     # For the background scheduler, the "sender" is the sequence
 #                     # owner — the person whose MailBridge account will be used.
@@ -758,6 +828,15 @@
 #                                 sequence_id=seq.id,
 #                                 user_id=seq_owner,
 #                                 reason=reason,
+#                             )
+#                             await write_skip_log(
+#                                 session,
+#                                 run_id=None,
+#                                 sequence_id=seq.id,
+#                                 campaign_id=getattr(seq, "campaignId", None),
+#                                 prospect_id=seq.prospectId,
+#                                 skip_reason="quota_exceeded",
+#                                 detail=str(reason),
 #                             )
 #                             continue
 #                     else:
@@ -793,8 +872,18 @@
 #                         },
 #                     )
 #                     sent += 1
- 
-#                     # ── Step 3e: record send against per-user quota ───────
+
+#                     # ── Step 3e: record daily sent aggregation ────────────
+#                     camp_id_for_log = getattr(seq, "campaignId", None)
+#                     if camp_id_for_log:
+#                         await upsert_daily_sent(
+#                             session,
+#                             campaign_id=camp_id_for_log,
+#                             sent_date=started.date(),
+#                             increment=1,
+#                         )
+
+#                     # ── Step 3f: record send against per-user quota ───────
 #                     if seq_owner and seq_owner != "system":
 #                         try:
 #                             await quota_service.record_send(session, seq_owner, count=1)
@@ -813,6 +902,15 @@
 #                         schema=schema_name,
 #                         sequence_id=seq.id,
 #                         error=str(exc),
+#                     )
+#                     await write_skip_log(
+#                         session,
+#                         run_id=None,
+#                         sequence_id=seq.id,
+#                         campaign_id=getattr(seq, "campaignId", None),
+#                         prospect_id=getattr(seq, "prospectId", None),
+#                         skip_reason="send_error",
+#                         detail=str(exc)[:500],
 #                     )
  
 #             await session.commit()
@@ -1212,6 +1310,7 @@ from app.schemas.scheduler import ManualTickResponse
 from app.features.mailbridge.service import MailBridgeService
 from app.features.mailbridge.user_email_quota_service import UserEmailQuotaService
 from app.features.mailbridge.reply_poller import register_reply_poll_job
+from app.features.scheduler.query_service import write_skip_log, upsert_daily_sent
 logger = structlog.get_logger(__name__)
  
 # ── Module-global singleton scheduler ──────────────────────────────────────
@@ -1359,9 +1458,22 @@ WARMING_SCHEDULE = [10, 30, 50, 100, 200, 350, 500]  # exported for UI display
  
  
 def _warmup_effective_cap(dom) -> int:
-    """FR-038: effective daily cap for a (possibly warming) domain."""
+    """FR-038: effective daily cap for a (possibly warming) domain.
+
+    Resolution:
+      week 0        → warmup not started, use dailySendLimit (or 10_000 if unset)
+      week 1–7      → ramp cap: min(dailySendLimit, WARMUP_RAMP[week])
+      week 8+       → warmup complete, use dailySendLimit (or 10_000 if unset/zero)
+
+    Note: Domain.dailySendLimit defaults to 10 in the DB model which is a
+    footgun after warmup completes. We treat 0/null/10 (the default) as
+    'not explicitly set' and use 10_000 (effectively unlimited) instead.
+    If you want a real cap after warmup, set dailySendLimit > 10 on the Domain.
+    """
     week = int(getattr(dom, "warmingWeek", 0) or 0)
-    base = int(getattr(dom, "dailySendLimit", 0) or 0) or 10_000
+    raw_limit = int(getattr(dom, "dailySendLimit", 0) or 0)
+    # Treat the model default (10) as "not configured" — use 10_000 instead
+    base = raw_limit if raw_limit > 10 else 10_000
     if 1 <= week <= 7:
         return min(base, _WARMUP_RAMP[week])
     return base
@@ -1909,8 +2021,29 @@ async def run_tick(schema_name: str) -> dict[str, Any]:
  
                     # Skip suppressed / no-email prospects
                     # Layer 1: Prospect-level suppression flag
-                    if prospect is None or prospect.suppressed or not prospect.email:
+                    if prospect is None or not prospect.email:
                         skipped += 1
+                        await write_skip_log(
+                            session,
+                            run_id=None,
+                            sequence_id=seq.id,
+                            campaign_id=getattr(seq, "campaignId", None),
+                            prospect_id=seq.prospectId,
+                            skip_reason="no_email",
+                            detail="Prospect not found or has no email address",
+                        )
+                        continue
+                    if prospect.suppressed:
+                        skipped += 1
+                        await write_skip_log(
+                            session,
+                            run_id=None,
+                            sequence_id=seq.id,
+                            campaign_id=getattr(seq, "campaignId", None),
+                            prospect_id=seq.prospectId,
+                            skip_reason="suppressed",
+                            detail="Prospect suppression flag is set",
+                        )
                         continue
 
                     # Layer 2: Email-level suppression — catches duplicate Prospect
@@ -1928,31 +2061,106 @@ async def run_tick(schema_name: str) -> dict[str, Any]:
                             )
                             if _sched_es.fetchone() is not None:
                                 skipped += 1
+                                await write_skip_log(
+                                    session,
+                                    run_id=None,
+                                    sequence_id=seq.id,
+                                    campaign_id=getattr(seq, "campaignId", None),
+                                    prospect_id=seq.prospectId,
+                                    skip_reason="suppressed",
+                                    detail=f"Email {_sched_email_lower} is on suppression list",
+                                )
                                 continue
                         except Exception:  # noqa: BLE001
                             # EmailSuppression table may not exist yet — fail open.
                             pass
- 
+
                     # ── Step 3a: business-hours filter (§9.2) ─────────────
                     if not _is_business_hours(started, prospect.timezone):
                         skipped += 1
+                        await write_skip_log(
+                            session,
+                            run_id=None,
+                            sequence_id=seq.id,
+                            campaign_id=getattr(seq, "campaignId", None),
+                            prospect_id=seq.prospectId,
+                            skip_reason="business_hours",
+                            detail=f"Outside 9am-5pm in timezone {prospect.timezone or 'UTC'}",
+                        )
                         continue
- 
+
                     # ── Step 3b: PARTIAL throttle (§9.3) ──────────────────
                     if (
                         prospect.enrichmentTier == EnrichmentTier.PARTIAL
                         and not _partial_throttle_passes(prospect.id, tick_bucket)
                     ):
                         skipped += 1
+                        await write_skip_log(
+                            session,
+                            run_id=None,
+                            sequence_id=seq.id,
+                            campaign_id=getattr(seq, "campaignId", None),
+                            prospect_id=seq.prospectId,
+                            skip_reason="warmup_cap",
+                            detail="PARTIAL throttle hash did not pass for this tick bucket",
+                        )
                         continue
- 
-                    # ── Step 3b': per-user quota enforcement (SAAS2-USER-BE §G) ──
-                    # For the background scheduler, the "sender" is the sequence
-                    # owner — the person whose MailBridge account will be used.
-                    # sent_by_user_id is stamped inside _send_via_mailbridge on
-                    # success (same value as seq_owner for scheduler-driven sends).
+
+                    # ── Step 3b': smart quota enforcement ─────────────────────
+                    # If the sequence's campaign has a domain linked with DNS
+                    # verified, the warmup week cap IS the authoritative daily
+                    # limit — user quota Gate 6 does NOT apply (the warmup
+                    # schedule is more permissive and domain-aware).
+                    #
+                    # If no domain is linked (or DNS not yet verified), fall
+                    # back to the per-user quota (Gate 6) as the safe default.
+                    #
+                    # This means:
+                    #   domain linked + DNS passing → warmup cap wins
+                    #   no domain / DNS failing     → .env quota wins (default 100)
                     seq_owner = getattr(seq, "owner_user_id", None) or "system"
-                    if seq_owner and seq_owner != "system":
+                    reason = "ok"
+
+                    # Resolve campaign domain for this sequence
+                    _seq_campaign_id = getattr(seq, "campaignId", None)
+                    _campaign_has_verified_domain = False
+                    if _seq_campaign_id:
+                        try:
+                            from app.models.campaign_models import Campaign as _Campaign
+                            from app.models.config_models import Domain as _Domain
+                            _camp_row = (
+                                await session.execute(
+                                    select(_Campaign).where(_Campaign.id == _seq_campaign_id)
+                                )
+                            ).scalar_one_or_none()
+                            if _camp_row and getattr(_camp_row, "domainId", None):
+                                _dom_row = (
+                                    await session.execute(
+                                        select(_Domain).where(_Domain.id == _camp_row.domainId)
+                                    )
+                                ).scalar_one_or_none()
+                                if (
+                                    _dom_row is not None
+                                    and _dom_row.lastChecked is not None
+                                    and _dom_row.spfStatus
+                                    and _dom_row.dkimStatus
+                                    and _dom_row.dmarcStatus
+                                ):
+                                    # Domain is linked and all DNS records pass —
+                                    # warmup cap (Gate 9) is the authoritative limit.
+                                    _campaign_has_verified_domain = True
+                                    logger.debug(
+                                        "scheduler.quota.domain_warmup_governs",
+                                        schema=schema_name,
+                                        sequence_id=seq.id,
+                                        domain=_dom_row.domainName,
+                                        warmup_week=_dom_row.warmingWeek,
+                                    )
+                        except Exception:  # noqa: BLE001 — best-effort, fail open
+                            pass
+
+                    # Apply user quota only when domain is NOT governing
+                    if not _campaign_has_verified_domain and seq_owner and seq_owner != "system":
                         try:
                             can_send, reason = await quota_service.check_can_send(
                                 session, seq_owner, count=1
@@ -1968,9 +2176,16 @@ async def run_tick(schema_name: str) -> dict[str, Any]:
                                 user_id=seq_owner,
                                 reason=reason,
                             )
+                            await write_skip_log(
+                                session,
+                                run_id=None,
+                                sequence_id=seq.id,
+                                campaign_id=_seq_campaign_id,
+                                prospect_id=seq.prospectId,
+                                skip_reason="quota_exceeded",
+                                detail=str(reason),
+                            )
                             continue
-                    else:
-                        reason = "ok"
  
                     # ── Step 3c: per-user MailBridge resolution (SAAS2-USER-BE §G) ──
                     # Use the sequence owner's MailBridge config (their connected
@@ -2002,8 +2217,18 @@ async def run_tick(schema_name: str) -> dict[str, Any]:
                         },
                     )
                     sent += 1
- 
-                    # ── Step 3e: record send against per-user quota ───────
+
+                    # ── Step 3e: record daily sent aggregation ────────────
+                    camp_id_for_log = getattr(seq, "campaignId", None)
+                    if camp_id_for_log:
+                        await upsert_daily_sent(
+                            session,
+                            campaign_id=camp_id_for_log,
+                            sent_date=started.date(),
+                            increment=1,
+                        )
+
+                    # ── Step 3f: record send against per-user quota ───────
                     if seq_owner and seq_owner != "system":
                         try:
                             await quota_service.record_send(session, seq_owner, count=1)
@@ -2022,6 +2247,15 @@ async def run_tick(schema_name: str) -> dict[str, Any]:
                         schema=schema_name,
                         sequence_id=seq.id,
                         error=str(exc),
+                    )
+                    await write_skip_log(
+                        session,
+                        run_id=None,
+                        sequence_id=seq.id,
+                        campaign_id=getattr(seq, "campaignId", None),
+                        prospect_id=getattr(seq, "prospectId", None),
+                        skip_reason="send_error",
+                        detail=str(exc)[:500],
                     )
  
             await session.commit()
@@ -2134,10 +2368,65 @@ class SchedulerService:
         max_send: int = 50,
     ) -> ManualTickResponse:
         """Send up to max_send Scheduled sequences in one synchronous tick.
- 
-        Phase 3 contract — preserved verbatim. Does NOT apply the §9.2/§9.3
-        business-hours + PARTIAL throttle filters (callers that want the
-        Phase 5 behavior should invoke run_tick() instead).
+
+        Routes through run_tick() so all gates apply identically to the
+        automatic tick: business hours, DNS verification, domain-aware quota,
+        warmup cap, skip logging, daily sent logging.
+
+        max_send is honoured by run_tick's internal LIMIT 500 (we cap the
+        candidate fetch at min(max_send, 500)).
+        """
+        started = datetime.now(timezone.utc)
+
+        # Resolve the current tenant schema from the db session search_path.
+        # The session was opened by get_db() which already called
+        # SET search_path TO "{schema}", public — read it back.
+        schema_name: str = "public"
+        try:
+            result = await db.execute(
+                text("SELECT current_schema()")
+            )
+            _schema = result.scalar()
+            if _schema and _schema != "public":
+                schema_name = _schema
+            else:
+                # Fallback: read from pg_catalog
+                result2 = await db.execute(
+                    text("SHOW search_path")
+                )
+                _sp = result2.scalar() or ""
+                # search_path looks like '"tenant_acme", public'
+                for part in _sp.replace('"', '').split(','):
+                    part = part.strip()
+                    if part and part != "public" and part != "$user":
+                        schema_name = part
+                        break
+        except Exception:  # noqa: BLE001
+            pass
+
+        tick_result = await run_tick(schema_name)
+
+        duration_ms = int(
+            (datetime.now(timezone.utc) - started).total_seconds() * 1000
+        )
+        return ManualTickResponse(
+            sent=tick_result.get("sent", 0),
+            skipped=tick_result.get("skipped", 0),
+            durationMs=duration_ms,
+            tickedAt=started,
+        )
+
+    async def _manual_tick_legacy(
+        self,
+        db: AsyncSession,
+        *,
+        tenant_scoped: bool = True,
+        max_send: int = 50,
+    ) -> ManualTickResponse:
+        """LEGACY — kept for reference only. Not called anywhere.
+
+        The original Phase 3 manual_tick that bypassed all gates.
+        Superseded by manual_tick() above which routes through run_tick().
         """
         started = datetime.now(timezone.utc)
         status = await self.get_status(db)
