@@ -1910,6 +1910,7 @@
 //           <DialogTitle>Bulk CSV Import</DialogTitle>
 //           <DialogDescription>
 //             Supported columns: first_name, last_name, email, title, company, domain, linkedin, seniority, phone, notes
+//             <br /><span className="text-[10px]">Both <code>first_name</code> (Excel default) and <code>firstName</code> (camelCase) column names are accepted.</span>
 //           </DialogDescription>
 //         </DialogHeader>
 //         <div className="space-y-4 py-4">
@@ -1993,9 +1994,13 @@
 //           )}
 
 //           <div className="text-xs text-muted-foreground bg-muted rounded-lg p-3">
-//             <p className="font-medium mb-1">Example CSV format:</p>
-//             <pre className="font-mono text-[10px] whitespace-pre-wrap">first_name,last_name,email,title,company,domain
+//             <p className="font-medium mb-1">Example CSV format (snake_case — Excel default):</p>
+//             <pre className="font-mono text-[10px] whitespace-pre-wrap">first_name,last_name,email,title,company
 // John,Smith,john@acme.com,VP Engineering,Acme Inc,acme.com</pre>
+//             <p className="font-medium mt-2 mb-1">Also accepted (camelCase):</p>
+//             <pre className="font-mono text-[10px] whitespace-pre-wrap">firstName,lastName,email,title,company
+// John,Smith,john@acme.com,VP Engineering,Acme Inc,acme.com</pre>
+//             <p className="mt-2 text-[10px]">💡 In Excel, use <b>File → Save As → CSV UTF-8</b> or plain <b>CSV</b> — both work.</p>
 //           </div>
 //         </div>
 //         <DialogFooter>
@@ -2429,6 +2434,7 @@ interface Prospect {
 interface IcpProfile {
   id: string;
   name: string;
+  prospectCount?: number | null;
 }
 
 interface Campaign {
@@ -2661,14 +2667,18 @@ export function ProspectsPage() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(25);
 
+  /* ── ICP filter — declared before the query so the queryKey can reference it ── */
+  const [icpFilter, setIcpFilter] = useState("all");
+
   /* ── Data queries ── */
   const prospectsQuery = useQuery<{ items: Prospect[]; total: number }>({
-    queryKey: ["prospects", page, pageSize],
+    queryKey: ["prospects", page, pageSize, icpFilter],
     queryFn: () => {
       const params = new URLSearchParams({
         limit: String(pageSize),
         offset: String(page * pageSize),
       });
+      if (icpFilter !== "all") params.set("icp_profile_id", icpFilter);
       return http.get<any>(`/api/v1/prospects?${params.toString()}`).then((r) =>
         Array.isArray(r) ? { items: r, total: r.length } : { items: r?.items ?? [], total: r?.total ?? 0 }
       );
@@ -2702,10 +2712,12 @@ export function ProspectsPage() {
   const [search, setSearch] = useState("");
   const [seniorityFilter, setSeniorityFilter] = useState("all");
   const [scoreMin, setScoreMin] = useState(0);
+  // icpFilter is declared above the query so the queryKey can reference it
 
   const handleSearchChange = (v: string) => { setSearch(v); setPage(0); };
   const handleSeniorityChange = (v: string) => { setSeniorityFilter(v); setPage(0); };
   const handleScoreMinChange = (v: number) => { setScoreMin(v); setPage(0); };
+  const handleIcpFilterChange = (v: string) => { setIcpFilter(v); setPage(0); };
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -3541,6 +3553,25 @@ const signalsMut = useMutation({
             <SelectItem value="80">≥ 80 (P0)</SelectItem>
           </SelectContent>
         </Select>
+
+        {/* ICP filter */}
+        {icps.length > 0 && (
+          <Select value={icpFilter} onValueChange={handleIcpFilterChange}>
+            <SelectTrigger className="w-40">
+              <Filter className="h-4 w-4 mr-1 text-muted-foreground" />
+              <SelectValue placeholder="ICP" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All ICPs</SelectItem>
+              {icps.map((icp) => (
+                <SelectItem key={icp.id} value={icp.id}>
+                  {icp.name}
+                  {icp.prospectCount != null ? ` (${icp.prospectCount})` : ""}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
 
         <Separator orientation="vertical" className="h-8 hidden sm:block" />
 

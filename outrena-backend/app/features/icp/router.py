@@ -1,3 +1,5 @@
+
+
 # """
 # icp.py — Phase 2 /api/v1/icp-profiles router.
 
@@ -10,7 +12,9 @@
 #   PUT    /icp-profiles/{icp_id}       update
 #   DELETE /icp-profiles/{icp_id}       delete (204)
 
-# Role gate: Role.MANAGER.
+# Role gates:
+#   GET  (list / fetch)  → Role.REP     — readable by all tenant users for dropdowns/context
+#   POST / PUT / DELETE  → Role.MANAGER — only managers can create, edit, or delete ICPs
 # """
 # from __future__ import annotations
 
@@ -41,7 +45,10 @@
 #     limit: int = Query(default=50, ge=1, le=500),
 #     offset: int = Query(default=0, ge=0),
 #     db: AsyncSession = Depends(get_db),
-#     _: TokenPayload = Depends(require_role(Role.MANAGER)),
+#     # REP+ can read ICP profiles — needed to pick a profile when sourcing
+#     # prospects and to understand targeting context in campaigns.
+#     # Creating / editing / deleting ICPs remains MANAGER-only.
+#     _: TokenPayload = Depends(require_role(Role.REP)),
 # ) -> list[IcpResponse]:
 #     items = await _service.list_profiles(db, limit=limit, offset=offset)
 #     return [IcpResponse.model_validate(i) for i in items]
@@ -82,7 +89,8 @@
 # async def get_icp_profile(
 #     icp_id: str,
 #     db: AsyncSession = Depends(get_db),
-#     _: TokenPayload = Depends(require_role(Role.MANAGER)),
+#     # REP+ can read a single ICP profile.
+#     _: TokenPayload = Depends(require_role(Role.REP)),
 # ) -> IcpResponse:
 #     item = await _service.get(db, icp_id)
 #     if item is None:
@@ -121,7 +129,7 @@
 icp.py — Phase 2 /api/v1/icp-profiles router.
 
 Endpoints:
-  GET    /icp-profiles                list
+  GET    /icp-profiles                list (includes prospectCount per ICP)
   POST   /icp-profiles                create
   POST   /icp-profiles/suggest        LLM suggests an ICP
   POST   /icp-profiles/auto-discover  LLM derives an ICP from prospect data
@@ -167,8 +175,8 @@ async def list_icp_profiles(
     # Creating / editing / deleting ICPs remains MANAGER-only.
     _: TokenPayload = Depends(require_role(Role.REP)),
 ) -> list[IcpResponse]:
-    items = await _service.list_profiles(db, limit=limit, offset=offset)
-    return [IcpResponse.model_validate(i) for i in items]
+    # list_profiles now returns list[IcpResponse] with prospectCount populated.
+    return await _service.list_profiles(db, limit=limit, offset=offset)
 
 
 @router.post("", response_model=IcpResponse, status_code=201)

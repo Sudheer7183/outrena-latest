@@ -1,4 +1,5 @@
 
+
 // import { useEffect, useMemo, useState } from "react";
 // import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 // import {
@@ -798,10 +799,10 @@
 
 //             {/* ══ C-3: PROSPECTS TAB ══ */}
 //             <TabsContent value="prospects" className="space-y-4">
-//               <div className="flex items-center justify-between">
+//               {/* <div className="flex items-center justify-between">
 //                 <p className="text-sm text-muted-foreground">{campaignProspects.length} prospects linked</p>
 //                 <Button size="sm" onClick={() => setAddProspectOpen(true)}><Plus className="h-3 w-3 mr-1" /> Add Prospects</Button>
-//               </div>
+//               </div> */}
 //               {campaignProspects.length === 0 ? (
 //                 <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">No prospects added yet. Click "Add Prospects" to select from your list.</CardContent></Card>
 //               ) : (
@@ -1564,13 +1565,18 @@ interface PreflightResult { passed: boolean; checks: PreflightCheck[]; warnings?
 
 /* ── Constants ──────────────────────────────────────────────────────── */
 
-const STATUS_COLORS: Record<string, string> = {
-  draft: "bg-gray-100 text-gray-700",
-  active: "bg-emerald-100 text-emerald-700",
-  paused: "bg-amber-100 text-amber-700",
-  completed: "bg-blue-100 text-blue-700",
-  archived: "bg-slate-100 text-slate-500",
+/** Human-readable label and colour for every campaign status. */
+const CAMPAIGN_STATUS_META: Record<string, { label: string; cls: string }> = {
+  draft:     { label: "Draft",     cls: "bg-gray-100 text-gray-700" },
+  active:    { label: "Active",    cls: "bg-emerald-100 text-emerald-700" },
+  paused:    { label: "Paused",    cls: "bg-amber-100 text-amber-700" },
+  completed: { label: "Completed", cls: "bg-blue-100 text-blue-700" },
+  archived:  { label: "Archived",  cls: "bg-slate-100 text-slate-500" },
+  sending:   { label: "Sending",   cls: "bg-violet-100 text-violet-700" },
+  failed:    { label: "Failed",    cls: "bg-red-100 text-red-700" },
 };
+
+
 
 const FRAMEWORK_NAMES: Record<string, string> = {
   trigger: "Trigger-Based",
@@ -1584,10 +1590,7 @@ const FRAMEWORK_NAMES: Record<string, string> = {
   story: "Story-Led",
 };
 
-const WORD_LIMITS: Record<string, number> = {
-  FirstTouch: 150, NewEvidence: 120, DifferentPain: 120,
-  IndustryInsight: 120, DirectQuestion: 80, Breakup: 60,
-};
+
 
 const SEQ_STATUS_COLORS: Record<string, string> = {
   Draft: "bg-gray-100 text-gray-600",
@@ -1895,9 +1898,6 @@ export function CampaignsPage() {
 
   const handleApproveSequence = async (seq: Sequence, _idx: number) => {
     const draft = seqDrafts[seq.id];
-    const wc = (draft?.bodyCopy ?? seq.bodyCopy ?? "").split(/\s+/).filter(Boolean).length;
-    const limit = WORD_LIMITS[seq.angle] ?? 150;
-    if (wc > limit) { toast.error(`Exceeds ${limit}-word limit`); return; }
     try {
       await http.put(`/api/v1/sequences/${seq.id}`, {
         subjectLine: draft?.subjectLine ?? seq.subjectLine,
@@ -2120,8 +2120,8 @@ export function CampaignsPage() {
                     <div className="flex items-center justify-between">
                       <CardTitle className="text-sm line-clamp-1">{c.name}</CardTitle>
                       {/* C-12: Status badge with colour */}
-                      <span className={cn("text-xs px-2 py-0.5 rounded-full font-medium", STATUS_COLORS[c.status] ?? "bg-gray-100 text-gray-600")}>
-                        {c.status}
+                      <span className={cn("text-xs px-2 py-0.5 rounded-full font-medium", (CAMPAIGN_STATUS_META[c.status] ?? CAMPAIGN_STATUS_META.draft).cls)}>
+                        {(CAMPAIGN_STATUS_META[c.status] ?? { label: c.status }).label}
                       </span>
                     </div>
                     {c.description && <CardDescription className="text-xs line-clamp-2">{c.description}</CardDescription>}
@@ -2171,8 +2171,8 @@ export function CampaignsPage() {
               <h3 className="text-lg font-semibold truncate">{selectedCampaign?.name}</h3>
               <p className="text-sm text-muted-foreground truncate">{selectedCampaign?.description ?? "No description"}</p>
             </div>
-            <span className={cn("text-xs px-2 py-0.5 rounded-full font-medium", STATUS_COLORS[selectedCampaign?.status ?? "draft"])}>
-              {selectedCampaign?.status}
+            <span className={cn("text-xs px-2 py-0.5 rounded-full font-medium", (CAMPAIGN_STATUS_META[selectedCampaign?.status ?? "draft"] ?? CAMPAIGN_STATUS_META.draft).cls)}>
+              {(CAMPAIGN_STATUS_META[selectedCampaign?.status ?? "draft"] ?? { label: selectedCampaign?.status }).label}
             </span>
             <Select value={selectedCampaign?.status ?? "draft"} onValueChange={(v) => handleStatusChange(selectedId, v)}>
               <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
@@ -2362,9 +2362,6 @@ export function CampaignsPage() {
                     const draft = seqDrafts[seq.id];
                     const subject = draft?.subjectLine ?? seq.subjectLine ?? "";
                     const body = draft?.bodyCopy ?? seq.bodyCopy ?? "";
-                    const wc = body.split(/\s+/).filter(Boolean).length;
-                    const limit = WORD_LIMITS[seq.angle] ?? 150;
-                    const overLimit = wc > limit;
                     return (
                       <div key={seq.id} className="relative pl-14 pb-6">
                         <div className="absolute left-4 h-5 w-5 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs font-bold shrink-0">
@@ -2400,18 +2397,13 @@ export function CampaignsPage() {
                               rows={5}
                               className="text-sm font-mono"
                             />
-                            <div className="flex items-center justify-between">
-                              <span className={cn("text-xs", overLimit ? "text-red-600 font-medium" : "text-muted-foreground")}>
-                                Words: {wc}/{limit} {overLimit && "(OVER!)"}
-                              </span>
-                              <div className="flex gap-2">
-                                <Button size="sm" variant="outline" className="h-7" onClick={() => handleApproveSequence(seq, i)}>
-                                  <CheckCircle2 className="h-3 w-3 mr-1" /> Approve
-                                </Button>
-                                <Button size="sm" variant="ghost" className="h-7" onClick={() => navigator.clipboard.writeText(body).then(() => toast.success("Copied"))}>
-                                  <Copy className="h-3 w-3 mr-1" /> Copy
-                                </Button>
-                              </div>
+                            <div className="flex justify-end gap-2">
+                              <Button size="sm" variant="outline" className="h-7" onClick={() => handleApproveSequence(seq, i)}>
+                                <CheckCircle2 className="h-3 w-3 mr-1" /> Approve
+                              </Button>
+                              <Button size="sm" variant="ghost" className="h-7" onClick={() => navigator.clipboard.writeText(body).then(() => toast.success("Copied"))}>
+                                <Copy className="h-3 w-3 mr-1" /> Copy
+                              </Button>
                             </div>
                           </CardContent>
                         </Card>
