@@ -224,8 +224,9 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost"]
 
     # ── Scheduler (Phase 5) ─────────────────────────────────────────────────
-    SCHEDULER_ENABLED: bool = True
-    SCHEDULER_TICK_SECONDS: int = 300
+    SCHEDULER_ENABLED: bool = False
+    REPLY_POLLER_ENABLED: bool = True 
+    SCHEDULER_TICK_SECONDS: int = 3000
     SCHEDULER_PARTIAL_CAP: int = 5
     SCHEDULER_PARTIAL_PER_TICK_CAP: int = 5
 

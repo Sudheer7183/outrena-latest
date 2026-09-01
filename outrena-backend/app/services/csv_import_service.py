@@ -1,3 +1,5 @@
+
+
 # """
 # csv_import_service.py — CSV prospect import (per migration doc §6.5).
 
@@ -47,6 +49,7 @@
 # logger = structlog.get_logger(__name__)
 
 
+# # Canonical internal header names (camelCase) used throughout this service.
 # _REQUIRED_HEADERS: tuple[str, ...] = ("firstName", "lastName", "email")
 # _OPTIONAL_HEADERS: tuple[str, ...] = (
 #     "title",
@@ -58,6 +61,36 @@
 #     "icpProfileId",
 # )
 # _ALL_HEADERS: frozenset[str] = frozenset(_REQUIRED_HEADERS + _OPTIONAL_HEADERS)
+
+# # Maps every accepted alias → the canonical internal name.
+# # Allows users to upload CSVs with either snake_case (Excel-default) or
+# # camelCase column headers — both are normalised before validation.
+# _HEADER_ALIASES: dict[str, str] = {
+#     # required
+#     "first_name": "firstName",
+#     "firstname": "firstName",
+#     "last_name": "lastName",
+#     "lastname": "lastName",
+#     # optional
+#     "linkedin_url": "linkedinUrl",
+#     "linkedin": "linkedinUrl",
+#     "icp_profile_id": "icpProfileId",
+#     "icp_id": "icpProfileId",
+# }
+
+
+# def _normalise_row(raw_row: dict) -> dict:
+#     """Return a new dict with all keys mapped to their canonical names.
+
+#     Keys that are already canonical (or have no alias) pass through unchanged.
+#     This is applied to *both* the fieldnames check and every data row so the
+#     rest of the service never needs to know about the alias table.
+#     """
+#     return {
+#         _HEADER_ALIASES.get(k, k): v
+#         for k, v in raw_row.items()
+#         if k is not None
+#     }
 
 # _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -104,16 +137,28 @@
 #             return ImportResult(total=0, created=0, skipped=0, errors=["CSV is empty."])
 
 #         reader = csv.DictReader(io.StringIO(content))
-#         fieldnames = reader.fieldnames or []
-#         missing_required = [h for h in _REQUIRED_HEADERS if h not in fieldnames]
+#         # Normalise the header names so both snake_case and camelCase are accepted.
+#         raw_fieldnames: list[str] = list(reader.fieldnames or [])
+#         normalised_fieldnames: list[str] = [
+#             _HEADER_ALIASES.get(f, f) for f in raw_fieldnames
+#         ]
+#         missing_required = [h for h in _REQUIRED_HEADERS if h not in normalised_fieldnames]
 #         if missing_required:
+#             # Show both camelCase and snake_case equivalents in the error so
+#             # the message is useful regardless of which convention the user prefers.
+#             _alias_pairs = {v: k for k, v in _HEADER_ALIASES.items() if "_" in k}
+#             def _both(h: str) -> str:
+#                 snake = _alias_pairs.get(h, "")
+#                 return f"{h} (or {snake})" if snake else h
 #             return ImportResult(
 #                 total=0,
 #                 created=0,
 #                 skipped=0,
 #                 errors=[
-#                     f"Missing required CSV header(s): {', '.join(missing_required)}. "
-#                     f"Required: {', '.join(_REQUIRED_HEADERS)}."
+#                     f"Missing required CSV column(s): "
+#                     f"{', '.join(_both(h) for h in missing_required)}. "
+#                     f"Accepted formats: camelCase ({', '.join(_REQUIRED_HEADERS)}) "
+#                     f"or snake_case (first_name, last_name, email)."
 #                 ],
 #             )
 
@@ -132,10 +177,10 @@
 #                 skipped += 1
 #                 continue
 
-#             # Strip whitespace from all string cells
+#             # Normalise column names (snake_case → camelCase) then strip whitespace.
 #             row = {
 #                 k: (v.strip() if isinstance(v, str) else v)
-#                 for k, v in raw_row.items()
+#                 for k, v in _normalise_row(raw_row).items()
 #                 if k is not None
 #             }
 
@@ -670,6 +715,12 @@ class CsvImportService:
                 )
             linkedin_url = (row.get("linkedinUrl") or "").strip() or None
             timezone = (row.get("timezone") or "").strip() or None
+            # Auto-derive timezone from email domain when not present in CSV.
+            # Covers country-code TLDs (.in→Asia/Kolkata, .de→Europe/Berlin, etc.).
+            # Generic TLDs (.com, .io) return None — scheduler sends without
+            # business-hours restriction rather than assuming a wrong timezone.
+            if not timezone and email:
+                timezone = _derive_tz(email)
             # Optional per-row ICP override — falls back to the caller-
             # supplied icp_profile_id argument. Used by FIX-BE-1 / CRITICAL 3
             # to drive scoring on import.

@@ -2222,7 +2222,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { ErrorState } from '@/components/ui/error-state';
 import { PageHeader } from '@/components/ui/page-header';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { Switch } from '@/components/ui/switch';
+// import { Switch } from '@/components/ui/switch';
 import {
   Dialog,
   DialogContent,
@@ -2402,7 +2402,8 @@ export function AutopilotPage() {
   const [startedAt, setStartedAt]               = useState<string | null>(null);
 
   // AP-4: Human-in-the-loop enrichment gate
-  const [pauseForReview, setPauseForReview]     = useState(true);
+  // const [pauseForReview, setPauseForReview]     = useState(true);
+  const pauseForReview =false;
   const [gateOpen, setGateOpen]                 = useState(false);
   const [discoveredProspects, setDiscoveredProspects] = useState<DiscoveredProspect[]>([]);
   const [selectedProspects, setSelectedProspects] = useState<Set<string>>(new Set());
@@ -2610,7 +2611,7 @@ export function AutopilotPage() {
               )}
             </div>
             {/* AP-4: Pause for Review toggle */}
-            <div className="flex items-center justify-between rounded-lg border bg-muted/30 p-3">
+            {/* <div className="flex items-center justify-between rounded-lg border bg-muted/30 p-3">
               <div>
                 <p className="text-sm font-medium flex items-center gap-1.5">
                   <CheckCircle2 className="h-4 w-4 text-blue-500" />
@@ -2625,7 +2626,7 @@ export function AutopilotPage() {
                 onCheckedChange={setPauseForReview}
                 className="ml-4 shrink-0"
               />
-            </div>
+            </div> */}
           </CardContent>
           <CardFooter>
             <MotionButton
