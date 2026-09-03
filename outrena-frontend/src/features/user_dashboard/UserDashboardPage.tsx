@@ -1,3 +1,5 @@
+
+
 // /**
 //  * UserDashboardPage.tsx — personal dashboard for the logged-in user.
 //  *
@@ -280,6 +282,14 @@
 //     enabled: queryEnabled,
 //   });
 
+//   // ── Recent Campaigns (real data — top 5 by reply_rate desc) ─────────────
+//   const { data: campaignsRaw } = useQuery<unknown>({
+//     queryKey: ["campaigns", "dashboard-top5"],
+//     queryFn: () => http.get<unknown>("/api/v1/campaigns?limit=5&sort=reply_rate&order=desc"),
+//     enabled: queryEnabled,
+//     staleTime: 60_000,
+//   });
+
 //   // ── Onboarding checklist ──────────────────────────────────────────────────
 //   const { data: checklist } = useQuery<ChecklistData>({
 //     queryKey: ["onboarding-checklist"],
@@ -315,13 +325,22 @@
 //   ).length;
 //   const domainsTotal = domains.length;
 
-//   // Recent campaigns from topCampaigns (already sorted by reply rate in BE)
+//   // Recent campaigns — prefer real API data, fall back to dashboard aggregate
+//   const realCampaigns: Array<{ id: string; name: string; status: string; replyRate?: number | null }> = (() => {
+//     if (!campaignsRaw) return [];
+//     const items = Array.isArray(campaignsRaw)
+//       ? campaignsRaw
+//       : ((campaignsRaw as { items?: unknown[] }).items ?? []);
+//     return (items as Array<{ id: string; name: string; status: string; reply_rate?: number | null; replyRate?: number | null }>)
+//       .slice(0, 5)
+//       .map((c) => ({ id: c.id, name: c.name, status: c.status, replyRate: c.replyRate ?? c.reply_rate ?? null }));
+//   })();
 //   const topCampaigns: Array<{
 //     id: string;
 //     name: string;
 //     status: string;
 //     replyRate?: number | null;
-//   }> = (dashRaw as any)?.topCampaigns ?? dash.campaigns?.items ?? [];
+//   }> = (dashRaw as any)?.topCampaigns ?? (realCampaigns.length > 0 ? realCampaigns : []);
 
 //   // Chart data — map daily activity to Recharts shape
 //   const chartData = (activity?.daily ?? []).map(
@@ -831,33 +850,7 @@
 //   );
 // }
 
-/**
- * UserDashboardPage.tsx — personal dashboard for the logged-in user.
- *
- * Mounted at `/` inside <AppLayout>. Fetches:
- *   - GET /api/v1/dashboard?user_id=me  → DashboardResponse (aggregation + topCampaigns)
- *   - GET /api/v1/users/me/email-quota  → EmailQuota (today's send quota)
- *   - GET /api/v1/llm-configs           → LlmConfig[] (LLM warning banner)
- *   - GET /api/v1/domains               → Domain[] (Domains Ready stat)
- *   - GET /api/v1/onboarding/checklist  → ChecklistData (onboarding progress)
- *
- * Gap fixes applied (D-1 through D-6 from gap analysis):
- *   D-1  "No LLM configured" amber warning banner with Configure LLM CTA
- *   D-2  6 stat cards: Total Prospects, Active Campaigns, Emails Generated,
- *        Avg Open Rate, Avg Reply Rate, Domains Ready — sourced from real API
- *   D-3  17-item Quick Actions grid navigating to all major pages
- *   D-4  Recent Campaigns card (top 5 by reply rate, from topCampaigns)
- *   D-5  10-step AI Outreach Workflow guide (numbered, clickable)
- *   D-6  useNavigate() wires all navigation actions
- *
- * All existing functionality preserved:
- *   - 4 personal stat cards (emails sent 7d, replies, meetings, pipeline value)
- *   - Email quota card with progress bar + throttle warning
- *   - My campaigns list (active count + top 5)
- *   - Sender identities card
- *   - 7-day activity bar chart (Recharts)
- *   - Onboarding checklist
- */
+
 import { useQuery } from "@tanstack/react-query";
 import {
   Bar,
@@ -887,7 +880,6 @@ import {
   Mail,
   Megaphone,
   MessageSquare,
-  Eye,
   PlayCircle,
   Plus,
   Reply,
@@ -908,7 +900,6 @@ import {
   senderIdentityApi,
 } from "@/services/apiClient";
 import { ErrorState } from "@/components/ui/error-state";
-import type { UserDashboard } from "@/types/common";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatCard } from "@/components/ui/stat-card";
 import {
@@ -961,55 +952,16 @@ interface LlmConfig {
 interface DomainSummary {
   id: string;
   domain: string;
-  status: string;
+  spfStatus?: boolean;
+  dkimStatus?: boolean;
+  dmarcStatus?: boolean;
 }
 
-/* ── Mock fallback data (used only if API returns nothing usable) ─────────── */
-
-const MOCK_DASHBOARD: UserDashboard = {
-  user_id: "me",
-  user_name: "Dev Rep",
-  campaigns: {
-    active_count: 3,
-    items: [
-      { id: "c1", name: "Q1 SaaS Founder Outreach", status: "Active", prospect_count: 248 },
-      { id: "c2", name: "Series B VP Eng — Competitor Switch", status: "Active", prospect_count: 134 },
-      { id: "c3", name: "DTC Operator Roadshow", status: "Paused", prospect_count: 92 },
-      { id: "c4", name: "Healthcare CISO Refresh", status: "Active", prospect_count: 76 },
-      { id: "c5", name: "Fintech Compliance Leaders", status: "Draft", prospect_count: 0 },
-    ],
-  },
-  email_quota: {
-    date: new Date().toISOString().slice(0, 10),
-    emails_sent: 412,
-    daily_quota: 1000,
-    remaining: 588,
-    emails_bounced: 8,
-    complaints: 0,
-    is_throttled: false,
-    throttled_until: null,
-  },
-  sender_identities: {
-    total: 2,
-    default_email: "dev.rep@outrena.io",
-  },
-  recent_activity: {
-    emails_sent_7d: 2840,
-    replies_received_7d: 218,
-    meetings_booked_7d: 14,
-    daily: [
-      { date: "Mon", emails_sent: 320, replies: 28, meetings: 1 },
-      { date: "Tue", emails_sent: 412, replies: 33, meetings: 2 },
-      { date: "Wed", emails_sent: 380, replies: 29, meetings: 1 },
-      { date: "Thu", emails_sent: 502, replies: 41, meetings: 3 },
-      { date: "Fri", emails_sent: 478, replies: 36, meetings: 2 },
-      { date: "Sat", emails_sent: 396, replies: 26, meetings: 2 },
-      { date: "Sun", emails_sent: 352, replies: 25, meetings: 3 },
-    ],
-  },
-  prospects_contacted: 842,
-  pipeline_value: 412_500,
-};
+interface SenderIdentity {
+  id: string;
+  email: string;
+  isDefault?: boolean;
+}
 
 /* ── Quick Actions definition ────────────────────────────────────────────── */
 
@@ -1041,7 +993,7 @@ const WORKFLOW_STEPS = [
   { step: 3,  title: "Configure Integrations", desc: "Connect MailBridge & data tools",  path: "/setup/integrations" },
   { step: 4,  title: "Define ICP",             desc: "Create ideal customer profile",    path: "/prospecting/icp-profiles" },
   { step: 5,  title: "Import Prospects",       desc: "Add & enrich your leads",          path: "/prospects" },
-  { step: 6,  title: "Run Autopilot",          desc: "AI GTM pipeline — 60 seconds",    path: "/prospecting/autopilot" },
+  { step: 6,  title: "Run Autopilot",          desc: "AI GTM pipeline — 60 seconds",     path: "/prospecting/autopilot" },
   { step: 7,  title: "Generate Emails",        desc: "AI copywriting & QA scoring",      path: "/outreach/email-studio" },
   { step: 8,  title: "Build Sequence",         desc: "Multi-touch cadence",              path: "/outreach/sequences" },
   { step: 9,  title: "Track Replies",          desc: "Manage inbox & AI drafts",         path: "/outreach/reply-inbox" },
@@ -1071,10 +1023,9 @@ export function UserDashboardPage() {
   const navigate = useNavigate();
 
   // Gate every query: wait until AuthProvider has resolved + user is authenticated.
-  // Without this gate, API calls fire before the Bearer token is set → 400/401 loop.
   const queryEnabled = initialized && isAuthenticated;
 
-  // ── Personal dashboard (aggregation + topCampaigns + timeSeries) ─────────
+  // ── Dashboard (aggregation + topCampaigns + timeSeries) ──────────────────
   const {
     data: dashRaw,
     isLoading: dashLoading,
@@ -1100,25 +1051,35 @@ export function UserDashboardPage() {
   });
 
   // ── LLM configs (for the warning banner) ─────────────────────────────────
-  const { data: llmConfigs = [] } = useQuery<LlmConfig[]>({
+  const { data: llmConfigsRaw = [] } = useQuery<LlmConfig[]>({
     queryKey: ["llm-configs"],
     queryFn: () => http.get<LlmConfig[]>("/api/v1/llm-configs"),
     enabled: queryEnabled,
   });
 
   // ── Domains (for "Domains Ready" stat card) ───────────────────────────────
-  const { data: domains = [] } = useQuery<DomainSummary[]>({
+  const { data: domainsRaw = [] } = useQuery<DomainSummary[]>({
     queryKey: ["domains"],
     queryFn: () => http.get<DomainSummary[]>("/api/v1/domains"),
     enabled: queryEnabled,
   });
 
-  // ── Recent Campaigns (real data — top 5 by reply_rate desc) ─────────────
-  const { data: campaignsRaw } = useQuery<unknown>({
-    queryKey: ["campaigns", "dashboard-top5"],
-    queryFn: () => http.get<unknown>("/api/v1/campaigns?limit=5&sort=reply_rate&order=desc"),
+  // ── My Campaigns list (for the table at the bottom) ──────────────────────
+  const { data: myCampaignsRaw } = useQuery<unknown>({
+    queryKey: ["campaigns", "my-list"],
+    queryFn: () => http.get<unknown>("/api/v1/campaigns?limit=50"),
     enabled: queryEnabled,
     staleTime: 60_000,
+  });
+
+  // ── Sender identities (for the bottom card) ───────────────────────────────
+  const { data: senderIdentitiesRaw = [] } = useQuery<SenderIdentity[]>({
+    queryKey: ["sender-identities"],
+    queryFn: () =>
+      http.get<SenderIdentity[]>("/api/v1/sender-identities").then((r) =>
+        Array.isArray(r) ? r : (r as any)?.items ?? []
+      ),
+    enabled: queryEnabled,
   });
 
   // ── Onboarding checklist ──────────────────────────────────────────────────
@@ -1128,64 +1089,115 @@ export function UserDashboardPage() {
     enabled: queryEnabled,
   });
 
-  // ── Resolve data (real or mock fallback) ──────────────────────────────────
-  const dash: UserDashboard = (dashRaw as UserDashboard) ?? MOCK_DASHBOARD;
-  const quota = quotaData ?? dash.email_quota;
-  const activity = dash.recent_activity;
-
-  // ── Derived values ────────────────────────────────────────────────────────
-
-  // LLM warning: no active config
-  const hasActiveLlm = llmConfigs.some((c) => c.isActive);
-
-  // 6 stat cards — sourced from DashboardResponse.aggregation when available,
-  // fall back to UserDashboard personal totals.
+  // ── DashboardResponse shape ───────────────────────────────────────────────
+  // aggregation: { totalProspects, activeCampaigns, sentThisWeek,
+  //               repliesThisWeek, meetingsThisWeek, pipelineValue,
+  //               averageReplyRate, emailQuotaDaily, emailQuotaSource }
+  // topCampaigns: [{ id, name, status, replyRate }]
+  // timeSeries:   { points: [{ date, sent, opened, replied, bounced }] }
+  // user_name:    string | undefined  (populated by DashboardService.get)
   const agg = (dashRaw as any)?.aggregation ?? null;
-
-  const totalProspects: number =
-    agg?.totalProspects ?? dash.prospects_contacted ?? 0;
-  const activeCampaigns: number =
-    agg?.activeCampaigns ?? dash.campaigns?.active_count ?? 0;
-  const emailsGenerated: number =
-    agg?.totalSequences ?? activity?.emails_sent_7d ?? 0;
-  const avgOpenRate: number = agg?.avgOpenRate ?? 0;
-  const avgReplyRate: number = agg?.avgReplyRate ?? 0;
-
-  const domainsReady = domains.filter(
-    (d) => d.status === "ready" || d.status === "verified"
-  ).length;
-  const domainsTotal = domains.length;
-
-  // Recent campaigns — prefer real API data, fall back to dashboard aggregate
-  const realCampaigns: Array<{ id: string; name: string; status: string; replyRate?: number | null }> = (() => {
-    if (!campaignsRaw) return [];
-    const items = Array.isArray(campaignsRaw)
-      ? campaignsRaw
-      : ((campaignsRaw as { items?: unknown[] }).items ?? []);
-    return (items as Array<{ id: string; name: string; status: string; reply_rate?: number | null; replyRate?: number | null }>)
-      .slice(0, 5)
-      .map((c) => ({ id: c.id, name: c.name, status: c.status, replyRate: c.replyRate ?? c.reply_rate ?? null }));
-  })();
   const topCampaigns: Array<{
     id: string;
     name: string;
     status: string;
     replyRate?: number | null;
-  }> = (dashRaw as any)?.topCampaigns ?? (realCampaigns.length > 0 ? realCampaigns : []);
+  }> = (dashRaw as any)?.topCampaigns ?? [];
 
-  // Chart data — map daily activity to Recharts shape
-  const chartData = (activity?.daily ?? []).map(
-    (d: { date: string; emails_sent: number; replies: number; meetings: number }) => ({
-      date:
-        d.date.length === 10
-          ? new Date(d.date).toLocaleDateString("en-US", { weekday: "short" })
-          : d.date,
-      Sent: d.emails_sent,
-      Replies: d.replies,
-    })
+  // user_name comes directly from the dashboard response (set by the backend
+  // from the Keycloak token or UserProfile table — no mock needed).
+  const userName: string | undefined = (dashRaw as any)?.user_name ?? undefined;
+
+  // ── Derived values ────────────────────────────────────────────────────────
+
+  // LLM banner: check both snake_case and camelCase since the backend may
+  // return either depending on the serializer version in use.
+  const hasActiveLlm = llmConfigsRaw.some(
+    (c) => (c as any).is_active === true || c.isActive === true
   );
 
-  // Quota progress
+  // Domains Ready: spfStatus && dkimStatus && dmarcStatus (boolean flags on
+  // DomainResponse — there is no `status` string field).
+  const domainsReady = domainsRaw.filter(
+    (d) => d.spfStatus === true && d.dkimStatus === true && d.dmarcStatus === true
+  ).length;
+  const domainsTotal = domainsRaw.length;
+
+  // Stat card values — all from aggregation.
+  const totalProspects: number = agg?.totalProspects ?? 0;
+  const activeCampaigns: number = agg?.activeCampaigns ?? 0;
+  const emailsSentThisWeek: number = agg?.sentThisWeek ?? 0;
+  const avgReplyRate: number = agg?.averageReplyRate ?? 0;
+
+  // My campaigns table.
+  const myCampaignsList: Array<{
+    id: string;
+    name: string;
+    status: string;
+    prospect_count?: number;
+  }> = (() => {
+    if (!myCampaignsRaw) return [];
+    const items = Array.isArray(myCampaignsRaw)
+      ? myCampaignsRaw
+      : ((myCampaignsRaw as any).items ?? []);
+    return (items as any[]).map((c) => ({
+      id: c.id,
+      name: c.name,
+      status: c.status,
+      prospect_count: c.prospect_count ?? c.prospectCount ?? undefined,
+    }));
+  })();
+  const activeCampaignCount = myCampaignsList.filter(
+    (c) => c.status?.toLowerCase() === "active"
+  ).length;
+
+  // Sender identities — derive default email + total from the real API.
+  const defaultIdentity = senderIdentitiesRaw.find((s) => s.isDefault) ?? senderIdentitiesRaw[0];
+  const senderTotal = senderIdentitiesRaw.length;
+
+  // Chart data from timeSeries.points.
+  const timeSeriesPoints: Array<{ date: string; sent: number; replied: number }> =
+    (dashRaw as any)?.timeSeries?.points ?? [];
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const chartData = timeSeriesPoints
+    .filter((p) => new Date(p.date) >= sevenDaysAgo)
+    .map((p) => ({
+      date: new Date(p.date).toLocaleDateString("en-US", { weekday: "short" }),
+      Sent: p.sent,
+      Replies: p.replied,
+    }));
+
+  // 7d stat cards — from aggregation.
+  const repliesThisWeek: number = agg?.repliesThisWeek ?? 0;
+  const meetingsThisWeek: number = agg?.meetingsThisWeek ?? 0;
+  const pipelineValue: number = agg?.pipelineValue ?? 0;
+
+  // Email quota — merge live quota response with domain-warming override.
+  const emailQuotaFromAgg: number = agg?.emailQuotaDaily ?? 0;
+  const emailQuotaSource: string = agg?.emailQuotaSource ?? "env";
+
+  const quota = (() => {
+    if (!quotaData && emailQuotaFromAgg === 0) return null;
+    const base = quotaData ?? {
+      date: new Date().toISOString().slice(0, 10),
+      emails_sent: emailsSentThisWeek,
+      daily_quota: emailQuotaFromAgg || 100,
+      remaining: Math.max(0, (emailQuotaFromAgg || 100) - emailsSentThisWeek),
+      emails_bounced: 0,
+      complaints: 0,
+      is_throttled: false,
+      throttled_until: null,
+    };
+    if (emailQuotaFromAgg > 0 && emailQuotaSource === "domain_warming") {
+      return {
+        ...base,
+        daily_quota: emailQuotaFromAgg,
+        remaining: Math.max(0, emailQuotaFromAgg - (base.emails_sent ?? 0)),
+      };
+    }
+    return base;
+  })();
+
   const quotaPct = quota
     ? Math.round((quota.emails_sent / Math.max(quota.daily_quota, 1)) * 100)
     : 0;
@@ -1195,8 +1207,8 @@ export function UserDashboardPage() {
     return (
       <div className="space-y-6 p-6">
         <Skeleton className="h-8 w-48" />
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
-          {Array.from({ length: 6 }).map((_, i) => (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+          {Array.from({ length: 5 }).map((_, i) => (
             <Skeleton key={i} className="h-24 rounded-xl" />
           ))}
         </div>
@@ -1230,11 +1242,11 @@ export function UserDashboardPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title={`Welcome back${dash.user_name ? `, ${dash.user_name.split(" ")[0]}` : ""}`}
+        title={`Welcome back${userName ? `, ${userName.split(" ")[0]}` : ""}`}
         description="Your outreach command center"
       />
 
-      {/* ── D-1: LLM Warning Banner ───────────────────────────────────────── */}
+      {/* ── LLM Warning Banner ───────────────────────────────────────────── */}
       {!hasActiveLlm && (
         <Card className="border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800">
           <CardContent className="p-4 flex items-center gap-4">
@@ -1259,8 +1271,8 @@ export function UserDashboardPage() {
         </Card>
       )}
 
-      {/* ── D-2: 6 Stat Cards ─────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+      {/* ── 5 Stat Cards ─────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
         {[
           {
             label: "Total Prospects",
@@ -1275,16 +1287,10 @@ export function UserDashboardPage() {
             colorCls: "text-blue-600 bg-blue-50 dark:bg-blue-950/40",
           },
           {
-            label: "Emails Generated",
-            value: emailsGenerated.toLocaleString(),
-            icon: <Mail className="h-4 w-4" />,
+            label: "Emails Sent (7d)",
+            value: emailsSentThisWeek.toLocaleString(),
+            icon: <Send className="h-4 w-4" />,
             colorCls: "text-violet-600 bg-violet-50 dark:bg-violet-950/40",
-          },
-          {
-            label: "Avg Open Rate",
-            value: fmtPct(avgOpenRate),
-            icon: <Eye className="h-4 w-4" />,
-            colorCls: "text-amber-600 bg-amber-50 dark:bg-amber-950/40",
           },
           {
             label: "Avg Reply Rate",
@@ -1296,7 +1302,10 @@ export function UserDashboardPage() {
             label: "Domains Ready",
             value: `${domainsReady}/${domainsTotal}`,
             icon: <Globe className="h-4 w-4" />,
-            colorCls: "text-teal-600 bg-teal-50 dark:bg-teal-950/40",
+            colorCls:
+              domainsReady === domainsTotal && domainsTotal > 0
+                ? "text-teal-600 bg-teal-50 dark:bg-teal-950/40"
+                : "text-amber-600 bg-amber-50 dark:bg-amber-950/40",
           },
         ].map((s) => (
           <Card key={s.label}>
@@ -1313,34 +1322,32 @@ export function UserDashboardPage() {
         ))}
       </div>
 
-      {/* ── Personal activity stats (existing 4 cards) ───────────────────── */}
+      {/* ── 7d activity stat cards ────────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <StatCard
           label="Emails sent (7d)"
-          value={(activity?.emails_sent_7d ?? 0).toLocaleString()}
+          value={emailsSentThisWeek.toLocaleString()}
           icon={<Send className="h-4 w-4" />}
         />
         <StatCard
           label="Replies (7d)"
-          value={(activity?.replies_received_7d ?? 0).toLocaleString()}
+          value={repliesThisWeek.toLocaleString()}
           icon={<Reply className="h-4 w-4" />}
         />
         <StatCard
           label="Meetings booked (7d)"
-          value={(activity?.meetings_booked_7d ?? 0).toLocaleString()}
+          value={meetingsThisWeek.toLocaleString()}
           icon={<CalendarCheck className="h-4 w-4" />}
         />
         <StatCard
           label="Pipeline value"
-          value={formatCurrency(dash.pipeline_value ?? 0)}
+          value={formatCurrency(pipelineValue)}
           icon={<TrendingUp className="h-4 w-4" />}
         />
       </div>
 
-      {/* ── Middle row: Quick Actions + Recent Campaigns ──────────────────── */}
+      {/* ── Quick Actions + Recent Campaigns ─────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-
-        {/* D-3: Quick Actions */}
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Quick Actions</CardTitle>
@@ -1365,7 +1372,6 @@ export function UserDashboardPage() {
           </CardContent>
         </Card>
 
-        {/* D-4: Recent Campaigns */}
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Recent Campaigns</CardTitle>
@@ -1425,9 +1431,8 @@ export function UserDashboardPage() {
         </Card>
       </div>
 
-      {/* ── Activity chart + Email quota row ─────────────────────────────── */}
+      {/* ── Activity chart + Email quota ─────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Recharts activity chart (existing) */}
         <Card className="lg:col-span-2">
           <CardHeader className="pb-3">
             <CardTitle className="text-base">7-day activity</CardTitle>
@@ -1458,13 +1463,17 @@ export function UserDashboardPage() {
           </CardContent>
         </Card>
 
-        {/* Email quota card (existing) */}
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
               <Mail className="h-4 w-4" />
               Email quota today
             </CardTitle>
+            {emailQuotaSource === "domain_warming" && (
+              <CardDescription className="text-xs text-teal-600 dark:text-teal-400">
+                Limit set by domain warming schedule
+              </CardDescription>
+            )}
           </CardHeader>
           <CardContent className="space-y-3">
             {quota ? (
@@ -1507,7 +1516,7 @@ export function UserDashboardPage() {
         </Card>
       </div>
 
-      {/* ── Onboarding checklist (existing) ──────────────────────────────── */}
+      {/* ── Onboarding checklist ─────────────────────────────────────────── */}
       {checklist && !checklist.all_done && (
         <Card>
           <CardHeader className="pb-3">
@@ -1544,8 +1553,18 @@ export function UserDashboardPage() {
                       )}
                     >
                       {item.done && (
-                        <svg className="h-2.5 w-2.5 text-primary-foreground" viewBox="0 0 10 10" fill="none">
-                          <path d="M2 5l2.5 2.5L8 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                        <svg
+                          className="h-2.5 w-2.5 text-primary-foreground"
+                          viewBox="0 0 10 10"
+                          fill="none"
+                        >
+                          <path
+                            d="M2 5l2.5 2.5L8 3"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
                         </svg>
                       )}
                     </div>
@@ -1560,16 +1579,16 @@ export function UserDashboardPage() {
         </Card>
       )}
 
-      {/* ── My Campaigns table (existing) ────────────────────────────────── */}
+      {/* ── My Campaigns table ───────────────────────────────────────────── */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base flex items-center justify-between">
             <span>My campaigns</span>
-            <Badge variant="secondary">{dash.campaigns?.active_count ?? 0} active</Badge>
+            <Badge variant="secondary">{activeCampaignCount} active</Badge>
           </CardTitle>
         </CardHeader>
         <CardContent className="p-0">
-          {!dash.campaigns?.items?.length ? (
+          {!myCampaignsList.length ? (
             <EmptyState
               title="No campaigns yet"
               description="Create your first campaign to start sending outreach."
@@ -1590,7 +1609,7 @@ export function UserDashboardPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {dash.campaigns.items.map((c) => (
+                {myCampaignsList.map((c) => (
                   <TableRow key={c.id}>
                     <TableCell className="font-medium">{c.name}</TableCell>
                     <TableCell>
@@ -1617,8 +1636,8 @@ export function UserDashboardPage() {
         </CardContent>
       </Card>
 
-      {/* ── Sender identities (existing) ─────────────────────────────────── */}
-      {dash.sender_identities && (
+      {/* ── Sender identities ────────────────────────────────────────────── */}
+      {senderTotal > 0 && (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
@@ -1630,12 +1649,11 @@ export function UserDashboardPage() {
             <p className="text-sm">
               <span className="text-muted-foreground">Default: </span>
               <span className="font-medium font-mono text-sm">
-                {dash.sender_identities.default_email ?? "—"}
+                {defaultIdentity?.email ?? "—"}
               </span>
             </p>
             <p className="text-xs text-muted-foreground mt-1">
-              {dash.sender_identities.total} identit
-              {dash.sender_identities.total === 1 ? "y" : "ies"} configured
+              {senderTotal} identit{senderTotal === 1 ? "y" : "ies"} configured
             </p>
             <Button
               variant="outline"
@@ -1649,7 +1667,7 @@ export function UserDashboardPage() {
         </Card>
       )}
 
-      {/* ── D-5: 10-Step AI Outreach Workflow Guide ───────────────────────── */}
+      {/* ── 10-Step AI Outreach Workflow Guide ───────────────────────────── */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">AI Outreach Workflow</CardTitle>

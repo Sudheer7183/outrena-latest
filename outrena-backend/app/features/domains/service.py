@@ -173,8 +173,14 @@ class DomainService:
 
     @staticmethod
     def _lookup_dkim(domain: str, selector: str) -> DnsRecordResult:
-        name = f"{selector}._domainkey.{domain}"
-        return DomainService._lookup_txt(name)  # type: ignore[return-value]
+        from app.features.domains.dns_service import verify_dkim
+        found, record = verify_dkim(domain, selector)
+        return DnsRecordResult(
+            name="DKIM",
+            found=found,
+            records=[record] if record else [],
+            detail=record if record else "No DKIM record found for common selectors.",
+        )
 
 
 __all__ = ["DomainService"]

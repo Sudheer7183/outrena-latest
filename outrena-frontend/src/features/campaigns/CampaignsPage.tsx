@@ -137,13 +137,18 @@
 
 // /* ── Constants ──────────────────────────────────────────────────────── */
 
-// const STATUS_COLORS: Record<string, string> = {
-//   draft: "bg-gray-100 text-gray-700",
-//   active: "bg-emerald-100 text-emerald-700",
-//   paused: "bg-amber-100 text-amber-700",
-//   completed: "bg-blue-100 text-blue-700",
-//   archived: "bg-slate-100 text-slate-500",
+// /** Human-readable label and colour for every campaign status. */
+// const CAMPAIGN_STATUS_META: Record<string, { label: string; cls: string }> = {
+//   draft:     { label: "Draft",     cls: "bg-gray-100 text-gray-700" },
+//   active:    { label: "Active",    cls: "bg-emerald-100 text-emerald-700" },
+//   paused:    { label: "Paused",    cls: "bg-amber-100 text-amber-700" },
+//   completed: { label: "Completed", cls: "bg-blue-100 text-blue-700" },
+//   archived:  { label: "Archived",  cls: "bg-slate-100 text-slate-500" },
+//   sending:   { label: "Sending",   cls: "bg-violet-100 text-violet-700" },
+//   failed:    { label: "Failed",    cls: "bg-red-100 text-red-700" },
 // };
+
+
 
 // const FRAMEWORK_NAMES: Record<string, string> = {
 //   trigger: "Trigger-Based",
@@ -157,10 +162,7 @@
 //   story: "Story-Led",
 // };
 
-// const WORD_LIMITS: Record<string, number> = {
-//   FirstTouch: 150, NewEvidence: 120, DifferentPain: 120,
-//   IndustryInsight: 120, DirectQuestion: 80, Breakup: 60,
-// };
+
 
 // const SEQ_STATUS_COLORS: Record<string, string> = {
 //   Draft: "bg-gray-100 text-gray-600",
@@ -468,9 +470,6 @@
 
 //   const handleApproveSequence = async (seq: Sequence, _idx: number) => {
 //     const draft = seqDrafts[seq.id];
-//     const wc = (draft?.bodyCopy ?? seq.bodyCopy ?? "").split(/\s+/).filter(Boolean).length;
-//     const limit = WORD_LIMITS[seq.angle] ?? 150;
-//     if (wc > limit) { toast.error(`Exceeds ${limit}-word limit`); return; }
 //     try {
 //       await http.put(`/api/v1/sequences/${seq.id}`, {
 //         subjectLine: draft?.subjectLine ?? seq.subjectLine,
@@ -693,8 +692,8 @@
 //                     <div className="flex items-center justify-between">
 //                       <CardTitle className="text-sm line-clamp-1">{c.name}</CardTitle>
 //                       {/* C-12: Status badge with colour */}
-//                       <span className={cn("text-xs px-2 py-0.5 rounded-full font-medium", STATUS_COLORS[c.status] ?? "bg-gray-100 text-gray-600")}>
-//                         {c.status}
+//                       <span className={cn("text-xs px-2 py-0.5 rounded-full font-medium", (CAMPAIGN_STATUS_META[c.status] ?? CAMPAIGN_STATUS_META.draft).cls)}>
+//                         {(CAMPAIGN_STATUS_META[c.status] ?? { label: c.status }).label}
 //                       </span>
 //                     </div>
 //                     {c.description && <CardDescription className="text-xs line-clamp-2">{c.description}</CardDescription>}
@@ -744,8 +743,8 @@
 //               <h3 className="text-lg font-semibold truncate">{selectedCampaign?.name}</h3>
 //               <p className="text-sm text-muted-foreground truncate">{selectedCampaign?.description ?? "No description"}</p>
 //             </div>
-//             <span className={cn("text-xs px-2 py-0.5 rounded-full font-medium", STATUS_COLORS[selectedCampaign?.status ?? "draft"])}>
-//               {selectedCampaign?.status}
+//             <span className={cn("text-xs px-2 py-0.5 rounded-full font-medium", (CAMPAIGN_STATUS_META[selectedCampaign?.status ?? "draft"] ?? CAMPAIGN_STATUS_META.draft).cls)}>
+//               {(CAMPAIGN_STATUS_META[selectedCampaign?.status ?? "draft"] ?? { label: selectedCampaign?.status }).label}
 //             </span>
 //             <Select value={selectedCampaign?.status ?? "draft"} onValueChange={(v) => handleStatusChange(selectedId, v)}>
 //               <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
@@ -935,9 +934,6 @@
 //                     const draft = seqDrafts[seq.id];
 //                     const subject = draft?.subjectLine ?? seq.subjectLine ?? "";
 //                     const body = draft?.bodyCopy ?? seq.bodyCopy ?? "";
-//                     const wc = body.split(/\s+/).filter(Boolean).length;
-//                     const limit = WORD_LIMITS[seq.angle] ?? 150;
-//                     const overLimit = wc > limit;
 //                     return (
 //                       <div key={seq.id} className="relative pl-14 pb-6">
 //                         <div className="absolute left-4 h-5 w-5 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs font-bold shrink-0">
@@ -973,18 +969,13 @@
 //                               rows={5}
 //                               className="text-sm font-mono"
 //                             />
-//                             <div className="flex items-center justify-between">
-//                               <span className={cn("text-xs", overLimit ? "text-red-600 font-medium" : "text-muted-foreground")}>
-//                                 Words: {wc}/{limit} {overLimit && "(OVER!)"}
-//                               </span>
-//                               <div className="flex gap-2">
-//                                 <Button size="sm" variant="outline" className="h-7" onClick={() => handleApproveSequence(seq, i)}>
-//                                   <CheckCircle2 className="h-3 w-3 mr-1" /> Approve
-//                                 </Button>
-//                                 <Button size="sm" variant="ghost" className="h-7" onClick={() => navigator.clipboard.writeText(body).then(() => toast.success("Copied"))}>
-//                                   <Copy className="h-3 w-3 mr-1" /> Copy
-//                                 </Button>
-//                               </div>
+//                             <div className="flex justify-end gap-2">
+//                               <Button size="sm" variant="outline" className="h-7" onClick={() => handleApproveSequence(seq, i)}>
+//                                 <CheckCircle2 className="h-3 w-3 mr-1" /> Approve
+//                               </Button>
+//                               <Button size="sm" variant="ghost" className="h-7" onClick={() => navigator.clipboard.writeText(body).then(() => toast.success("Copied"))}>
+//                                 <Copy className="h-3 w-3 mr-1" /> Copy
+//                               </Button>
 //                             </div>
 //                           </CardContent>
 //                         </Card>
@@ -1455,7 +1446,7 @@ import {
   Webhook,
 } from "lucide-react";
 import { toast } from "sonner";
-
+ 
 import { http } from "@/services/apiClient";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -1501,15 +1492,16 @@ import {
 } from "@/components/ui/alert-dialog";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState } from "@/components/ui/empty-state";
-
+import { Pagination, usePagination } from "@/components/ui/pagination";
+ 
 /* ── Types ─────────────────────────────────────────────────────────── */
-
+ 
 interface IcpProfile { id: string; name: string; senderRole?: string | null; senderCompany?: string | null; senderOffer?: string | null; proofMetric?: string | null; }
 interface Domain { id: string; domainName: string; }
 interface Prospect { id: string; firstName: string; lastName: string; email: string | null; title: string | null; company: string | null; seniority: string; }
 interface Collateral { id: string; name: string; type: string; url: string | null; content: string | null; description: string | null; }
 interface MailBridgeConfig { id: string; name: string; baseUrl: string; provider: string; fromEmail: string; fromName: string | null; isActive: boolean; }
-
+ 
 interface CampaignProspectRow {
   id: string;
   prospectId: string;
@@ -1517,7 +1509,7 @@ interface CampaignProspectRow {
   status: string;
   prospect?: Prospect;
 }
-
+ 
 interface Campaign {
   id: string;
   name: string;
@@ -1543,7 +1535,7 @@ interface Campaign {
   createdAt: string;
   updatedAt: string;
 }
-
+ 
 interface Sequence {
   id: string;
   campaignId: string;
@@ -1559,12 +1551,12 @@ interface Sequence {
   openedAt: string | null;
   repliedAt: string | null;
 }
-
+ 
 interface PreflightCheck { name: string; status: "pass" | "fail" | "warn"; detail: string; }
 interface PreflightResult { passed: boolean; checks: PreflightCheck[]; warnings?: string[]; allPassed?: boolean; }
-
+ 
 /* ── Constants ──────────────────────────────────────────────────────── */
-
+ 
 /** Human-readable label and colour for every campaign status. */
 const CAMPAIGN_STATUS_META: Record<string, { label: string; cls: string }> = {
   draft:     { label: "Draft",     cls: "bg-gray-100 text-gray-700" },
@@ -1575,9 +1567,9 @@ const CAMPAIGN_STATUS_META: Record<string, { label: string; cls: string }> = {
   sending:   { label: "Sending",   cls: "bg-violet-100 text-violet-700" },
   failed:    { label: "Failed",    cls: "bg-red-100 text-red-700" },
 };
-
-
-
+ 
+ 
+ 
 const FRAMEWORK_NAMES: Record<string, string> = {
   trigger: "Trigger-Based",
   problem: "Problem-First",
@@ -1589,9 +1581,9 @@ const FRAMEWORK_NAMES: Record<string, string> = {
   spiced: "SPICED",
   story: "Story-Led",
 };
-
-
-
+ 
+ 
+ 
 const SEQ_STATUS_COLORS: Record<string, string> = {
   Draft: "bg-gray-100 text-gray-600",
   QaPassed: "bg-emerald-100 text-emerald-700",
@@ -1600,7 +1592,7 @@ const SEQ_STATUS_COLORS: Record<string, string> = {
   Replied: "bg-teal-100 text-teal-700",
   Bounced: "bg-red-100 text-red-700",
 };
-
+ 
 function exportToCsv(rows: Record<string, unknown>[], filename: string) {
   if (rows.length === 0) return;
   const keys = Object.keys(rows[0]);
@@ -1611,12 +1603,12 @@ function exportToCsv(rows: Record<string, unknown>[], filename: string) {
   a.download = `${filename}.csv`;
   a.click();
 }
-
+ 
 /* ── Page ──────────────────────────────────────────────────────────── */
-
+ 
 export function CampaignsPage() {
   const qc = useQueryClient();
-
+ 
   /* ── Data queries ── */
   const campaignsQ = useQuery<{ items: Campaign[]; total: number }>({
     queryKey: ["campaigns"],
@@ -1629,20 +1621,20 @@ export function CampaignsPage() {
   // Campaign.llmConfigId is optional; null means "use tenant default LLM"
   const domainsQ = useQuery<Domain[]>({ queryKey: ["domains"], queryFn: () => http.get<any>("/api/v1/domains").then((r) => Array.isArray(r) ? r : r?.items ?? []) });
   const prospectsQ = useQuery<Prospect[]>({ queryKey: ["prospects-lite"], queryFn: () => http.get<any>("/api/v1/prospects").then((r) => Array.isArray(r) ? r : r?.items ?? []) });
-
+ 
   const campaigns = campaignsQ.data?.items ?? [];
   const icps = icpQ.data ?? [];
   // const llmConfigs: { id: string; name: string; provider: string }[] = []; // campaigns use tenant default LLM
   const domains = domainsQ.data ?? [];
   const allProspects = prospectsQ.data ?? [];
-
+ 
   /* ── View state ── */
   const [view, setView] = useState<"list" | "detail">("list");
   const [selectedId, setSelectedId] = useState("");
   const [detailTab, setDetailTab] = useState("prospects");
-
+ 
   const selectedCampaign = campaigns.find((c) => c.id === selectedId);
-
+ 
   /* ── Detail: lazy-loaded data ── */
   const campaignProspectsQ = useQuery<CampaignProspectRow[]>({
     queryKey: ["campaign-prospects", selectedId],
@@ -1651,10 +1643,10 @@ export function CampaignsPage() {
         .then((r) => Array.isArray(r) ? r : r?.items ?? []),
     enabled: view === "detail" && !!selectedId,
   });
-
+ 
   const sequencesQ = useQuery<Sequence[]>({
     queryKey: ["sequences", selectedId],
-    queryFn: () => http.get<any>(`/api/v1/sequences?campaign_id=${selectedId}`).then((r) => Array.isArray(r) ? r : r?.items ?? []),
+    queryFn: () => http.get<any>(`/api/v1/sequences?campaign_id=${selectedId}&limit=500`).then((r) => Array.isArray(r) ? r : r?.items ?? []),
     enabled: view === "detail" && !!selectedId,
   });
   const collateralsQ = useQuery<Collateral[]>({
@@ -1662,7 +1654,7 @@ export function CampaignsPage() {
     queryFn: () => http.get<any>("/api/v1/collaterals").then((r) => Array.isArray(r) ? r : r?.items ?? []),
     enabled: view === "detail" && !!selectedId,
   });
-
+ 
   // Fetch existing collateral links for this campaign so previously linked
   // collaterals are visible when the detail view is opened.
   // Endpoint: GET /api/v1/collaterals/links?campaign_id=X
@@ -1679,11 +1671,11 @@ export function CampaignsPage() {
     queryFn: () => http.get<any>("/api/v1/mailbridge/config").then((r) => Array.isArray(r) ? r : r?.items ?? []),
     enabled: view === "detail" && !!selectedId,
   });
-
+ 
   const sequences = sequencesQ.data ?? [];
   const collateralLibrary = collateralsQ.data ?? [];
   const mbConfigs = mailbridgeQ.data ?? [];
-
+ 
   // Campaign prospects fetched directly from the API (not embedded in the campaign list response).
   // Enrich each row with the full prospect object looked up from the allProspects list.
   const campaignProspects: CampaignProspectRow[] = useMemo(
@@ -1694,23 +1686,23 @@ export function CampaignsPage() {
       })),
     [campaignProspectsQ.data, allProspects]
   );
-
+ 
   // Collaterals linked to this campaign (filter library by campaignId in links)
   // The backend returns campaign with collateral links embedded or we filter collateralLibrary
   // Since the API doesn't have a campaign-specific collaterals endpoint, we use the full library
   // and track linked ones via the campaign's _count.collaterals or from a separate state.
   const [linkedCollateralIds, setLinkedCollateralIds] = useState<Set<string>>(new Set());
-
+ 
   /* ── Sequence local edits ── */
   const [seqDrafts, setSeqDrafts] = useState<Record<string, { subjectLine: string; bodyCopy: string }>>({});
-
+ 
   /* ── Create/Edit form ── */
   const EMPTY_FORM = { name: "", description: "", status: "draft", framework: "trigger", targetAudience: "", senderRole: "", senderCompany: "", senderOffer: "", proofMetric: "", senderProduct: "", icpProfileId: "", llmConfigId: "", domainId: "" };
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [formTab, setFormTab] = useState("basics");
-
+ 
   const resetForm = () => { setForm({ ...EMPTY_FORM }); setFormTab("basics"); setEditingId(null); };
   const openCreate = () => { resetForm(); setDialogOpen(true); };
   const openEdit = (c: Campaign) => {
@@ -1719,7 +1711,7 @@ export function CampaignsPage() {
     setFormTab("basics");
     setDialogOpen(true);
   };
-
+ 
   /* ── Campaign CRUD mutations ── */
   const saveMut = useMutation({
     mutationFn: (body: Record<string, unknown>) =>
@@ -1733,7 +1725,7 @@ export function CampaignsPage() {
     },
     onError: () => toast.error("Failed to save campaign"),
   });
-
+ 
   const [deleteTarget, setDeleteTarget] = useState<Campaign | null>(null);
   const deleteMut = useMutation({
     mutationFn: (id: string) => http.delete(`/api/v1/campaigns/${id}`),
@@ -1745,12 +1737,12 @@ export function CampaignsPage() {
     },
     onError: () => toast.error("Delete failed"),
   });
-
+ 
   const handleSave = () => {
     if (!form.name.trim()) { toast.error("Campaign name is required"); return; }
     saveMut.mutate({ ...form, icpProfileId: form.icpProfileId || null, llmConfigId: form.llmConfigId || null, domainId: form.domainId || null });
   };
-
+ 
   /* ── Status change ── */
   const handleStatusChange = async (id: string, newStatus: string) => {
     if (newStatus === "active") {
@@ -1771,7 +1763,7 @@ export function CampaignsPage() {
       qc.invalidateQueries({ queryKey: ["campaigns"] });
     } catch { toast.error("Status change failed"); }
   };
-
+ 
   /* ── Clone ── */
   const cloneMut = useMutation({
     mutationFn: (id: string) => http.post<any>("/api/v1/campaigns/clone", { campaignId: id }),
@@ -1781,13 +1773,13 @@ export function CampaignsPage() {
     },
     onError: () => toast.error("Clone failed"),
   });
-
+ 
   /* ── Pre-flight ── */
   const [preflightOpen, setPreflightOpen] = useState(false);
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [preflightResult, setPreflightResult] = useState<PreflightResult | null>(null);
   const [pendingActivateId, setPendingActivateId] = useState("");
-
+ 
   const confirmActivate = async () => {
     try {
       await http.put(`/api/v1/campaigns/${pendingActivateId}`, { status: "active" });
@@ -1796,18 +1788,18 @@ export function CampaignsPage() {
     } catch { toast.error("Activation failed"); }
     setPreflightOpen(false); setPreflightResult(null); setPendingActivateId("");
   };
-
+ 
   /* ── Add Prospects dialog ── */
   const [addProspectOpen, setAddProspectOpen] = useState(false);
   const [prospectSearch, setProspectSearch] = useState("");
   const [addProspectIds, setAddProspectIds] = useState<Set<string>>(new Set());
-
+ 
   const existingProspectIds = new Set(campaignProspects.map((cp) => cp.prospectId));
   const availableProspects = allProspects.filter((p) =>
     !existingProspectIds.has(p.id) &&
     (prospectSearch === "" || `${p.firstName} ${p.lastName} ${p.company ?? ""} ${p.title ?? ""}`.toLowerCase().includes(prospectSearch.toLowerCase()))
   );
-
+ 
   const linkProspectMut = useMutation({
     mutationFn: (prospectId: string) =>
       http.post("/api/v1/campaigns/campaign-prospects", { campaignId: selectedId, prospectId }),
@@ -1816,7 +1808,7 @@ export function CampaignsPage() {
       qc.invalidateQueries({ queryKey: ["campaign-prospects", selectedId] });
     },
   });
-
+ 
   const handleAddProspects = async () => {
     if (addProspectIds.size === 0) { toast.error("Select at least one prospect"); return; }
     for (const pid of addProspectIds) {
@@ -1825,7 +1817,7 @@ export function CampaignsPage() {
     toast.success(`${addProspectIds.size} prospect(s) added`);
     setAddProspectOpen(false); setAddProspectIds(new Set()); setProspectSearch("");
   };
-
+ 
   const handleRemoveProspect = async (prospectId: string) => {
     try {
       await fetch("/api/v1/campaigns/campaign-prospects", {
@@ -1838,12 +1830,12 @@ export function CampaignsPage() {
       qc.invalidateQueries({ queryKey: ["campaign-prospects", selectedId] });
     } catch { toast.error("Remove failed"); }
   };
-
+ 
   /* ── Sequences ── */
   const [seqFramework, setSeqFramework] = useState("trigger");
   const [generating, setGenerating] = useState(false);
   const [sendingId, setSendingId] = useState<string | null>(null);
-
+ 
   const handleGenerateSequences = async () => {
     setGenerating(true);
     try {
@@ -1853,7 +1845,7 @@ export function CampaignsPage() {
     } catch { toast.error("Sequence generation failed"); }
     setGenerating(false);
   };
-
+ 
   const handleSendEmail = async (seqId: string) => {
     setSendingId(seqId);
     try {
@@ -1864,7 +1856,7 @@ export function CampaignsPage() {
     } catch { toast.error("Send failed"); }
     setSendingId(null);
   };
-
+ 
   const handleSendAllApproved = async () => {
     const approved = sequences.filter((s) => s.status === "QaPassed");
     if (approved.length === 0) { toast.error("No approved sequences to send"); return; }
@@ -1880,7 +1872,7 @@ export function CampaignsPage() {
     qc.invalidateQueries({ queryKey: ["sequences", selectedId] });
     setSendingId(null);
   };
-
+ 
   const handleScheduleCampaign = async () => {
     const approved = sequences.filter((s) => s.status === "QaPassed");
     if (approved.length === 0) { toast.error("No approved sequences to schedule"); return; }
@@ -1895,7 +1887,7 @@ export function CampaignsPage() {
     toast.success(`${scheduled} sequences scheduled`);
     qc.invalidateQueries({ queryKey: ["sequences", selectedId] });
   };
-
+ 
   const handleApproveSequence = async (seq: Sequence, _idx: number) => {
     const draft = seqDrafts[seq.id];
     try {
@@ -1908,14 +1900,14 @@ export function CampaignsPage() {
       qc.invalidateQueries({ queryKey: ["sequences", selectedId] });
     } catch { toast.error("Approve failed"); }
   };
-
+ 
   /* ── Collaterals ── */
   const [collateralDialog, setCollateralDialog] = useState(false);
   const [collForm, setCollForm] = useState({ name: "", type: "case_study", url: "", content: "", description: "" });
   const [linkCollateralOpen, setLinkCollateralOpen] = useState(false);
   const [linkCollateralId, setLinkCollateralId] = useState("");
   const [campaignCollateralLinks, setCampaignCollateralLinks] = useState<{ linkId: string; collateralId: string; }[]>([]);
-
+ 
   // Seed collateral link state from the API whenever the campaign detail opens
   // or the collateral-links query result changes (e.g. after a link/unlink).
   useEffect(() => {
@@ -1929,7 +1921,7 @@ export function CampaignsPage() {
       setLinkedCollateralIds(new Set());
     }
   }, [collateralLinksQ.data, collateralLinksQ.isFetching]);
-
+ 
   const createCollateralMut = useMutation({
     mutationFn: (body: Record<string, unknown>) => http.post<any>("/api/v1/collaterals", body),
     onSuccess: async (data) => {
@@ -1947,7 +1939,7 @@ export function CampaignsPage() {
     },
     onError: () => toast.error("Failed to add collateral"),
   });
-
+ 
   const handleLinkCollateral = async () => {
     if (!linkCollateralId) { toast.error("Select a collateral to link"); return; }
     try {
@@ -1959,7 +1951,7 @@ export function CampaignsPage() {
       setLinkCollateralOpen(false); setLinkCollateralId("");
     } catch { toast.error("Link failed"); }
   };
-
+ 
   const handleUnlinkCollateral = async (collateralId: string) => {
     const link = campaignCollateralLinks.find((l) => l.collateralId === collateralId);
     if (!link) { toast.error("Link not found"); return; }
@@ -1971,13 +1963,13 @@ export function CampaignsPage() {
       qc.invalidateQueries({ queryKey: ["collateral-links", selectedId] });
     } catch { toast.error("Unlink failed"); }
   };
-
+ 
   const linkedCollaterals = collateralLibrary.filter((c) => linkedCollateralIds.has(c.id));
-
+ 
   /* ── MailBridge ── */
   const [mbDialog, setMbDialog] = useState(false);
   const [mbForm, setMbForm] = useState({ name: "", baseUrl: "", provider: "gmail", fromEmail: "", fromName: "" });
-
+ 
   const createMbMut = useMutation({
     mutationFn: (body: Record<string, unknown>) => http.post("/api/v1/mailbridge/config", body),
     onSuccess: () => {
@@ -1988,7 +1980,7 @@ export function CampaignsPage() {
     },
     onError: () => toast.error("Failed to save MailBridge connection"),
   });
-
+ 
   const deleteMbMut = useMutation({
     mutationFn: (id: string) => http.delete(`/api/v1/mailbridge/config/${id}`),
     onSuccess: () => {
@@ -1997,7 +1989,7 @@ export function CampaignsPage() {
     },
     onError: () => toast.error("Delete failed"),
   });
-
+ 
   const handleTestMb = async (cfg: MailBridgeConfig) => {
     try {
       const res = await fetch(`${cfg.baseUrl}/docs`);
@@ -2005,7 +1997,7 @@ export function CampaignsPage() {
       else toast.error(`MailBridge returned status ${res.status}`);
     } catch { toast.error(`Cannot reach MailBridge at ${cfg.baseUrl}`); }
   };
-
+ 
   /* ── Compliance inline save ── */
   const handleComplianceUpdate = async (patch: Record<string, unknown>) => {
     try {
@@ -2014,12 +2006,12 @@ export function CampaignsPage() {
       qc.invalidateQueries({ queryKey: ["campaigns"] });
     } catch { toast.error("Save failed"); }
   };
-
+ 
   /* ── Reply categorization ── */
   const [replyText, setReplyText] = useState("");
   const [replyCategorizing, setReplyCategorizing] = useState(false);
   const [replyResult, setReplyResult] = useState<any>(null);
-
+ 
   const handleCategorizeReply = async () => {
     if (!replyText.trim()) return;
     setReplyCategorizing(true); setReplyResult(null);
@@ -2029,13 +2021,13 @@ export function CampaignsPage() {
       const repliedSeq = sequences.find((s) => s.status === "Replied");
       const anySeq = repliedSeq ?? sequences[0];
       const prospectId = anySeq?.prospectId ?? campaignProspects[0]?.prospectId ?? null;
-
+ 
       if (!anySeq || !prospectId) {
         toast.error("Add prospects and generate sequences first, then paste a reply to categorize.");
         setReplyCategorizing(false);
         return;
       }
-
+ 
       // Step 2: create a ReplyDraft row with the required fields.
       // ReplyDraftCreate requires: sequenceId, prospectId, originalReply.
       const draft = await http.post<any>("/api/v1/reply-drafts", {
@@ -2044,12 +2036,12 @@ export function CampaignsPage() {
         originalReply: replyText,  // correct field name (not replyText)
         category: "other",         // will be overwritten by categorize call below
       });
-
+ 
       // Step 3: call the LLM categorize endpoint on the new draft.
       const result = await http.post<any>(`/api/v1/reply-drafts/${draft.id}/reply-categorize`, {
         originalReply: replyText,
       });
-
+ 
       setReplyResult(result);
       toast.success(`Categorized as: ${result.category ?? "unknown"}`);
     } catch (err: any) {
@@ -2058,7 +2050,7 @@ export function CampaignsPage() {
     }
     setReplyCategorizing(false);
   };
-
+ 
   /* ── Navigate to detail ── */
   const openDetail = (id: string) => {
     setSelectedId(id);
@@ -2066,16 +2058,26 @@ export function CampaignsPage() {
     setDetailTab("prospects");
     setSeqDrafts({});
   };
-
+ 
   const goBack = () => { setView("list"); setSelectedId(""); setSequences([]); };
-
+ 
   // local sequences state for inline editing (separate from queryCache)
   const [localSeqs, setLocalSeqs] = useState<Sequence[]>([]);
   useEffect(() => { setLocalSeqs(sequences); }, [sequences]);
-
+ 
   const setSequences = (s: Sequence[]) => setLocalSeqs(s);
   const displaySeqs = localSeqs.length > 0 ? localSeqs : sequences;
-
+ 
+  // ── Tab pagination ────────────────────────────────────────────────────────
+  const prospectsPagination = usePagination({ items: campaignProspects, initialPageSize: 25 });
+  const seqsPagination = usePagination({ items: displaySeqs, initialPageSize: 20 });
+  // Reset both paginations when the selected campaign changes.
+  useEffect(() => {
+    prospectsPagination.reset();
+    seqsPagination.reset();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
+ 
   if (campaignsQ.isLoading) {
     return (
       <div className="space-y-4">
@@ -2084,7 +2086,7 @@ export function CampaignsPage() {
       </div>
     );
   }
-
+ 
   /* ═══════════════════════════════════════════════════════ RENDER ══════════ */
   return (
     <div className="space-y-5">
@@ -2104,7 +2106,7 @@ export function CampaignsPage() {
               <Button size="sm" onClick={openCreate}><Plus className="h-4 w-4 mr-2" /> New Campaign</Button>
             </div>
           </div>
-
+ 
           {/* ── Campaign card grid ── */}
           {campaigns.length === 0 ? (
             <EmptyState title="No Campaigns Yet" description="Create a campaign to define your sender identity, link prospects, and send AI-generated email sequences." />
@@ -2191,7 +2193,7 @@ export function CampaignsPage() {
               <Trash2 className="h-3 w-3" />
             </Button>
           </div>
-
+ 
           {/* Sender identity card */}
           {selectedCampaign?.senderOffer && (
             <Card className="border-primary/20 bg-primary/5">
@@ -2212,7 +2214,7 @@ export function CampaignsPage() {
               </CardContent>
             </Card>
           )}
-
+ 
           {/* ── 6-tab detail ── */}
           <Tabs value={detailTab} onValueChange={setDetailTab}>
             <TabsList className="flex-wrap">
@@ -2223,7 +2225,7 @@ export function CampaignsPage() {
               <TabsTrigger value="compliance"><ShieldCheck className="h-3 w-3 mr-1" /> Compliance</TabsTrigger>
               <TabsTrigger value="tools"><Wand2 className="h-3 w-3 mr-1" /> Tools</TabsTrigger>
             </TabsList>
-
+ 
             {/* ══ C-3: PROSPECTS TAB ══ */}
             <TabsContent value="prospects" className="space-y-4">
               {/* <div className="flex items-center justify-between">
@@ -2247,7 +2249,7 @@ export function CampaignsPage() {
                           </tr>
                         </thead>
                         <tbody>
-                          {campaignProspects.map((cp) => (
+                          {prospectsPagination.pageItems.map((cp) => (
                             <tr key={cp.id} className="border-t">
                               <td className="p-3 font-medium">{cp.prospect?.firstName} {cp.prospect?.lastName}</td>
                               <td className="p-3 hidden sm:table-cell">{cp.prospect?.company ?? "—"}</td>
@@ -2263,10 +2265,18 @@ export function CampaignsPage() {
                         </tbody>
                       </table>
                     </ScrollArea>
+                    <Pagination
+                      page={prospectsPagination.page}
+                      pageSize={prospectsPagination.pageSize}
+                      total={prospectsPagination.total}
+                      onPageChange={prospectsPagination.setPage}
+                      onPageSizeChange={prospectsPagination.setPageSize}
+                      pageSizeOptions={[10, 25, 50, 100]}
+                    />
                   </CardContent>
                 </Card>
               )}
-
+ 
               {/* Add Prospects Dialog */}
               <Dialog open={addProspectOpen} onOpenChange={setAddProspectOpen}>
                 <DialogHeader>
@@ -2314,7 +2324,7 @@ export function CampaignsPage() {
                 </DialogFooter>
               </Dialog>
             </TabsContent>
-
+ 
             {/* ══ C-4: SEQUENCES TAB ══ */}
             <TabsContent value="sequences" className="space-y-4">
               {/* Generation controls */}
@@ -2351,14 +2361,14 @@ export function CampaignsPage() {
                   )}
                 </CardContent>
               </Card>
-
+ 
               {/* Sequence timeline */}
               {displaySeqs.length === 0 ? (
                 <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">Select prospects then generate sequences to see emails here.</CardContent></Card>
               ) : (
                 <div className="relative">
                   <div className="absolute left-6 top-0 bottom-0 w-px bg-border" />
-                  {displaySeqs.map((seq, i) => {
+                  {seqsPagination.pageItems.map((seq, i) => {
                     const draft = seqDrafts[seq.id];
                     const subject = draft?.subjectLine ?? seq.subjectLine ?? "";
                     const body = draft?.bodyCopy ?? seq.bodyCopy ?? "";
@@ -2410,10 +2420,18 @@ export function CampaignsPage() {
                       </div>
                     );
                   })}
+                  <Pagination
+                    page={seqsPagination.page}
+                    pageSize={seqsPagination.pageSize}
+                    total={seqsPagination.total}
+                    onPageChange={seqsPagination.setPage}
+                    onPageSizeChange={seqsPagination.setPageSize}
+                    pageSizeOptions={[10, 20, 50]}
+                  />
                 </div>
               )}
             </TabsContent>
-
+ 
             {/* ══ C-5: COLLATERALS TAB ══ */}
             <TabsContent value="collaterals" className="space-y-4">
               <div className="flex items-center justify-between">
@@ -2444,7 +2462,7 @@ export function CampaignsPage() {
                   ))}
                 </div>
               )}
-
+ 
               {/* Add collateral dialog */}
               <Dialog open={collateralDialog} onOpenChange={setCollateralDialog}>
                 <DialogHeader>
@@ -2473,7 +2491,7 @@ export function CampaignsPage() {
                   </Button>
                 </DialogFooter>
               </Dialog>
-
+ 
               {/* Link from library dialog */}
               <Dialog open={linkCollateralOpen} onOpenChange={setLinkCollateralOpen}>
                 <DialogHeader>
@@ -2498,7 +2516,7 @@ export function CampaignsPage() {
                 </DialogFooter>
               </Dialog>
             </TabsContent>
-
+ 
             {/* ══ C-6: EMAIL SENDING TAB ══ */}
             <TabsContent value="mailbridge" className="space-y-4">
               <div className="flex items-center justify-between">
@@ -2532,7 +2550,7 @@ export function CampaignsPage() {
                   ))}
                 </div>
               )}
-
+ 
               {/* Add MailBridge dialog */}
               <Dialog open={mbDialog} onOpenChange={setMbDialog}>
                 <DialogHeader>
@@ -2575,13 +2593,13 @@ export function CampaignsPage() {
                 </DialogFooter>
               </Dialog>
             </TabsContent>
-
+ 
             {/* ══ C-7: COMPLIANCE TAB ══ */}
             <TabsContent value="compliance" className="space-y-4">
               <div className="p-3 rounded-lg bg-muted text-xs text-muted-foreground">
                 <b>CAN-SPAM Act</b> requires: (1) a physical mailing address, (2) a clear unsubscribe mechanism, (3) no deceptive subject lines. <b>GDPR</b> requires: lawful basis, right to erasure, and data minimization.
               </div>
-
+ 
               <Card>
                 <CardHeader className="pb-3"><CardTitle className="text-sm">CAN-SPAM / GDPR Settings</CardTitle></CardHeader>
                 <CardContent className="space-y-4">
@@ -2616,7 +2634,7 @@ export function CampaignsPage() {
                   </div>
                 </CardContent>
               </Card>
-
+ 
               {/* Webhook URL card */}
               <Card>
                 <CardHeader className="pb-3"><CardTitle className="text-sm flex items-center gap-2"><Webhook className="h-4 w-4" /> MailBridge Webhook</CardTitle></CardHeader>
@@ -2634,7 +2652,7 @@ export function CampaignsPage() {
                 </CardContent>
               </Card>
             </TabsContent>
-
+ 
             {/* ══ C-8: TOOLS TAB ══ */}
             <TabsContent value="tools" className="space-y-4">
               <Card>
@@ -2677,7 +2695,7 @@ export function CampaignsPage() {
           </Tabs>
         </>
       )}
-
+ 
       {/* ══════════════ C-1: CREATE / EDIT DIALOG ══════════════ */}
       <Dialog open={dialogOpen} onOpenChange={(o) => { setDialogOpen(o); if (!o) resetForm(); }}>
         <DialogHeader>
@@ -2719,7 +2737,7 @@ export function CampaignsPage() {
               </div>
               <div className="space-y-1"><Label className="text-xs">Target Audience</Label><Input placeholder="e.g. VP Engineering at Series A-B SaaS companies" value={form.targetAudience} onChange={(e) => setForm((f) => ({ ...f, targetAudience: e.target.value }))} /></div>
             </TabsContent>
-
+ 
             <TabsContent value="sender" className="space-y-4 py-4 px-1">
               <div className="p-3 rounded-lg bg-muted text-xs text-muted-foreground">
                 <b>Why this matters:</b> The AI uses your sender identity and product description to write accurate, personalized emails. The more detail you provide, the better the output.
@@ -2738,7 +2756,7 @@ export function CampaignsPage() {
                 <p className="text-xs text-muted-foreground">Key context the AI uses to understand what you sell. Be specific about features, outcomes, and differentiators.</p>
               </div>
             </TabsContent>
-
+ 
             <TabsContent value="config" className="space-y-4 py-4 px-1">
               <div className="space-y-1">
                 <Label className="text-xs">ICP Profile</Label>
@@ -2782,7 +2800,7 @@ export function CampaignsPage() {
           </Button>
         </DialogFooter>
       </Dialog>
-
+ 
       {/* ══════════════ C-9: PRE-FLIGHT DIALOG ══════════════ */}
       <Dialog open={preflightOpen} onOpenChange={(o) => { setPreflightOpen(o); if (!o) { setPreflightResult(null); setPendingActivateId(""); } }}>
         <DialogHeader>
@@ -2825,7 +2843,7 @@ export function CampaignsPage() {
           </Button>
         </DialogFooter>
       </Dialog>
-
+ 
       {/* Delete confirm */}
       <AlertDialog open={deleteTarget !== null} onOpenChange={(o) => { if (!o) setDeleteTarget(null); }}>
         <AlertDialogContent>

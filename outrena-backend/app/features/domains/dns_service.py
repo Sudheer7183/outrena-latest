@@ -129,18 +129,38 @@ def verify_dkim(domain: str, selector: str = "default") -> tuple[bool, str | Non
     convention) — callers should pass the actual selector configured by the
     sending MTA when known.
     """
-    if not selector:
-        selector = "default"
-    name = f"{selector}._domainkey.{domain}"
-    record = _first_matching_txt(name, "v=dkim1")
-    if record is None:
-        # Some providers omit the version tag; accept any p= key as a fallback.
-        for raw in resolve_txt(name):
-            candidate = raw.strip().strip('"').strip()
-            if "p=" in candidate:
-                record = candidate
-                break
-    return (record is not None, record)
+    # if not selector:
+    #     selector = "default"
+    # name = f"{selector}._domainkey.{domain}"
+    # record = _first_matching_txt(name, "v=dkim1")
+    # if record is None:
+    #     # Some providers omit the version tag; accept any p= key as a fallback.
+    #     for raw in resolve_txt(name):
+    #         candidate = raw.strip().strip('"').strip()
+    #         if "p=" in candidate:
+    #             record = candidate
+    #             break
+    # return (record is not None, record)
+    COMMON_SELECTORS = ["default", "google", "zoho", "s1", "s2", "mail", "k1", "dkim"]
+    selectors_to_try = [selector] if selector else []
+    for s in COMMON_SELECTORS:
+        if s not in selectors_to_try:
+            selectors_to_try.append(s)
+
+    for sel in selectors_to_try:
+        name = f"{sel}._domainkey.{domain}"
+        record = _first_matching_txt(name, "v=dkim1")
+        if record is None:
+            # Some providers omit the version tag; accept any p= key as a fallback.
+            for raw in resolve_txt(name):
+                candidate = raw.strip().strip('"').strip()
+                if "p=" in candidate:
+                    record = candidate
+                    break
+        if record is not None:
+            return (True, record)
+
+    return (False, None)
 
 
 def verify_dmarc(domain: str) -> tuple[bool, str | None]:
